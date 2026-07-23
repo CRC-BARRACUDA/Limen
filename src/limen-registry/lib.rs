@@ -15,12 +15,14 @@
 //! hardening phase; today we compute and lock a SHA-256 digest of every
 //! installed module so tampering is at least detectable.
 
+mod github;
 mod lockfile;
 mod registry;
 mod source;
 mod trust;
 mod util;
 
+pub use github::{list_org_modules, RemoteModule};
 pub use lockfile::{LockEntry, Lockfile};
 pub use registry::{InstallReport, Registry, VerifyItem, VerifyStatus};
 pub use source::SourceSpec;
