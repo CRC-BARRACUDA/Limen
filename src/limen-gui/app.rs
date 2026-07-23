@@ -11,11 +11,12 @@
 //!
 //! All engine work is on the [`Worker`] thread, so the UI never blocks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use eframe::egui;
 use limen_core::ModuleSpec;
+use limen_registry::RemoteModule;
 
 use crate::ui;
 use crate::worker::{Command, Event, RunTag, Worker};
@@ -29,11 +30,21 @@ enum Nav {
     DemoUi,
 }
 
+/// The Modules-page installed/available filter.
+#[derive(Clone, Copy, PartialEq)]
+enum ModuleFilter {
+    All,
+    Installed,
+    Available,
+}
+
 pub struct LimenApp {
     worker: Worker,
     status: String,
     fatal: Option<String>,
     modules: Vec<ModuleSpec>,
+    /// Names of installed modules that came from a git install (vs. manual).
+    git_installed: HashSet<String>,
 
     nav: Nav,
     view: Option<ui::View>,
@@ -44,8 +55,12 @@ pub struct LimenApp {
 
     // Modules page state
     search: String,
-    category: String,
-    install_ref: String,
+    filter: ModuleFilter,
+    // Modules available in the GitHub org
+    remote: Vec<RemoteModule>,
+    remote_error: Option<String>,
+    remote_loading: bool,
+    remote_fetched: bool,
 }
 
 impl LimenApp {
@@ -56,6 +71,7 @@ impl LimenApp {
             status: "starting modules…".to_string(),
             fatal: None,
             modules: Vec::new(),
+            git_installed: HashSet::new(),
             nav: Nav::About,
             view: None,
             view_error: None,
@@ -63,17 +79,31 @@ impl LimenApp {
             output: String::new(),
             busy: false,
             search: String::new(),
-            category: "All".to_string(),
-            install_ref: String::new(),
+            filter: ModuleFilter::All,
+            remote: Vec::new(),
+            remote_error: None,
+            remote_loading: false,
+            remote_fetched: false,
         }
     }
 
     fn drain_events(&mut self) {
         while let Ok(evt) = self.worker.rx.try_recv() {
             match evt {
-                Event::Ready(m) | Event::Modules(m) => {
-                    self.modules = m;
+                Event::Ready(snap) | Event::Modules(snap) => {
+                    self.modules = snap.specs;
+                    self.git_installed = snap.git_installed.into_iter().collect();
                     self.status = format!("{} module(s) loaded", self.modules.len());
+                }
+                Event::RemoteModules(result) => {
+                    self.remote_loading = false;
+                    match result {
+                        Ok(list) => {
+                            self.remote = list;
+                            self.remote_error = None;
+                        }
+                        Err(e) => self.remote_error = Some(e),
+                    }
                 }
                 Event::RunDone { tag, result } => match tag {
                     RunTag::Ui { module } => {
@@ -192,6 +222,7 @@ impl eframe::App for LimenApp {
             });
         if reload {
             self.worker.send(Command::Refresh);
+            self.remote_fetched = false;
         }
 
         // Sidebar
@@ -238,8 +269,8 @@ impl eframe::App for LimenApp {
         let mut go_modules = false;
         {
             let LimenApp {
-                nav, modules, view, view_error, inputs, output, busy, fatal, search, category,
-                install_ref, ..
+                nav, modules, git_installed, view, view_error, inputs, output, busy, fatal,
+                search, filter, remote, remote_error, remote_loading, ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(err) = fatal {
@@ -251,8 +282,8 @@ impl eframe::App for LimenApp {
                 match nav {
                     Nav::About => about_view(ui),
                     Nav::Modules => modules_page(
-                        ui, modules, search, category, install_ref,
-                        &mut open_module, &mut remove_module, &mut add_module,
+                        ui, modules, git_installed, remote, *remote_loading, remote_error, filter,
+                        search, &mut open_module, &mut remove_module, &mut add_module,
                     ),
                     Nav::Module(name) => {
                         if ui.link("‹ Modules").clicked() {
@@ -293,89 +324,111 @@ impl eframe::App for LimenApp {
             self.dispatch(a);
         }
 
+        // Fetch the org's module list the first time we land on the Modules page.
+        if matches!(self.nav, Nav::Modules) && !self.remote_fetched {
+            self.remote_fetched = true;
+            self.remote_loading = true;
+            self.worker.send(Command::ListRemote);
+        }
+
         ctx.request_repaint_after(Duration::from_millis(150));
     }
 }
 
 // --------------------------------------------------------------------------- //
 
-/// The Modules page — a Zed-Extensions-style list of installed modules.
+/// The Modules page — a Zed-Extensions-style list: installed modules plus the
+/// ones available in the GitHub org (installable in a click).
 #[allow(clippy::too_many_arguments)]
 fn modules_page(
     ui: &mut egui::Ui,
     modules: &[ModuleSpec],
+    git_installed: &HashSet<String>,
+    remote: &[RemoteModule],
+    remote_loading: bool,
+    remote_error: &Option<String>,
+    filter: &mut ModuleFilter,
     search: &mut String,
-    category: &mut String,
-    install_ref: &mut String,
     open: &mut Option<String>,
     remove: &mut Option<String>,
     add: &mut Option<String>,
 ) {
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.heading("Modules");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can_add = !install_ref.trim().is_empty();
-            if ui.add_enabled(can_add, egui::Button::new("Install")).clicked() {
-                *add = Some(install_ref.trim().to_string());
-                install_ref.clear();
-            }
-            ui.add(
-                egui::TextEdit::singleline(install_ref)
-                    .hint_text("owner/repo@version  or  ./path")
-                    .desired_width(260.0),
-            );
-        });
-    });
+    ui.heading("Modules");
     ui.add_space(10.0);
 
-    // Search box.
+    // One universal search across installed (local) and org (remote) modules.
     ui.add(
         egui::TextEdit::singleline(search)
-            .hint_text("Search modules…")
+            .hint_text("Search modules — local and in the org…")
             .desired_width(f32::INFINITY),
     );
     ui.add_space(8.0);
 
-    // Category chips, derived from capability namespaces (the part before the dot).
-    let mut categories = vec!["All".to_string()];
-    for m in modules {
-        for cap in &m.capabilities {
-            if let Some((ns, _)) = cap.split_once('.') {
-                if !categories.iter().any(|c| c == ns) {
-                    categories.push(ns.to_string());
-                }
+    // Installed / Available filter.
+    ui.horizontal(|ui| {
+        for (value, label) in [
+            (ModuleFilter::All, "All"),
+            (ModuleFilter::Installed, "Installed"),
+            (ModuleFilter::Available, "Available"),
+        ] {
+            let text = if *filter == value {
+                egui::RichText::new(label).color(ui::color::ACCENT)
+            } else {
+                egui::RichText::new(label)
+            };
+            if ui.selectable_label(*filter == value, text).clicked() {
+                *filter = value;
             }
         }
-    }
-    ui.horizontal_wrapped(|ui| {
-        for cat in &categories {
-            let label = if *category == *cat {
-                egui::RichText::new(cat).color(ui::color::ACCENT)
-            } else {
-                egui::RichText::new(cat)
-            };
-            if ui.selectable_label(*category == *cat, label).clicked() {
-                *category = cat.clone();
-            }
+        if remote_loading {
+            ui.add_space(8.0);
+            ui.spinner();
         }
     });
     ui.add_space(6.0);
     ui.separator();
 
     let query = search.to_lowercase();
+    let installed_names: HashSet<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(4.0);
         let mut shown = 0;
-        for m in modules {
-            if !matches_filter(m, &query, category) {
-                continue;
+
+        // Installed modules.
+        if *filter != ModuleFilter::Available {
+            for m in modules {
+                if !module_matches(m, &query) {
+                    continue;
+                }
+                module_card(ui, m, git_installed.contains(&m.name), open, remove);
+                ui.add_space(10.0);
+                shown += 1;
             }
-            module_card(ui, m, open, remove);
-            ui.add_space(10.0);
-            shown += 1;
         }
-        if shown == 0 {
+
+        // Available in the org (not already installed).
+        if *filter != ModuleFilter::Installed {
+            for r in remote {
+                if installed_names.contains(r.name.as_str()) || !remote_matches(r, &query) {
+                    continue;
+                }
+                available_card(ui, r, add);
+                ui.add_space(10.0);
+                shown += 1;
+            }
+        }
+
+        if let Some(err) = remote_error {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(format!("Couldn't list the org: {err}"))
+                    .small()
+                    .color(ui::color::TEXT_MUTED),
+            );
+        }
+        if shown == 0 && !remote_loading {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("No modules match.").color(ui::color::TEXT_MUTED));
@@ -384,26 +437,26 @@ fn modules_page(
     });
 }
 
-fn matches_filter(m: &ModuleSpec, query: &str, category: &str) -> bool {
-    let in_category = category == "All"
-        || m.capabilities
-            .iter()
-            .any(|c| c.split_once('.').map(|(ns, _)| ns == category).unwrap_or(false));
-    if !in_category {
-        return false;
-    }
-    if query.is_empty() {
-        return true;
-    }
-    m.name.to_lowercase().contains(query)
+fn module_matches(m: &ModuleSpec, query: &str) -> bool {
+    query.is_empty()
+        || m.name.to_lowercase().contains(query)
         || m.description.as_deref().unwrap_or("").to_lowercase().contains(query)
         || m.capabilities.iter().any(|c| c.to_lowercase().contains(query))
 }
 
-/// A single Zed-style module card, in its own rounded box.
+fn remote_matches(r: &RemoteModule, query: &str) -> bool {
+    query.is_empty()
+        || r.name.to_lowercase().contains(query)
+        || r.description.as_deref().unwrap_or("").to_lowercase().contains(query)
+}
+
+/// A single installed-module card, in its own rounded box. `from_git` shows the
+/// GitHub action only for modules installed from a repo (manual ones get just
+/// Open + Remove).
 fn module_card(
     ui: &mut egui::Ui,
     m: &ModuleSpec,
+    from_git: bool,
     open: &mut Option<String>,
     remove: &mut Option<String>,
 ) {
@@ -469,12 +522,69 @@ fn module_card(
                         if ui.add_sized(bw, egui::Button::new("Remove")).clicked() {
                             *remove = Some(m.name.clone());
                         }
-                        if let Some(repo) = &m.repo {
-                            if ui.add_sized(bw, egui::Button::new("GitHub ↗")).clicked() {
-                                ui.output_mut(|o| {
-                                    o.open_url = Some(egui::OpenUrl::new_tab(repo_url(repo)));
-                                });
+                        // GitHub only for git-installed modules.
+                        if from_git {
+                            if let Some(repo) = &m.repo {
+                                if ui.add_sized(bw, egui::Button::new("GitHub ↗")).clicked() {
+                                    ui.output_mut(|o| {
+                                        o.open_url = Some(egui::OpenUrl::new_tab(repo_url(repo)));
+                                    });
+                                }
                             }
+                        }
+                    },
+                );
+            });
+        });
+}
+
+/// An "available in the org, not installed" card, with an Install action.
+fn available_card(ui: &mut egui::Ui, r: &RemoteModule, add: &mut Option<String>) {
+    egui::Frame::none()
+        .fill(ui::color::BG_ELEVATED)
+        .stroke(egui::Stroke::new(1.0_f32, ui::color::BORDER))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                let right_w = 112.0;
+                let spacing = ui.spacing().item_spacing.x;
+                let left_w = (ui.available_width() - right_w - spacing).max(200.0);
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_width(left_w);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(&r.name).size(16.0).strong());
+                            badge(ui, "not installed");
+                        });
+                        if let Some(desc) = &r.description {
+                            ui.add_space(6.0);
+                            ui.label(desc);
+                        }
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new(&r.repo).small().color(ui::color::TEXT_MUTED));
+                    },
+                );
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Max),
+                    |ui| {
+                        let bw = egui::vec2(96.0, ui.spacing().interact_size.y);
+                        let install = egui::Button::new(
+                            egui::RichText::new("Install").color(ui::color::ON_ACCENT),
+                        )
+                        .fill(ui::color::ACCENT);
+                        if ui.add_sized(bw, install).clicked() {
+                            *add = Some(r.repo.clone());
+                        }
+                        if ui.add_sized(bw, egui::Button::new("GitHub ↗")).clicked() {
+                            let url = r.url.clone();
+                            ui.output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url)));
                         }
                     },
                 );
