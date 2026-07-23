@@ -1,0 +1,17 @@
+[package]
+name = "limen-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Limen module runtime: spawn/load modules, resolve dependencies, broker inter-module calls"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+limen-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+semver = { workspace = true }
+libloading = { workspace = true }
