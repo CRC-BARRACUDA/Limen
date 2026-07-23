@@ -1,0 +1,18 @@
+[package]
+name = "limen-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Limen desktop GUI (egui/eframe)"
+
+[[bin]]
+name = "Limen"
+path = "main.rs"
+
+[dependencies]
+limen-core = { workspace = true }
+limen-registry = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+eframe = { workspace = true }
