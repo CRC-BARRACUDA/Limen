@@ -1,0 +1,18 @@
+[module]
+name = "caller"
+version = "0.1.0"
+language = "python"
+entry = "main.py"
+
+[provides]
+capabilities = ["greet.caller"]
+
+# Runtime wiring: which capability this module calls.
+[requires.capabilities]
+"greet.hello" = ">=1.0"
+
+# Package graph: which module the manager must install so that capability exists.
+# Here it's a sibling by path so the whole flow works offline; in the real world
+# this would be `greeter = "owner/limen-greeter@1.0.0"`.
+[dependencies]
+greeter = { path = "../greeter" }
