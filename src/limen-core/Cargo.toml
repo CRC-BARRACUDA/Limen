@@ -1,0 +1,15 @@
+[package]
+name = "limen-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Limen engine: config, state paths, and the run/inspect API over the module host"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+limen-host = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
