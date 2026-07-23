@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "src/limen-proto",
+    "src/limen-host",
+    "src/limen-core",
+    "src/limen-registry",
+    "src/limen-sdk-rust",
+    "src/limen-cli",
+    "src/limen-gui",
+]
+# Modules are NOT part of this workspace. They're independent crates in
+# ../limen-modules, each built on its own (`cargo build` in its dir) and loaded
+# dynamically by the host from ~/.limen/modules.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+toml = "0.8"
+semver = "1"
+libloading = "0.8"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+eframe = "0.28"
+limen-proto = { path = "src/limen-proto" }
+limen-host = { path = "src/limen-host" }
+limen-core = { path = "src/limen-core" }
+limen-registry = { path = "src/limen-registry" }
+limen-sdk-rust = { path = "src/limen-sdk-rust" }
