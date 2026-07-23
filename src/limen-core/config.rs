@@ -17,7 +17,14 @@ pub struct Config {
     /// subdirectories) or a single module directory.
     #[serde(default)]
     pub module_dirs: Vec<PathBuf>,
+
+    /// GitHub organization to browse/install modules from.
+    #[serde(default)]
+    pub default_org: Option<String>,
 }
+
+/// The org used when none is configured.
+pub const DEFAULT_ORG: &str = "CRC-BARRACUDA";
 
 impl Config {
     /// Load settings, or defaults if the file is absent.
