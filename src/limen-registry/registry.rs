@@ -2,11 +2,11 @@
 //! lockfile.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
-use limen_proto::Manifest;
+use limen_proto::{Abi, Language, Manifest};
 
 use crate::lockfile::{LockEntry, Lockfile};
 use crate::source::SourceSpec;
@@ -217,6 +217,25 @@ impl Registry {
             return Ok(());
         }
 
+        // For a native module installed from GitHub, fetch the prebuilt library
+        // for this platform so the operator needs no toolchain. If there's no
+        // matching release asset, the module still installs as source (and must
+        // be built).
+        if manifest.module.language == Language::Native && manifest.module.abi == Abi::Native {
+            if let SourceSpec::Git { repo, version } = &spec {
+                match fetch_native_asset(repo, &manifest.module.entry, version.as_deref(), &tempdir)
+                {
+                    Ok(lib) => eprintln!("[registry] {name}: downloaded prebuilt {lib}"),
+                    Err(e) => eprintln!(
+                        "[registry] {name}: no prebuilt library for {}/{} ({e}); \
+                         installed as source — build it with `cargo build`",
+                        std::env::consts::OS,
+                        std::env::consts::ARCH
+                    ),
+                }
+            }
+        }
+
         // Record before recursing so a dependency cycle terminates.
         acc.insert(
             name.clone(),
@@ -246,6 +265,118 @@ impl Registry {
     }
 }
 
+// --------------------------------------------------------------------------- //
+// Prebuilt native-library download.
+// --------------------------------------------------------------------------- //
+
+/// The GitHub `owner/repo` slug from a repo ref (short form or full URL).
+fn github_slug(repo: &str) -> &str {
+    repo.strip_prefix("https://github.com/")
+        .or_else(|| repo.strip_prefix("http://github.com/"))
+        .unwrap_or(repo)
+        .trim_end_matches(".git")
+}
+
+/// The filename the host expects for the loadable library, e.g.
+/// `liblocal_devices.so` (unix) / `local_devices.dll` (windows).
+fn native_lib_filename(entry: &str) -> String {
+    format!(
+        "{}{entry}{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    )
+}
+
+/// Fetch the list of assets `(name, download_url)` from a GitHub release. Uses
+/// the release for `version` (a git tag) if given, else the latest release.
+fn release_assets(slug: &str, version: Option<&str>) -> Result<Vec<(String, String)>> {
+    let url = match version {
+        Some(tag) => format!("https://api.github.com/repos/{slug}/releases/tags/{tag}"),
+        None => format!("https://api.github.com/repos/{slug}/releases/latest"),
+    };
+    let output = std::process::Command::new("curl")
+        .args([
+            "-sSL",
+            "-H",
+            "User-Agent: limen",
+            "-H",
+            "Accept: application/vnd.github+json",
+            &url,
+        ])
+        .output()
+        .context("running curl")?;
+    if !output.status.success() {
+        bail!("curl failed fetching release");
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parsing release JSON")?;
+    if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
+        bail!("GitHub: {msg}"); // e.g. "Not Found" when there's no release
+    }
+    let assets = json
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    Some((
+                        a.get("name")?.as_str()?.to_string(),
+                        a.get("browser_download_url")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(assets)
+}
+
+/// Pick the release asset matching this platform's library: it must end with the
+/// platform's extension (`.so`/`.dll`/`.dylib`); an arch-tagged name is preferred.
+fn match_platform_asset(assets: &[(String, String)]) -> Option<&(String, String)> {
+    let suffix = std::env::consts::DLL_SUFFIX;
+    let arch = std::env::consts::ARCH;
+    assets
+        .iter()
+        .find(|(n, _)| n.ends_with(suffix) && n.contains(arch))
+        .or_else(|| assets.iter().find(|(n, _)| n.ends_with(suffix)))
+}
+
+/// List `repo`'s release files, pick the one for this platform, and download it
+/// into `dest_dir` named as the host expects. Returns the filename on success.
+fn fetch_native_asset(
+    repo: &str,
+    entry: &str,
+    version: Option<&str>,
+    dest_dir: &Path,
+) -> Result<String> {
+    let slug = github_slug(repo);
+    let assets = release_assets(slug, version)?;
+    if assets.is_empty() {
+        bail!("release has no attached files");
+    }
+    let (name, url) = match_platform_asset(&assets).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no {} asset among: {}",
+            std::env::consts::DLL_SUFFIX,
+            assets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+        )
+    })?;
+
+    let filename = native_lib_filename(entry);
+    let dest = dest_dir.join(&filename);
+    let status = std::process::Command::new("curl")
+        .args(["-fsSL", "-o"])
+        .arg(&dest)
+        .arg(url)
+        .status()
+        .context("running curl")?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&dest);
+        bail!("downloading {name} failed");
+    }
+    Ok(format!("{name} → {filename}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +388,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn slug_and_asset_matching() {
+        assert_eq!(github_slug("owner/repo"), "owner/repo");
+        assert_eq!(github_slug("https://github.com/owner/repo.git"), "owner/repo");
+
+        let lib = native_lib_filename("local_devices");
+        assert!(lib.contains("local_devices"));
+        assert!(lib.ends_with(std::env::consts::DLL_SUFFIX));
+
+        // Among a realistic asset set, pick the one for this platform's extension.
+        let assets = vec![
+            ("local_devices-linux-x86_64.so".to_string(), "u1".to_string()),
+            ("local_devices-windows-x86_64.dll".to_string(), "u2".to_string()),
+            ("local_devices-macos-aarch64.dylib".to_string(), "u3".to_string()),
+            ("README.txt".to_string(), "u4".to_string()),
+        ];
+        let picked = match_platform_asset(&assets).unwrap();
+        assert!(picked.0.ends_with(std::env::consts::DLL_SUFFIX));
     }
 
     fn write_module(dir: &Path, body: &str) {
