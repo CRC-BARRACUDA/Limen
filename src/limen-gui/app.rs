@@ -30,6 +30,7 @@ enum Tab {
     Module(String),
     Settings,
     Developer,
+    Update,
 }
 
 impl Tab {
@@ -41,6 +42,7 @@ impl Tab {
             Tab::Module(n) => n.clone(),
             Tab::Settings => "Settings".into(),
             Tab::Developer => "Developer".into(),
+            Tab::Update => "Update".into(),
         }
     }
 }
@@ -113,6 +115,11 @@ pub struct LimenApp {
 
     /// Global UI scale as a percentage (persisted in settings).
     ui_scale: f32,
+
+    /// An available app update (from the background check), if any.
+    update: Option<limen_core::UpdateInfo>,
+    /// True while an update download/install is in flight.
+    updating: bool,
 }
 
 impl LimenApp {
@@ -149,6 +156,8 @@ impl LimenApp {
                 let pct = limen_core::Config::load().map(|c| c.ui_scale_percent).unwrap_or(0);
                 if pct == 0 { 100.0 } else { pct as f32 }
             },
+            update: None,
+            updating: false,
         }
     }
 
@@ -376,6 +385,10 @@ impl LimenApp {
                     self.status = msg;
                 }
                 Event::Log(line) => self.push_log(line),
+                Event::UpdateAvailable(info) => {
+                    self.push_log(format!("[update] v{} available", info.latest));
+                    self.update = Some(info);
+                }
                 Event::Fatal(e) => {
                     self.push_log(format!("[fatal] {e}"));
                     self.fatal = Some(e);
@@ -470,6 +483,18 @@ impl eframe::App for LimenApp {
                     if ui.button("Modules").clicked() {
                         open_tab = Some(Tab::Modules);
                     }
+                    // "Update available" pill, next to Modules.
+                    if self.update.is_some() {
+                        ui.add_space(6.0);
+                        let pill = egui::Button::new(
+                            egui::RichText::new("● Update available").small().color(ui::color::ON_ACCENT),
+                        )
+                        .fill(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c))
+                        .rounding(egui::Rounding::same(10.0_f32));
+                        if ui.add(pill).on_hover_text("A newer version is available").clicked() {
+                            open_tab = Some(Tab::Update);
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("🛠").on_hover_text("Developer").clicked() {
                             open_tab = Some(Tab::Developer);
@@ -532,7 +557,10 @@ impl eframe::App for LimenApp {
         let mut remove_module: Option<String> = None;
         let mut add_module: Option<String> = None;
         let mut toggle_pin: Option<String> = None;
+        let mut do_update = false;
         let active_tab = self.active_tab();
+        let update_info = self.update.clone();
+        let updating = self.updating;
         {
             let LimenApp {
                 modules, git_installed, pinned, view, view_error, inputs, output, busy_action,
@@ -571,8 +599,18 @@ impl eframe::App for LimenApp {
                     Some(Tab::Developer) => {
                         developer_view(ui, dev_tab, inputs, logs, log_autoscroll)
                     }
+                    Some(Tab::Update) => {
+                        update_view(ui, update_info.as_ref(), updating, &mut do_update)
+                    }
                 }
             });
+        }
+
+        if do_update {
+            if let Some(info) = self.update.clone() {
+                self.updating = true;
+                self.worker.send(Command::ApplyUpdate(info));
+            }
         }
 
         // Apply tab intents.
@@ -704,6 +742,59 @@ impl eframe::App for LimenApp {
 }
 
 // --------------------------------------------------------------------------- //
+
+/// The Update tab: current/latest versions + an Update button.
+fn update_view(
+    ui: &mut egui::Ui,
+    info: Option<&limen_core::UpdateInfo>,
+    updating: bool,
+    do_update: &mut bool,
+) {
+    ui.add_space(4.0);
+    ui.heading("Update");
+    ui.separator();
+    ui.add_space(8.0);
+
+    let Some(info) = info else {
+        ui.label(egui::RichText::new("Limen is up to date.").color(ui::color::TEXT_MUTED));
+        return;
+    };
+
+    ui.label(
+        egui::RichText::new(format!("A new version is available: v{} → v{}", info.current, info.latest))
+            .size(15.0),
+    );
+    if !info.url.is_empty() {
+        ui.add_space(2.0);
+        ui.hyperlink_to("Release notes ↗", &info.url);
+    }
+    if !info.notes.trim().is_empty() {
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+            ui.label(egui::RichText::new(info.notes.trim()).color(ui::color::TEXT_MUTED));
+        });
+    }
+
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        let btn = egui::Button::new(egui::RichText::new("Update").color(ui::color::ON_ACCENT))
+            .fill(ui::color::ACCENT);
+        if ui.add_enabled(!updating, btn).clicked() {
+            *do_update = true;
+        }
+        if updating {
+            ui.add_space(6.0);
+            ui.spinner();
+            ui.label(egui::RichText::new("downloading & installing… the app will restart").small());
+        } else if info.asset_url.is_none() {
+            ui.label(
+                egui::RichText::new("no prebuilt binary for this platform — see release notes")
+                    .small()
+                    .color(ui::color::TEXT_MUTED),
+            );
+        }
+    });
+}
 
 /// The Settings tab.
 fn settings_view(ui: &mut egui::Ui, scale: &mut f32, changed: &mut bool) {

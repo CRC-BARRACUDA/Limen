@@ -13,8 +13,10 @@ pub mod config;
 pub mod engine;
 pub mod paths;
 pub mod setup;
+pub mod update;
 
 pub use config::Config;
 pub use engine::Engine;
 pub use limen_host::{runtimes::Runtime, Logger, ModuleSpec};
 pub use setup::{can_install, install_runtime, runtime_report, RuntimeInfo, RuntimeState};
+pub use update::{apply_update, check_update, UpdateInfo};

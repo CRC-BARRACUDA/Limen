@@ -10,7 +10,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
-use limen_core::{install_runtime, paths, Config, Engine, ModuleSpec};
+use limen_core::{
+    apply_update, check_update, install_runtime, paths, Config, Engine, ModuleSpec, UpdateInfo,
+};
 use limen_registry::{list_org_modules, Lockfile, Registry, RemoteModule};
 use serde_json::Value;
 
@@ -38,6 +40,8 @@ pub enum Command {
     AddModule(String),
     /// Uninstall a registry-installed module.
     RemoveModule(String),
+    /// Download and apply an available app update, then restart.
+    ApplyUpdate(UpdateInfo),
     /// Shut modules down and exit the worker.
     Quit,
 }
@@ -63,6 +67,8 @@ pub enum Event {
     Status(String),
     /// A host/module log line (for the debug console).
     Log(String),
+    /// A newer app version is available.
+    UpdateAvailable(UpdateInfo),
     /// The engine could not start.
     Fatal(String),
 }
@@ -76,6 +82,15 @@ impl Worker {
     pub fn spawn(dirs: Vec<PathBuf>) -> Self {
         let (cmd_tx, cmd_rx) = channel::<Command>();
         let (evt_tx, evt_rx) = channel::<Event>();
+        // Background update check (own thread so it never blocks module loading).
+        {
+            let evt_tx = evt_tx.clone();
+            thread::spawn(move || {
+                if let Some(info) = check_update(env!("CARGO_PKG_VERSION")) {
+                    let _ = evt_tx.send(Event::UpdateAvailable(info));
+                }
+            });
+        }
         thread::spawn(move || run(dirs, cmd_rx, evt_tx));
         Worker { tx: cmd_tx, rx: evt_rx }
     }
@@ -217,6 +232,13 @@ fn run(dirs: Vec<PathBuf>, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
                 let _ = evt_tx.send(Event::Status(msg));
                 if !reload(&mut engine, &dirs, &evt_tx) {
                     return;
+                }
+            }
+            Command::ApplyUpdate(info) => {
+                let _ = evt_tx.send(Event::Status("downloading update…".into()));
+                // On success this restarts the process and never returns.
+                if let Err(e) = apply_update(&info) {
+                    let _ = evt_tx.send(Event::Status(format!("update failed: {e}")));
                 }
             }
             Command::Quit => {
