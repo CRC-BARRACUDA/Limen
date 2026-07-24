@@ -274,6 +274,7 @@ fn short_digest(digest: &str) -> String {
 /// Search paths: `--modules-dir` if given, else the configured paths; plus a
 /// local `./modules` for in-repo development.
 fn resolve_search_dirs(cli: &Cli) -> Result<Vec<PathBuf>> {
+    paths::ensure_dirs();
     let mut dirs = if cli.modules_dir.is_empty() {
         Config::load()?.search_dirs()
     } else {
