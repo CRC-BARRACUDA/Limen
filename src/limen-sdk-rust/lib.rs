@@ -204,13 +204,13 @@ pub mod __rt {
 #[macro_export]
 macro_rules! export_module {
     ($ty:ty) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn limen_abi_version() -> u32 {
             $crate::ABI_VERSION
         }
 
         /// # Safety: called only by the Limen host per the ABI contract.
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn limen_module_init(
             host_ctx: *mut ::core::ffi::c_void,
             host_call: $crate::HostCallFn,
@@ -219,7 +219,7 @@ macro_rules! export_module {
         }
 
         /// # Safety: called only by the Limen host per the ABI contract.
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn limen_module_call(
             handle: *mut ::core::ffi::c_void,
             method_ptr: *const u8,
@@ -235,7 +235,7 @@ macro_rules! export_module {
         }
 
         /// # Safety: called only by the Limen host per the ABI contract.
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn limen_module_shutdown(handle: *mut ::core::ffi::c_void) {
             $crate::__rt::shutdown::<$ty>(handle)
         }

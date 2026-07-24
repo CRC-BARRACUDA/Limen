@@ -634,6 +634,7 @@ impl eframe::App for LimenApp {
         let mut open_module: Option<String> = None;
         let mut remove_module: Option<String> = None;
         let mut add_module: Option<String> = None;
+        let mut update_module: Option<String> = None;
         let mut toggle_pin: Option<String> = None;
         let mut do_update = false;
         let active_tab = self.active_tab();
@@ -668,7 +669,7 @@ impl eframe::App for LimenApp {
                     Some(Tab::Modules) => modules_page(
                         ui, modules, git_installed, pinned, remote, *remote_loading, remote_error,
                         installing, filter, search, &mut open_module, &mut remove_module,
-                        &mut add_module, &mut toggle_pin, &mut reload,
+                        &mut add_module, &mut update_module, &mut toggle_pin, &mut reload,
                     ),
                     Some(Tab::Module(name)) => {
                         module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
@@ -723,6 +724,12 @@ impl eframe::App for LimenApp {
             self.installing = Some(reference.clone());
             self.status = format!("installing {reference}…");
             self.worker.send(Command::AddModule(reference));
+        }
+        if let Some(name) = update_module {
+            self.busy = true;
+            self.installing = Some(name.clone());
+            self.status = format!("updating {name}…");
+            self.worker.send(Command::UpdateModule(name));
         }
         if let Some(name) = toggle_pin {
             self.toggle_pin(&name);
@@ -1031,6 +1038,7 @@ fn modules_page(
     open: &mut Option<String>,
     remove: &mut Option<String>,
     add: &mut Option<String>,
+    update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
     reload: &mut bool,
 ) {
@@ -1092,7 +1100,8 @@ fn modules_page(
                 }
                 let is_pinned = pinned.iter().any(|n| n == &m.name);
                 module_card(
-                    ui, m, git_installed.contains(&m.name), is_pinned, open, remove, toggle_pin,
+                    ui, m, git_installed.contains(&m.name), is_pinned, installing, open, remove,
+                    update, toggle_pin,
                 );
                 ui.add_space(10.0);
                 shown += 1;
@@ -1144,15 +1153,21 @@ fn remote_matches(r: &RemoteModule, query: &str) -> bool {
 /// A single installed-module card, in its own rounded box. `from_git` shows the
 /// GitHub action only for modules installed from a repo (manual ones get just
 /// Open + Remove).
+#[allow(clippy::too_many_arguments)]
 fn module_card(
     ui: &mut egui::Ui,
     m: &ModuleSpec,
     from_git: bool,
     pinned: bool,
+    installing: &Option<String>,
     open: &mut Option<String>,
     remove: &mut Option<String>,
+    update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
 ) {
+    // This card is mid-update; another install/update is running somewhere.
+    let this_busy = installing.as_deref() == Some(m.name.as_str());
+    let any_busy = installing.is_some();
     egui::Frame::none()
         .fill(ui::color::BG_ELEVATED)
         .stroke(egui::Stroke::new(1.0_f32, ui::color::BORDER))
@@ -1209,8 +1224,36 @@ fn module_card(
                         // add_sized centers-and-justifies, so the label is
                         // centered within each fixed-width button.
                         let bw = egui::vec2(96.0, ui.spacing().interact_size.y);
+                        if this_busy {
+                            // Mid-update: spinner in place of the action buttons.
+                            ui.allocate_ui_with_layout(
+                                bw,
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.spinner();
+                                    ui.label(
+                                        egui::RichText::new("Updating…")
+                                            .small()
+                                            .color(ui::color::TEXT_MUTED),
+                                    );
+                                },
+                            );
+                            return;
+                        }
                         if ui.add_sized(bw, egui::Button::new("Open")).clicked() {
                             *open = Some(m.name.clone());
+                        }
+                        // Update: re-fetch from source. Only git-installed modules
+                        // have a source to update from.
+                        if from_git {
+                            let btn = egui::Button::new("Update");
+                            let clicked = ui
+                                .add_enabled_ui(!any_busy, |ui| ui.add_sized(bw, btn))
+                                .inner
+                                .clicked();
+                            if clicked {
+                                *update = Some(m.name.clone());
+                            }
                         }
                         let pin_label = if pinned { "📌 Unpin" } else { "📌 Pin" };
                         if ui.add_sized(bw, egui::Button::new(pin_label)).clicked() {
@@ -1360,8 +1403,18 @@ fn about_view(ui: &mut egui::Ui) -> bool {
         ui.add_space(14.0);
         ui.label(egui::RichText::new("LIMEN").size(30.0).strong());
         ui.label(
-            egui::RichText::new(format!("v{} · development branch", env!("CARGO_PKG_VERSION")))
+            egui::RichText::new(format!(
+                "v{} · {} branch",
+                env!("CARGO_PKG_VERSION"),
+                env!("LIMEN_GIT_BRANCH"),
+            ))
+            .monospace()
+            .color(muted),
+        );
+        ui.label(
+            egui::RichText::new(format!("commit {}", env!("LIMEN_GIT_COMMIT")))
                 .monospace()
+                .small()
                 .color(muted),
         );
 

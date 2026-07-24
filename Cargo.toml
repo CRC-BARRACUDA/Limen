@@ -9,12 +9,12 @@ members = [
     "src/limen-cli",
     "src/limen-gui",
 ]
-# Modules are NOT part of this workspace. They're independent crates in
-# ../limen-modules, each built on its own (`cargo build` in its dir) and loaded
-# dynamically by the host from ~/.limen/modules.
+# Modules are NOT part of this workspace. They're independent crates, each built
+# on its own (`cargo build` in its dir) and loaded dynamically by the host from
+# the executable's `modules/` directory.
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 

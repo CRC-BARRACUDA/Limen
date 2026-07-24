@@ -38,6 +38,8 @@ pub enum Command {
     },
     /// Install a module (and deps) from `owner/repo[@ver]` or a local path.
     AddModule(String),
+    /// Re-install an installed module from its locked source (update in place).
+    UpdateModule(String),
     /// Internal: a threaded module download finished — report it, then reload
     /// (engine work must happen back on the worker thread).
     FinishAdd { status: String, ok: bool },
@@ -207,6 +209,20 @@ fn run(
                             (format!("installed {} module(s)", report.installed.len()), true)
                         }
                         Err(e) => (format!("install failed: {e:#}"), false),
+                    };
+                    let _ = cmd_tx.send(Command::FinishAdd { status, ok });
+                });
+            }
+            Command::UpdateModule(name) => {
+                // Same off-thread pattern as install: re-fetch from the locked
+                // source, then reload on the worker via FinishAdd.
+                let cmd_tx = cmd_tx.clone();
+                thread::spawn(move || {
+                    let (status, ok) = match Registry::new(paths::home()).update(Some(&name)) {
+                        Ok(report) => {
+                            (format!("updated {} module(s)", report.installed.len()), true)
+                        }
+                        Err(e) => (format!("module update failed: {e:#}"), false),
                     };
                     let _ = cmd_tx.send(Command::FinishAdd { status, ok });
                 });
