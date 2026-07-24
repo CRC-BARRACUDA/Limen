@@ -2,7 +2,7 @@
 //!
 //! The shell is deliberately thin: a sidebar of modules, and a central panel
 //! that renders whatever UI the selected module describes for itself (via the
-//! GUI core in [`crate::ui`]). There are no CrowdStrike-shaped built-in views —
+//! GUI core in [`crate::ui`]). There are no domain-specific built-in views —
 //! each module draws its own window, and the core keeps the styling uniform.
 //!
 //! * **Overview** — the (minimal) list of installed modules.
@@ -514,29 +514,100 @@ impl eframe::App for LimenApp {
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x18, 0x1a, 0x1f)).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let font_id = egui::TextStyle::Button.resolve(ui.style());
                     for (i, tab) in self.tabs.iter().enumerate() {
                         let selected = i == self.active;
-                        let pinned = matches!(tab, Tab::Module(n) if pinned.iter().any(|p| p == n));
-                        let title = if pinned {
+                        let is_pinned =
+                            matches!(tab, Tab::Module(n) if pinned.iter().any(|p| p == n));
+                        let text = if is_pinned {
                             format!("📌 {}", tab.title())
                         } else {
                             tab.title()
                         };
-                        if ui.selectable_label(selected, title).clicked() {
+
+                        // Zed-style tab: stable width (the close slot is always
+                        // reserved), the × only shows on hover or when active.
+                        let pad = 10.0;
+                        let close_w = 16.0;
+                        let gap = 6.0;
+                        let galley =
+                            ui.painter().layout_no_wrap(text, font_id.clone(), ui::color::TEXT);
+                        let w = pad + galley.size().x + gap + close_w + pad;
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
+                        // Use the pointer position, not `resp.hovered()`: the close
+                        // button below is drawn on top and would otherwise steal the
+                        // hover, making the tab flicker as the × shows/hides.
+                        let hovered = ui.rect_contains_pointer(rect);
+
+                        // Active tab adopts the panel colour; hover lightens.
+                        let fill = if selected {
+                            ui::color::BG
+                        } else if hovered {
+                            ui::color::BG_ELEVATED
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 },
+                            fill,
+                        );
+                        if selected {
+                            ui.painter().hline(
+                                rect.x_range(),
+                                rect.bottom() - 1.0,
+                                egui::Stroke::new(2.0_f32, ui::color::ACCENT),
+                            );
+                        }
+
+                        let tcol = if selected || hovered {
+                            ui::color::TEXT
+                        } else {
+                            ui::color::TEXT_MUTED
+                        };
+                        let tpos =
+                            egui::pos2(rect.left() + pad, rect.center().y - galley.size().y / 2.0);
+                        ui.painter().galley(tpos, galley, tcol);
+
+                        // Close affordance — only when active or hovered.
+                        let mut close_clicked = false;
+                        if selected || hovered {
+                            let cc = egui::pos2(rect.right() - pad - close_w / 2.0, rect.center().y);
+                            let crect = egui::Rect::from_center_size(
+                                cc,
+                                egui::vec2(close_w, close_w),
+                            );
+                            let cresp =
+                                ui.interact(crect, resp.id.with("close"), egui::Sense::click());
+                            if cresp.hovered() {
+                                ui.painter().rect_filled(
+                                    crect,
+                                    egui::Rounding::same(3.0),
+                                    ui::color::BG_HOVER,
+                                );
+                            }
+                            ui.painter().text(
+                                cc,
+                                egui::Align2::CENTER_CENTER,
+                                "×",
+                                egui::FontId::proportional(15.0),
+                                if cresp.hovered() { ui::color::TEXT } else { ui::color::TEXT_MUTED },
+                            );
+                            if cresp.clicked() {
+                                close_idx = Some(i);
+                                close_clicked = true;
+                            }
+                        }
+                        if resp.clicked() && !close_clicked {
                             switch_to = Some(i);
                         }
-                        if ui
-                            .add(egui::Button::new(egui::RichText::new("×").weak()).frame(false))
-                            .on_hover_text("Close")
-                            .clicked()
-                        {
-                            close_idx = Some(i);
-                        }
-                        ui.add_space(6.0);
                     }
                     // Frequently-visited modules not already open.
                     if !frequent.is_empty() {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
                             for name in frequent.iter().rev() {
                                 if ui
                                     .add(egui::Button::new(egui::RichText::new(format!("↗ {name}")).small()).frame(false))
@@ -1230,24 +1301,24 @@ fn badge(ui: &mut egui::Ui, text: &str) {
         });
 }
 
-/// The old Limen tagline + disclaimer (see `gui/about.py`).
-const TAGLINE: &str = "On-demand ops console for a Windows fleet, over CrowdStrike Falcon RTR.";
-const DISCLAIMER: &str = "Development-branch software — the developer is not liable for your actions, \
-for bugs, or for a copy obtained without consent.";
+/// The Limen tagline.
+const TAGLINE: &str = "A modular tool for security and analysis.";
 
 /// The About page. Returns `true` if the "License" button was clicked.
 fn about_view(ui: &mut egui::Ui) -> bool {
-    let muted = egui::Color32::from_rgb(0x7a, 0x82, 0x8e);
+    let muted = ui::color::TEXT_MUTED;
     let mut license_clicked = false;
 
+    // Scroll so nothing (footer, button) is clipped on short windows / high scale.
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
     // Push the block toward the vertical middle.
-    let top = (ui.available_height() * 0.14).clamp(24.0, 140.0);
+    let top = (ui.available_height() * 0.10).clamp(20.0, 120.0);
     ui.add_space(top);
 
     ui.vertical_centered(|ui| {
-        ui.set_max_width(460.0);
+        ui.set_max_width(480.0);
 
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(96.0, 96.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(92.0, 92.0), egui::Sense::hover());
         draw_brand(ui.painter(), rect);
 
         ui.add_space(14.0);
@@ -1258,23 +1329,25 @@ fn about_view(ui: &mut egui::Ui) -> bool {
                 .color(muted),
         );
 
-        ui.add_space(20.0);
+        ui.add_space(18.0);
         ui.label(egui::RichText::new(TAGLINE).size(15.0));
-        ui.add_space(16.0);
+
+        ui.add_space(18.0);
         ui.separator();
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new(DISCLAIMER).small().color(muted));
 
         ui.add_space(14.0);
+        if ui.button("View license").clicked() {
+            license_clicked = true;
+        }
+
+        ui.add_space(16.0);
         ui.label(
-            egui::RichText::new("Free software under the GNU GPL v3.")
+            egui::RichText::new("Powered by CRC BARRACUDA")
                 .small()
                 .color(muted),
         );
-        ui.add_space(4.0);
-        if ui.button("License").clicked() {
-            license_clicked = true;
-        }
+        ui.add_space(12.0);
+    });
     });
 
     license_clicked
