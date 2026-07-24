@@ -43,6 +43,13 @@ fn platform_needle() -> (&'static str, &'static str) {
     (std::env::consts::OS, std::env::consts::ARCH) // e.g. ("linux", "x86_64")
 }
 
+/// Whether an asset name is a distribution archive or checksum rather than a raw
+/// binary (those are for manual download; self-update needs the bare executable).
+fn is_archive(name: &str) -> bool {
+    const EXTS: [&str; 7] = [".tar.gz", ".tgz", ".tar", ".zip", ".gz", ".sha256", ".txt"];
+    EXTS.iter().any(|e| name.ends_with(e))
+}
+
 /// Check GitHub for a newer release than `current` (e.g. `env!("CARGO_PKG_VERSION")`).
 /// Returns `None` if up to date, offline, or there's no release.
 pub fn check_update(current: &str) -> Option<UpdateInfo> {
@@ -67,7 +74,9 @@ pub fn check_update(current: &str) -> Option<UpdateInfo> {
         return None;
     }
 
-    // Find a binary asset matching this OS + arch.
+    // Find a *raw binary* asset matching this OS + arch. `apply_update` renames
+    // the download directly over the running exe, so archives/checksums must be
+    // skipped — releases ship those for manual download alongside the raw binary.
     let (os, arch) = platform_needle();
     let asset_url = json
         .get("assets")
@@ -75,7 +84,7 @@ pub fn check_update(current: &str) -> Option<UpdateInfo> {
         .and_then(|arr| {
             arr.iter().find_map(|a| {
                 let name = a.get("name")?.as_str()?.to_lowercase();
-                (name.contains(os) && name.contains(arch))
+                (name.contains(os) && name.contains(arch) && !is_archive(&name))
                     .then(|| a.get("browser_download_url")?.as_str().map(str::to_string))
                     .flatten()
             })
