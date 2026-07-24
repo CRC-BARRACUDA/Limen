@@ -518,7 +518,7 @@ impl eframe::App for LimenApp {
                     if self.update.is_some() {
                         ui.add_space(6.0);
                         let pill = egui::Button::new(
-                            egui::RichText::new("● Update available").small().color(ui::color::ON_ACCENT),
+                            egui::RichText::new("Update available").small().color(ui::color::ON_ACCENT),
                         )
                         .fill(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c))
                         .rounding(egui::Rounding::same(10.0_f32));
@@ -885,7 +885,7 @@ fn update_view(
     };
 
     ui.label(
-        egui::RichText::new(format!("A new version is available: v{} → v{}", info.current, info.latest))
+        egui::RichText::new(format!("A new version is available: v{} -> v{}", info.current, info.latest))
             .size(15.0),
     );
     if !info.url.is_empty() {
@@ -1325,7 +1325,7 @@ fn module_card(
                         if awaiting_restart {
                             // A native update landed — replace Update with a restart.
                             let btn = egui::Button::new(
-                                egui::RichText::new("↻ Restart").color(ui::color::ON_ACCENT),
+                                egui::RichText::new("Restart").color(ui::color::ON_ACCENT),
                             )
                             .fill(egui::Color32::from_rgb(0xd9, 0x8a, 0x3a));
                             if ui
@@ -1338,7 +1338,7 @@ fn module_card(
                         } else if from_git && latest.is_some() {
                             // Update only shows when a newer release exists.
                             let label = match latest {
-                                Some(v) => format!("Update → {v}"),
+                                Some(v) => format!("Update {v}"),
                                 None => "Update".into(),
                             };
                             let btn = egui::Button::new(
