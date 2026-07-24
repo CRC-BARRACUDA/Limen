@@ -4,3 +4,8 @@ Cargo.lock.orig
 __pycache__/
 *.pyc
 .limen/
+
+# Modules are developed as their own independent git repos inside modules/.
+# The Limen app repo ignores them (they're distributed separately, one repo per
+# module: CRC-BARRACUDA/limen-<name>).
+/modules/
