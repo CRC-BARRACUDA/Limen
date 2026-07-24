@@ -26,6 +26,7 @@ class Text(Widget):
         placeholder: str = ...,
         multiline: bool = ...,
         default: str = ...,
+        password: bool = ...,
     ) -> None: ...
 
 class Select(Widget):
@@ -41,9 +42,13 @@ class Button(Widget):
         capability: Optional[str] = ...,
         method: Optional[str] = ...,
         primary: bool = ...,
+        enabled: bool = ...,
     ) -> None: ...
 
 class Separator(Widget): ...
+
+class Table(Widget):
+    def __init__(self, columns: list[str], rows: list[list[str]]) -> None: ...
 
 class Row(Widget):
     def __init__(self, children: List[Widget]) -> None: ...

@@ -136,6 +136,11 @@ pub enum ButtonStyle {
     Primary,
 }
 
+/// Serde default for `#[serde(default = "default_true")]` bool fields.
+fn default_true() -> bool {
+    true
+}
+
 /// One widget in a [`View`]. `kind` is the tag.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -155,6 +160,9 @@ pub enum Widget {
         multiline: bool,
         #[serde(default)]
         default: String,
+        /// Mask the input (single-line only), for secrets.
+        #[serde(default)]
+        password: bool,
     },
     Select {
         id: String,
@@ -169,6 +177,9 @@ pub enum Widget {
         action: Action,
         #[serde(default)]
         style: ButtonStyle,
+        /// Whether the button is clickable (default true).
+        #[serde(default = "default_true")]
+        enabled: bool,
     },
     Separator,
     Row {
@@ -219,7 +230,7 @@ fn render_widget(
         Widget::Label { text, style } => {
             ui.label(styled(text, *style));
         }
-        Widget::Text { id, label, placeholder, multiline, default } => {
+        Widget::Text { id, label, placeholder, multiline, default, password } => {
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
@@ -233,6 +244,7 @@ fn render_widget(
                 egui::TextEdit::singleline(value)
                     .desired_width(f32::INFINITY)
                     .hint_text(placeholder.as_str())
+                    .password(*password)
             };
             ui.add(editor);
         }
@@ -254,7 +266,7 @@ fn render_widget(
                     }
                 });
         }
-        Widget::Button { text, action, style } => {
+        Widget::Button { text, action, style, enabled } => {
             let button = match style {
                 ButtonStyle::Primary => egui::Button::new(
                     egui::RichText::new(text).color(color::ON_ACCENT),
@@ -264,7 +276,7 @@ fn render_widget(
             };
             let running = busy == Some(action);
             ui.horizontal(|ui| {
-                if ui.add(button).clicked() {
+                if ui.add_enabled(*enabled, button).clicked() {
                     *clicked = Some(action.clone());
                 }
                 if running {
