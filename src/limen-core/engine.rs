@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
-use limen_host::{Host, ModuleSpec};
+use anyhow::{Context, Result};
+use limen_host::{Host, Logger, ModuleSpec};
 use serde_json::Value;
 
 pub struct Engine {
@@ -17,11 +17,15 @@ impl Engine {
     /// Does not launch anything — call [`Engine::start`].
     pub fn load(search_dirs: &[PathBuf]) -> Result<Self> {
         let module_dirs = collect_module_dirs(search_dirs)?;
-        if module_dirs.is_empty() {
-            bail!("no modules found under {search_dirs:?}");
-        }
+        // Zero modules is fine — a fresh or portable install may have none yet.
+        // The app starts empty rather than failing.
         let host = Host::load(&module_dirs)?;
         Ok(Self { host, started: false })
+    }
+
+    /// Install a log sink for host + module logs (call before [`Engine::start`]).
+    pub fn set_logger(&mut self, logger: Logger) {
+        self.host.set_logger(logger);
     }
 
     /// Launch all modules (idempotent).
@@ -36,6 +40,12 @@ impl Engine {
     /// Installed modules, in dependency (startup) order.
     pub fn modules(&self) -> &[ModuleSpec] {
         self.host.module_specs()
+    }
+
+    /// Runtimes a module needed but that were unavailable at start (module
+    /// skipped) — drives Quick Setup.
+    pub fn missing_runtimes(&self) -> &[limen_host::runtimes::Runtime] {
+        self.host.missing_runtimes()
     }
 
     /// The self-description of the module providing `capability`.

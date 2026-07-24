@@ -21,6 +21,14 @@ pub struct Config {
     /// GitHub organization to browse/install modules from.
     #[serde(default)]
     pub default_org: Option<String>,
+
+    /// Module names pinned to the sidebar, in display order.
+    #[serde(default)]
+    pub pinned_modules: Vec<String>,
+
+    /// Global UI scale, as a percentage (100 = default). 0/absent means default.
+    #[serde(default)]
+    pub ui_scale_percent: u32,
 }
 
 /// The org used when none is configured.
