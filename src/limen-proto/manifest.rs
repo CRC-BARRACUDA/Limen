@@ -132,20 +132,41 @@ pub struct Permissions {
     /// May spawn local subprocesses.
     #[serde(default)]
     pub subprocess: bool,
+    /// The whole module requires elevated / administrator privileges (every
+    /// method is gated). For finer control, use `elevated_methods` instead.
+    #[serde(default)]
+    pub admin: bool,
+    /// Specific method names that require the user's approval before they run
+    /// (e.g. `["restart_service"]`). The rest of the module runs freely; the
+    /// consent prompt only appears when one of these is actually invoked.
+    #[serde(default)]
+    pub elevated_methods: Vec<String>,
 }
 
 impl Permissions {
     /// Whether any declared permission is security-relevant (worth consenting to).
     pub fn sensitive(&self) -> bool {
-        self.run_hosts
+        self.admin
+            || self.run_hosts
             || self.subprocess
+            || !self.elevated_methods.is_empty()
             || !self.network.is_empty()
             || !self.filesystem.is_empty()
     }
 
-    /// Human-readable descriptions of what the module is asking for.
+    /// Whether invoking `method` needs the user's approval: the whole module is
+    /// admin-gated, or the method is explicitly listed as elevated.
+    pub fn method_needs_consent(&self, method: &str) -> bool {
+        self.admin || self.elevated_methods.iter().any(|m| m == method)
+    }
+
+    /// Human-readable descriptions of what the module is asking for. The most
+    /// sensitive (admin) is listed first.
     pub fn summary(&self) -> Vec<String> {
         let mut out = Vec::new();
+        if self.admin {
+            out.push("administrator privileges".to_string());
+        }
         if self.run_hosts {
             out.push("execute on fleet hosts".to_string());
         }
@@ -245,5 +266,17 @@ mod tests {
         assert!(m.permissions.run_hosts);
         assert!(m.permissions.sensitive());
         assert!(m.permissions.summary().iter().any(|s| s.contains("fleet hosts")));
+    }
+
+    #[test]
+    fn admin_is_sensitive_and_listed_first() {
+        let m = Manifest::from_toml_str(
+            "[module]\nname=\"a\"\nversion=\"0.1.0\"\nlanguage=\"python\"\nentry=\"m.py\"\n\
+             [permissions]\nadmin = true\n",
+        )
+        .unwrap();
+        assert!(m.permissions.admin);
+        assert!(m.permissions.sensitive());
+        assert_eq!(m.permissions.summary().first().map(String::as_str), Some("administrator privileges"));
     }
 }
