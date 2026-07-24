@@ -78,6 +78,12 @@ pub struct LimenApp {
     git_installed: HashSet<String>,
     /// name → (branch, short commit) for git-installed modules.
     git_meta: HashMap<String, (String, String)>,
+    /// Installed git modules with a newer release available: name → latest version.
+    available_updates: HashMap<String, String>,
+    /// Native modules updated but awaiting an app restart to load the new code.
+    pending_restart: HashSet<String>,
+    /// A native module whose update is in flight (→ `pending_restart` when done).
+    native_update_in_flight: Option<String>,
     /// Names of modules the user has granted their declared permissions
     /// (trusted at their current content digest).
     trusted: HashSet<String>,
@@ -136,6 +142,9 @@ impl LimenApp {
             modules: Vec::new(),
             git_installed: HashSet::new(),
             git_meta: HashMap::new(),
+            available_updates: HashMap::new(),
+            pending_restart: HashSet::new(),
+            native_update_in_flight: None,
             trusted: HashSet::new(),
             pending_action: None,
             tabs: vec![Tab::About, Tab::Modules],
@@ -322,7 +331,18 @@ impl LimenApp {
                     self.refresh_trust();
                     // A reload follows a completed install/remove — clear the spinner.
                     self.installing = None;
+                    // A native module's update just completed: its new code can't
+                    // hot-swap, so mark it as needing a restart.
+                    if let Some(name) = self.native_update_in_flight.take() {
+                        self.available_updates.remove(&name);
+                        self.pending_restart.insert(name);
+                    }
                     self.status = format!("{} module(s) loaded", self.modules.len());
+                }
+                Event::ModuleUpdates(map) => {
+                    // Don't re-surface an update for something already awaiting restart.
+                    self.available_updates =
+                        map.into_iter().filter(|(n, _)| !self.pending_restart.contains(n)).collect();
                 }
                 Event::RemoteModules(result) => {
                     self.remote_loading = false;
@@ -641,14 +661,16 @@ impl eframe::App for LimenApp {
         let mut update_module: Option<String> = None;
         let mut toggle_pin: Option<String> = None;
         let mut do_update = false;
+        let mut do_restart = false;
         let active_tab = self.active_tab();
         let update_info = self.update.clone();
         let updating = self.updating;
         {
             let LimenApp {
-                modules, git_installed, git_meta, pinned, view, view_error, inputs, output,
-                busy_action, fatal, search, filter, remote, remote_error, remote_loading,
-                installing, dev_tab, logs, log_autoscroll, ui_scale, ..
+                modules, git_installed, git_meta, available_updates, pending_restart, pinned, view,
+                view_error, inputs, output, busy_action, fatal, search, filter, remote,
+                remote_error, remote_loading, installing, dev_tab, logs, log_autoscroll, ui_scale,
+                ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(err) = fatal {
@@ -671,10 +693,10 @@ impl eframe::App for LimenApp {
                     }
                     Some(Tab::License) => license_view(ui),
                     Some(Tab::Modules) => modules_page(
-                        ui, modules, git_installed, git_meta, pinned, remote, *remote_loading,
-                        remote_error, installing, filter, search, &mut open_module,
-                        &mut remove_module, &mut add_module, &mut update_module, &mut toggle_pin,
-                        &mut reload,
+                        ui, modules, git_installed, git_meta, available_updates, pending_restart,
+                        pinned, remote, *remote_loading, remote_error, installing, filter, search,
+                        &mut open_module, &mut remove_module, &mut add_module, &mut update_module,
+                        &mut toggle_pin, &mut do_restart, &mut reload,
                     ),
                     Some(Tab::Module(name)) => {
                         module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
@@ -731,10 +753,22 @@ impl eframe::App for LimenApp {
             self.worker.send(Command::AddModule(reference));
         }
         if let Some(name) = update_module {
+            // Close its tab first — its loaded UI is about to be replaced.
+            if let Some(i) = self.tabs.iter().position(|t| *t == Tab::Module(name.clone())) {
+                self.close_tab(i);
+            }
+            // A native (in-process) module can't hot-swap; remember so we can
+            // prompt for a restart once its update completes.
+            if self.modules.iter().any(|m| m.name == name && m.is_native_lib()) {
+                self.native_update_in_flight = Some(name.clone());
+            }
             self.busy = true;
             self.installing = Some(name.clone());
             self.status = format!("updating {name}…");
             self.worker.send(Command::UpdateModule(name));
+        }
+        if do_restart {
+            self.worker.send(Command::Restart);
         }
         if let Some(name) = toggle_pin {
             self.toggle_pin(&name);
@@ -1034,6 +1068,8 @@ fn modules_page(
     modules: &[ModuleSpec],
     git_installed: &HashSet<String>,
     git_meta: &HashMap<String, (String, String)>,
+    available_updates: &HashMap<String, String>,
+    pending_restart: &HashSet<String>,
     pinned: &[String],
     remote: &[RemoteModule],
     remote_loading: bool,
@@ -1046,6 +1082,7 @@ fn modules_page(
     add: &mut Option<String>,
     update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
+    restart: &mut bool,
     reload: &mut bool,
 ) {
     ui.add_space(4.0);
@@ -1106,8 +1143,10 @@ fn modules_page(
                 }
                 let is_pinned = pinned.iter().any(|n| n == &m.name);
                 module_card(
-                    ui, m, git_installed.contains(&m.name), git_meta.get(&m.name), is_pinned,
-                    installing, open, remove, update, toggle_pin,
+                    ui, m, git_installed.contains(&m.name), git_meta.get(&m.name),
+                    available_updates.get(&m.name).map(String::as_str),
+                    pending_restart.contains(&m.name), is_pinned, installing, open, remove, update,
+                    toggle_pin, restart,
                 );
                 ui.add_space(10.0);
                 shown += 1;
@@ -1165,12 +1204,15 @@ fn module_card(
     m: &ModuleSpec,
     from_git: bool,
     git_meta: Option<&(String, String)>,
+    latest: Option<&str>,
+    awaiting_restart: bool,
     pinned: bool,
     installing: &Option<String>,
     open: &mut Option<String>,
     remove: &mut Option<String>,
     update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
+    restart: &mut bool,
 ) {
     // This card is mid-update; another install/update is running somewhere.
     let this_busy = installing.as_deref() == Some(m.name.as_str());
@@ -1269,13 +1311,40 @@ fn module_card(
                             );
                             return;
                         }
-                        if ui.add_sized(bw, egui::Button::new("Open")).clicked() {
+                        // Open — disabled while awaiting a restart (the loaded code
+                        // is stale, so opening would show the old UI).
+                        let open_clicked = ui
+                            .add_enabled_ui(!awaiting_restart, |ui| {
+                                ui.add_sized(bw, egui::Button::new("Open"))
+                            })
+                            .inner
+                            .clicked();
+                        if open_clicked {
                             *open = Some(m.name.clone());
                         }
-                        // Update: re-fetch from source. Only git-installed modules
-                        // have a source to update from.
-                        if from_git {
-                            let btn = egui::Button::new("Update");
+                        if awaiting_restart {
+                            // A native update landed — replace Update with a restart.
+                            let btn = egui::Button::new(
+                                egui::RichText::new("↻ Restart").color(ui::color::ON_ACCENT),
+                            )
+                            .fill(egui::Color32::from_rgb(0xd9, 0x8a, 0x3a));
+                            if ui
+                                .add_sized(bw, btn)
+                                .on_hover_text("Restart Limen to apply the update")
+                                .clicked()
+                            {
+                                *restart = true;
+                            }
+                        } else if from_git && latest.is_some() {
+                            // Update only shows when a newer release exists.
+                            let label = match latest {
+                                Some(v) => format!("Update → {v}"),
+                                None => "Update".into(),
+                            };
+                            let btn = egui::Button::new(
+                                egui::RichText::new(label).color(ui::color::ON_ACCENT),
+                            )
+                            .fill(ui::color::ACCENT);
                             let clicked = ui
                                 .add_enabled_ui(!any_busy, |ui| ui.add_sized(bw, btn))
                                 .inner
