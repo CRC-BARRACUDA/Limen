@@ -185,6 +185,9 @@ pub struct Host {
     logger: Logger,
     /// Runtimes that were needed but unavailable, so a module was skipped.
     missing_runtimes: Vec<crate::runtimes::Runtime>,
+    /// Modules that failed to start (spawn / load / initialize): name -> error.
+    /// A failure here is isolated — other modules still start.
+    failed: HashMap<String, String>,
 }
 
 impl Host {
@@ -210,6 +213,7 @@ impl Host {
             connections: Vec::new(),
             logger: stderr_logger(),
             missing_runtimes: Vec::new(),
+            failed: HashMap::new(),
         })
     }
 
@@ -223,6 +227,12 @@ impl Host {
     /// module was skipped). Drives the GUI's Quick Setup prompt.
     pub fn missing_runtimes(&self) -> &[crate::runtimes::Runtime] {
         &self.missing_runtimes
+    }
+
+    /// Modules that failed to start (name -> error). Their failure is isolated;
+    /// the rest of the engine runs. The GUI shows the error in the module's tab.
+    pub fn failed_modules(&self) -> &HashMap<String, String> {
+        &self.failed
     }
 
     /// Spawn every module in dependency order, register its capabilities, and
@@ -242,76 +252,100 @@ impl Host {
         };
 
         self.missing_runtimes.clear();
-        for spec in &self.order {
-            let conn: Arc<dyn Module> = match &spec.launch {
-                Launch::Script { runtime, script } => {
-                    // Resolve the interpreter now; if missing, skip the module
-                    // (non-fatal) and record the runtime for Quick Setup.
-                    match crate::runtimes::resolve(&limen_home(), *runtime) {
-                        Some(interp) => {
-                            let env = sdk.env_for(spec.language);
-                            let argv = [interp, script.clone()];
-                            ModuleConnection::spawn(
-                                spec.name.clone(),
-                                &argv,
-                                Some(&spec.cwd),
-                                &env,
-                                handler.clone(),
-                                logger.clone(),
-                            )
-                            .with_context(|| format!("spawning module {}", spec.name))?
+        self.failed.clear();
+        // Clone the order so we can mutate self (broker, connections, …) per module.
+        let order = self.order.clone();
+        for spec in &order {
+            if let Err(e) = self.start_one(spec, &sdk, &handler, &logger) {
+                let msg = format!("{e:#}");
+                logger(&format!("[host] {} failed to start: {msg}", spec.name));
+                self.failed.insert(spec.name.clone(), msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// Start a single module: spawn/load, `initialize`, then register it. A
+    /// missing interpreter is a non-fatal skip (recorded in `missing_runtimes`);
+    /// any other failure returns an error the caller records in `failed`, so one
+    /// broken module never stops the rest of the engine.
+    fn start_one(
+        &mut self,
+        spec: &ModuleSpec,
+        sdk: &SdkPaths,
+        handler: &Arc<IncomingHandler>,
+        logger: &Logger,
+    ) -> Result<()> {
+        let conn: Arc<dyn Module> = match &spec.launch {
+            Launch::Script { runtime, script } => {
+                // Resolve the interpreter now; if missing, skip the module
+                // (non-fatal) and record the runtime for Quick Setup.
+                match crate::runtimes::resolve(&limen_home(), *runtime) {
+                    Some(interp) => {
+                        let env = sdk.env_for(spec.language);
+                        let argv = [interp, script.clone()];
+                        ModuleConnection::spawn(
+                            spec.name.clone(),
+                            &argv,
+                            Some(&spec.cwd),
+                            &env,
+                            handler.clone(),
+                            logger.clone(),
+                        )
+                        .with_context(|| format!("spawning module {}", spec.name))?
+                    }
+                    None => {
+                        logger(&format!(
+                            "[host] skipping {}: no {} interpreter — run Quick Setup",
+                            spec.name,
+                            runtime.display()
+                        ));
+                        if !self.missing_runtimes.contains(runtime) {
+                            self.missing_runtimes.push(*runtime);
                         }
-                        None => {
-                            logger(&format!(
-                                "[host] skipping {}: no {} interpreter — run Quick Setup",
-                                spec.name,
-                                runtime.display()
-                            ));
-                            if !self.missing_runtimes.contains(runtime) {
-                                self.missing_runtimes.push(*runtime);
-                            }
-                            continue;
-                        }
+                        return Ok(());
                     }
                 }
-                Launch::Binary(path) => {
-                    let argv = [path.clone()];
-                    ModuleConnection::spawn(
-                        spec.name.clone(),
-                        &argv,
-                        Some(&spec.cwd),
-                        &[],
-                        handler.clone(),
-                        logger.clone(),
-                    )
-                    .with_context(|| format!("spawning module {}", spec.name))?
-                }
-                Launch::Native(path) => NativeModule::load(spec.name.clone(), path, handler.clone())
-                    .with_context(|| format!("loading native module {}", spec.name))?,
-            };
-
-            for capability in &spec.capabilities {
-                self.broker.register(capability, conn.clone());
             }
-            self.broker.register_name(&spec.name, conn.clone());
-
-            let info = conn
-                .call(
-                    "initialize",
-                    json!({
-                        "host": { "name": "limen", "version": env!("CARGO_PKG_VERSION") },
-                        "module": { "name": spec.name, "version": spec.version },
-                        "capabilities": spec.capabilities,
-                    }),
+            Launch::Binary(path) => {
+                let argv = [path.clone()];
+                ModuleConnection::spawn(
+                    spec.name.clone(),
+                    &argv,
+                    Some(&spec.cwd),
+                    &[],
+                    handler.clone(),
+                    logger.clone(),
                 )
-                .map_err(|e| anyhow!("initialize {}: {e}", spec.name))?;
+                .with_context(|| format!("spawning module {}", spec.name))?
+            }
+            Launch::Native(path) => NativeModule::load(spec.name.clone(), path, handler.clone())
+                .with_context(|| format!("loading native module {}", spec.name))?,
+        };
 
-            logger(&format!(
-                "[host] started {} v{} caps={:?} -> {info}",
-                spec.name, spec.version, spec.capabilities
-            ));
-            self.connections.push(conn);
+        // Initialize BEFORE registering, so a module that fails to init is never
+        // left in the broker as a dead provider.
+        let info = conn
+            .call(
+                "initialize",
+                json!({
+                    "host": { "name": "limen", "version": env!("CARGO_PKG_VERSION") },
+                    "module": { "name": spec.name, "version": spec.version },
+                    "capabilities": spec.capabilities,
+                }),
+            )
+            .map_err(|e| anyhow!("initialize {}: {e}", spec.name))?;
+
+        for capability in &spec.capabilities {
+            self.broker.register(capability, conn.clone());
         }
+        self.broker.register_name(&spec.name, conn.clone());
+
+        logger(&format!(
+            "[host] started {} v{} caps={:?} -> {info}",
+            spec.name, spec.version, spec.capabilities
+        ));
+        self.connections.push(conn);
         Ok(())
     }
 

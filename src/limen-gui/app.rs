@@ -84,6 +84,8 @@ pub struct LimenApp {
     pending_restart: HashSet<String>,
     /// A native module whose update is in flight (→ `pending_restart` when done).
     native_update_in_flight: Option<String>,
+    /// Modules that failed to start: name → error (shown in the module's tab).
+    failed: HashMap<String, String>,
     /// Names of modules the user has granted their declared permissions
     /// (trusted at their current content digest).
     trusted: HashSet<String>,
@@ -145,6 +147,7 @@ impl LimenApp {
             available_updates: HashMap::new(),
             pending_restart: HashSet::new(),
             native_update_in_flight: None,
+            failed: HashMap::new(),
             trusted: HashSet::new(),
             pending_action: None,
             tabs: vec![Tab::About, Tab::Modules],
@@ -328,6 +331,7 @@ impl LimenApp {
                     self.modules = snap.specs;
                     self.git_installed = snap.git_installed.into_iter().collect();
                     self.git_meta = snap.git_meta;
+                    self.failed = snap.failed;
                     self.refresh_trust();
                     // A reload follows a completed install/remove — clear the spinner.
                     self.installing = None;
@@ -436,6 +440,12 @@ impl LimenApp {
         self.view_error = None;
         self.inputs.clear();
         self.output.clear();
+        // A module that failed to start has no live connection — show why, here,
+        // instead of trying to call it (or blocking the whole app).
+        if let Some(err) = self.failed.get(&name) {
+            self.view_error = Some(format!("This module failed to start:\n\n{err}"));
+            return;
+        }
         match self.first_capability(&name) {
             Some(cap) => {
                 self.busy = true;

@@ -48,6 +48,12 @@ impl Engine {
         self.host.missing_runtimes()
     }
 
+    /// Modules that failed to start (name -> error). Isolated failures — the rest
+    /// of the engine still runs; the GUI shows the error in the module's tab.
+    pub fn failed_modules(&self) -> &std::collections::HashMap<String, String> {
+        self.host.failed_modules()
+    }
+
     /// The self-description of the module providing `capability`.
     pub fn describe(&self, capability: &str) -> Result<Value> {
         self.host.describe(capability)
