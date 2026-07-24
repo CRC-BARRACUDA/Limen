@@ -151,6 +151,11 @@ class Host:
             "host.subscribe", {"subscriber": self._m.name, "topic": topic}
         )
 
+    def about(self):
+        """Info about the host environment: os, arch, family, hostname,
+        limen_version, base_dir (where Limen runs from)."""
+        return self._m._request("host.about", {})
+
     def log(self, message):
         self._m._request("host.log", str(message))
 
