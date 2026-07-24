@@ -383,6 +383,10 @@ impl LimenApp {
                 },
                 Event::Status(msg) => {
                     self.busy = false;
+                    // A failed update leaves the Update button spinning — stop it.
+                    if msg.starts_with("update failed") {
+                        self.updating = false;
+                    }
                     self.refresh_trust();
                     self.push_log(format!("[status] {msg}"));
                     self.status = msg;

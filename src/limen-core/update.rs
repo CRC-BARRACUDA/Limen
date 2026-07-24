@@ -1,12 +1,15 @@
 //! Self-update: check the app's GitHub releases and (best-effort) apply.
 //!
 //! The check compares the running version against the latest release tag. Apply
-//! downloads the platform binary asset, swaps it in over the running executable,
-//! and restarts. Uses `curl`; no extra Rust dependencies.
+//! downloads the platform asset, and — if it's a `.tar.gz`/`.zip` distribution
+//! archive — extracts the executable out of it, then swaps it in over the running
+//! executable and restarts. A raw binary asset (no extension) is used directly.
+//! Uses `curl` + `tar`/`unzip`; no extra Rust dependencies.
 //!
 //! NOTE: the apply/replace/restart path is platform-sensitive and hard to verify
 //! automatically — treat it as best-effort until tested on real releases.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The GitHub repo the app updates from.
@@ -43,11 +46,29 @@ fn platform_needle() -> (&'static str, &'static str) {
     (std::env::consts::OS, std::env::consts::ARCH) // e.g. ("linux", "x86_64")
 }
 
-/// Whether an asset name is a distribution archive or checksum rather than a raw
-/// binary (those are for manual download; self-update needs the bare executable).
-fn is_archive(name: &str) -> bool {
-    const EXTS: [&str; 7] = [".tar.gz", ".tgz", ".tar", ".zip", ".gz", ".sha256", ".txt"];
+/// Whether an asset name is a distribution archive we can extract a binary from.
+fn is_extractable_archive(name: &str) -> bool {
+    const EXTS: [&str; 4] = [".tar.gz", ".tgz", ".tar", ".zip"];
     EXTS.iter().any(|e| name.ends_with(e))
+}
+
+/// Whether an asset name is a checksum/metadata file (never an update payload).
+fn is_sidecar(name: &str) -> bool {
+    const EXTS: [&str; 3] = [".sha256", ".txt", ".sig"];
+    EXTS.iter().any(|e| name.ends_with(e))
+}
+
+/// From `(lowercased_name, url)` release assets, pick the one for this platform.
+/// Prefer a raw binary (used directly); else a distribution archive (extracted).
+/// Checksums / signatures are never chosen. `None` if nothing matches.
+fn select_asset(assets: &[(String, String)]) -> Option<String> {
+    let (os, arch) = platform_needle();
+    let matches_platform = |n: &str| n.contains(os) && n.contains(arch);
+    assets
+        .iter()
+        .find(|(n, _)| matches_platform(n) && !is_extractable_archive(n) && !is_sidecar(n))
+        .or_else(|| assets.iter().find(|(n, _)| matches_platform(n) && is_extractable_archive(n)))
+        .map(|(_, url)| url.clone())
 }
 
 /// Check GitHub for a newer release than `current` (e.g. `env!("CARGO_PKG_VERSION")`).
@@ -74,21 +95,22 @@ pub fn check_update(current: &str) -> Option<UpdateInfo> {
         return None;
     }
 
-    // Find a *raw binary* asset matching this OS + arch. `apply_update` renames
-    // the download directly over the running exe, so archives/checksums must be
-    // skipped — releases ship those for manual download alongside the raw binary.
-    let (os, arch) = platform_needle();
-    let asset_url = json
+    // Pick the asset for this OS + arch (see `select_asset`).
+    let assets: Vec<(String, String)> = json
         .get("assets")
         .and_then(|a| a.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|a| {
-                let name = a.get("name")?.as_str()?.to_lowercase();
-                (name.contains(os) && name.contains(arch) && !is_archive(&name))
-                    .then(|| a.get("browser_download_url")?.as_str().map(str::to_string))
-                    .flatten()
-            })
-        });
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    Some((
+                        a.get("name")?.as_str()?.to_lowercase(),
+                        a.get("browser_download_url")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let asset_url = select_asset(&assets);
 
     Some(UpdateInfo {
         current: current.to_string(),
@@ -99,17 +121,22 @@ pub fn check_update(current: &str) -> Option<UpdateInfo> {
     })
 }
 
-/// Download the new binary, swap it in over the running executable, and restart.
+/// Download the new build, swap it in over the running executable, and restart.
 /// Best-effort and platform-sensitive; returns an error string on failure.
 pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
     let asset = info
         .asset_url
         .as_deref()
-        .ok_or("this release has no binary for your platform — download it manually")?;
+        .ok_or("this release has no build for your platform — download it manually")?;
     let exe = std::env::current_exe().map_err(|e| format!("locating executable: {e}"))?;
+    let exe_name = exe
+        .file_name()
+        .ok_or("executable has no file name")?
+        .to_owned();
 
     // Download next to the current executable.
     let staged = exe.with_extension("update-download");
+    let _ = std::fs::remove_file(&staged);
     let status = Command::new("curl")
         .args(["-fsSL", "-o"])
         .arg(&staged)
@@ -121,10 +148,21 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
         return Err("download failed".into());
     }
 
+    // If the asset is a distribution archive, extract the executable out of it;
+    // otherwise the download *is* the raw binary.
+    let name = asset.rsplit('/').next().unwrap_or("").to_lowercase();
+    let new_binary = if is_extractable_archive(&name) {
+        let extracted = extract_binary(&staged, &exe, &exe_name, &name);
+        let _ = std::fs::remove_file(&staged); // archive no longer needed
+        extracted?
+    } else {
+        staged.clone()
+    };
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&new_binary, std::fs::Permissions::from_mode(0o755));
     }
 
     // Swap the new binary in. On Unix the running process keeps the old inode, so
@@ -136,7 +174,9 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
         let _ = std::fs::remove_file(&backup);
         std::fs::rename(&exe, &backup).map_err(|e| format!("backing up current exe: {e}"))?;
     }
-    std::fs::rename(&staged, &exe).map_err(|e| format!("installing update: {e}"))?;
+    std::fs::rename(&new_binary, &exe).map_err(|e| format!("installing update: {e}"))?;
+    // Best-effort cleanup of the extraction scratch dir.
+    let _ = std::fs::remove_dir_all(exe.with_extension("update-extract"));
 
     // Restart into the new binary.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -145,6 +185,57 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("restarting: {e}"))?;
     std::process::exit(0);
+}
+
+/// Extract `archive` into a scratch dir next to the exe and return the path to
+/// the executable inside it (matched by file name, e.g. `Limen`/`Limen.exe`).
+fn extract_binary(
+    archive: &Path,
+    exe: &Path,
+    exe_name: &std::ffi::OsStr,
+    lower_name: &str,
+) -> Result<PathBuf, String> {
+    let dir = exe.with_extension("update-extract");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating extract dir: {e}"))?;
+
+    let ok = if lower_name.ends_with(".zip") {
+        // bsdtar (default `tar` on Windows/macOS) reads zips; fall back to unzip.
+        run_ok(Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(&dir))
+            || run_ok(Command::new("unzip").arg("-oq").arg(archive).arg("-d").arg(&dir))
+    } else if lower_name.ends_with(".tar") {
+        run_ok(Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(&dir))
+    } else {
+        run_ok(Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(&dir))
+    };
+    if !ok {
+        return Err("extracting archive failed".into());
+    }
+
+    locate(&dir, exe_name).ok_or_else(|| {
+        format!("no `{}` found inside the release archive", exe_name.to_string_lossy())
+    })
+}
+
+/// Run a command, returning whether it exited successfully.
+fn run_ok(cmd: &mut Command) -> bool {
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Recursively find a file named `wanted` under `dir`.
+fn locate(dir: &Path, wanted: &std::ffi::OsStr) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name() == Some(wanted) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -159,5 +250,55 @@ mod tests {
         assert!(!is_newer("0.1.0", "0.1.0"));
         assert!(!is_newer("0.1.0", "0.2.0"));
         assert!(!is_newer("v0.1.0", "0.1.0"));
+    }
+
+    #[test]
+    fn asset_selection_prefers_raw_then_archive() {
+        let (os, arch) = platform_needle();
+        let raw = format!("limen-{os}-{arch}");
+        let tar = format!("limen-{os}-{arch}.tar.gz");
+        let sha = format!("limen-{os}-{arch}.tar.gz.sha256");
+
+        // Only a tarball + checksum → the tarball is chosen (not the checksum).
+        let assets = vec![(tar.clone(), "u_tar".into()), (sha.clone(), "u_sha".into())];
+        assert_eq!(select_asset(&assets).as_deref(), Some("u_tar"));
+
+        // A raw binary present → preferred over the archive.
+        let assets = vec![
+            (tar.clone(), "u_tar".into()),
+            (raw.clone(), "u_raw".into()),
+            (sha.clone(), "u_sha".into()),
+        ];
+        assert_eq!(select_asset(&assets).as_deref(), Some("u_raw"));
+
+        // Nothing for this platform → None.
+        let assets = vec![("limen-other-arch.tar.gz".into(), "x".into())];
+        assert_eq!(select_asset(&assets), None);
+    }
+
+    #[test]
+    fn extracts_binary_from_tarball() {
+        // Build a tarball shaped like our release: <stem>/<exe> inside.
+        let base = std::env::temp_dir().join(format!("limen-upd-test-{}", std::process::id()));
+        let stem = base.join("Limen-9.9.9-linux-x86_64");
+        std::fs::create_dir_all(&stem).unwrap();
+        std::fs::write(stem.join("Limen"), b"#!/bin/true\n").unwrap();
+        std::fs::write(stem.join("LICENSE"), b"gpl").unwrap();
+        let archive = base.join("Limen-9.9.9-linux-x86_64.tar.gz");
+        assert!(run_ok(Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&base)
+            .arg("Limen-9.9.9-linux-x86_64")));
+
+        // Pretend the running exe is base/Limen; extract should find the inner one.
+        let fake_exe = base.join("Limen");
+        let exe_name = std::ffi::OsStr::new("Limen");
+        let found = extract_binary(&archive, &fake_exe, exe_name, "limen.tar.gz").unwrap();
+        assert_eq!(found.file_name().unwrap(), "Limen");
+        assert_eq!(std::fs::read(&found).unwrap(), b"#!/bin/true\n");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
