@@ -24,11 +24,13 @@ use crate::worker::{Command, Event, RunTag, Worker};
 #[derive(Clone, PartialEq)]
 enum Nav {
     About,
+    License,
     Modules,
     Module(String),
-    #[cfg(debug_assertions)]
-    DemoUi,
 }
+
+/// The full license text, embedded so it's always in sync with the repo.
+const LICENSE_TEXT: &str = include_str!("../../LICENSE");
 
 /// The Modules-page installed/available filter.
 #[derive(Clone, Copy, PartialEq)]
@@ -37,6 +39,17 @@ enum ModuleFilter {
     Installed,
     Available,
 }
+
+/// Tabs inside the Developer window.
+#[derive(Clone, Copy, PartialEq)]
+enum DevTab {
+    Modules,
+    UiKit,
+    Console,
+}
+
+/// Max lines kept in the debug console.
+const LOG_CAP: usize = 2000;
 
 pub struct LimenApp {
     worker: Worker,
@@ -61,6 +74,20 @@ pub struct LimenApp {
     remote_error: Option<String>,
     remote_loading: bool,
     remote_fetched: bool,
+
+    // Developer window (its own OS window / viewport)
+    dev_open: bool,
+    dev_tab: DevTab,
+    logs: std::collections::VecDeque<String>,
+    log_autoscroll: bool,
+
+    /// Module names pinned to the sidebar, in order (persisted in settings).
+    pinned: Vec<String>,
+
+    // Settings window
+    settings_open: bool,
+    /// Global UI scale as a percentage (persisted in settings).
+    ui_scale: f32,
 }
 
 impl LimenApp {
@@ -84,6 +111,45 @@ impl LimenApp {
             remote_error: None,
             remote_loading: false,
             remote_fetched: false,
+            dev_open: false,
+            dev_tab: DevTab::Modules,
+            logs: std::collections::VecDeque::new(),
+            log_autoscroll: true,
+            pinned: limen_core::Config::load().map(|c| c.pinned_modules).unwrap_or_default(),
+            settings_open: false,
+            ui_scale: {
+                let pct = limen_core::Config::load().map(|c| c.ui_scale_percent).unwrap_or(0);
+                if pct == 0 { 100.0 } else { pct as f32 }
+            },
+        }
+    }
+
+    /// Persist the current UI scale to settings.json (without clobbering others).
+    fn save_ui_scale(&self) {
+        if let Ok(mut cfg) = limen_core::Config::load() {
+            cfg.ui_scale_percent = self.ui_scale.round() as u32;
+            let _ = cfg.save();
+        }
+    }
+
+    /// Pin or unpin a module, then persist the pin list to settings.json.
+    fn toggle_pin(&mut self, name: &str) {
+        if let Some(i) = self.pinned.iter().position(|n| n == name) {
+            self.pinned.remove(i);
+        } else {
+            self.pinned.push(name.to_string());
+        }
+        // Persist without clobbering other settings.
+        if let Ok(mut cfg) = limen_core::Config::load() {
+            cfg.pinned_modules = self.pinned.clone();
+            let _ = cfg.save();
+        }
+    }
+
+    fn push_log(&mut self, line: String) {
+        self.logs.push_back(line);
+        while self.logs.len() > LOG_CAP {
+            self.logs.pop_front();
         }
     }
 
@@ -141,9 +207,12 @@ impl LimenApp {
                 },
                 Event::Status(msg) => {
                     self.busy = false;
+                    self.push_log(format!("[status] {msg}"));
                     self.status = msg;
                 }
+                Event::Log(line) => self.push_log(line),
                 Event::Fatal(e) => {
+                    self.push_log(format!("[fatal] {e}"));
                     self.fatal = Some(e);
                     self.status = "failed to start".to_string();
                 }
@@ -200,8 +269,13 @@ impl eframe::App for LimenApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
 
-        // Title bar
+        // Apply the global UI scale (set_zoom_factor no-ops if unchanged).
+        ctx.set_zoom_factor(self.ui_scale / 100.0);
+
+        // Reload is requested from the Modules page (set during the central panel).
         let mut reload = false;
+
+        // Title bar
         egui::TopBottomPanel::top("titlebar")
             .frame(
                 egui::Frame::none()
@@ -212,21 +286,16 @@ impl eframe::App for LimenApp {
                 ui.horizontal(|ui| {
                     ui.heading(egui::RichText::new("Limen").color(egui::Color32::from_rgb(0x5c, 0x9c, 0xf5)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Reload").clicked() {
-                            reload = true;
-                        }
-                        ui.add_space(8.0);
                         ui.label(egui::RichText::new(&self.status).weak());
                     });
                 });
             });
-        if reload {
-            self.worker.send(Command::Refresh);
-            self.remote_fetched = false;
-        }
 
         // Sidebar
         let mut nav_click: Option<Nav> = None;
+        let mut toggle_dev = false;
+        let mut toggle_settings = false;
+        let mut open_pinned: Option<String> = None;
         egui::SidePanel::left("nav")
             .resizable(false)
             .exact_width(168.0)
@@ -247,18 +316,59 @@ impl eframe::App for LimenApp {
                     nav_click = Some(Nav::Modules);
                 }
 
-                #[cfg(debug_assertions)]
-                {
+                ui.add_space(8.0);
+                ui.separator();
+
+                // Middle: pinned-module icons, scrollable if there are many. Only
+                // show pins that are currently installed. Leave room at the bottom
+                // for the developer tool button (drawn last, bottom-anchored).
+                let pins: Vec<String> = self
+                    .pinned
+                    .iter()
+                    .filter(|n| self.modules.iter().any(|m| &m.name == *n))
+                    .cloned()
+                    .collect();
+                if !pins.is_empty() {
                     ui.add_space(6.0);
-                    ui.separator();
-                    if ui
-                        .selectable_label(self.nav == Nav::DemoUi, egui::RichText::new("demo-ui").weak())
-                        .clicked()
-                    {
-                        nav_click = Some(Nav::DemoUi);
-                    }
+                    ui.label(egui::RichText::new("PINNED").small().weak());
+                    ui.add_space(2.0);
+                    let scroll_h = (ui.available_height() - 58.0).max(60.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .max_height(scroll_h)
+                        .show(ui, |ui| {
+                            for name in &pins {
+                                let selected = self.nav == Nav::Module(name.clone());
+                                if pinned_icon(ui, name, selected).clicked() {
+                                    open_pinned = Some(name.clone());
+                                }
+                                ui.add_space(4.0);
+                            }
+                        });
                 }
+
+                // Bottom: the developer + settings tool buttons.
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if tool_button(ui, "🛠", self.dev_open, "Developer").clicked() {
+                            toggle_dev = true;
+                        }
+                        if tool_button(ui, "⚙", self.settings_open, "Settings").clicked() {
+                            toggle_settings = true;
+                        }
+                    });
+                });
             });
+        if toggle_dev {
+            self.dev_open = !self.dev_open;
+        }
+        if toggle_settings {
+            self.settings_open = !self.settings_open;
+        }
+        if let Some(name) = open_pinned {
+            self.select_module(name);
+        }
 
         // Central content (split-borrow so the closure can mutate inputs while
         // reading the rest of the app).
@@ -266,10 +376,12 @@ impl eframe::App for LimenApp {
         let mut open_module: Option<String> = None;
         let mut remove_module: Option<String> = None;
         let mut add_module: Option<String> = None;
+        let mut toggle_pin: Option<String> = None;
         let mut go_modules = false;
+        let mut go_nav: Option<Nav> = None;
         {
             let LimenApp {
-                nav, modules, git_installed, view, view_error, inputs, output, busy, fatal,
+                nav, modules, git_installed, pinned, view, view_error, inputs, output, busy, fatal,
                 search, filter, remote, remote_error, remote_loading, ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -280,10 +392,22 @@ impl eframe::App for LimenApp {
                     return;
                 }
                 match nav {
-                    Nav::About => about_view(ui),
+                    Nav::About => {
+                        if about_view(ui) {
+                            go_nav = Some(Nav::License);
+                        }
+                    }
+                    Nav::License => {
+                        if ui.link("‹ About").clicked() {
+                            go_nav = Some(Nav::About);
+                        }
+                        ui.add_space(4.0);
+                        license_view(ui);
+                    }
                     Nav::Modules => modules_page(
-                        ui, modules, git_installed, remote, *remote_loading, remote_error, filter,
-                        search, &mut open_module, &mut remove_module, &mut add_module,
+                        ui, modules, git_installed, pinned, remote, *remote_loading, remote_error,
+                        filter, search, &mut open_module, &mut remove_module, &mut add_module,
+                        &mut toggle_pin, &mut reload,
                     ),
                     Nav::Module(name) => {
                         if ui.link("‹ Modules").clicked() {
@@ -292,10 +416,98 @@ impl eframe::App for LimenApp {
                         ui.add_space(4.0);
                         module_view(ui, name, view, view_error, inputs, output, *busy, &mut action)
                     }
-                    #[cfg(debug_assertions)]
-                    Nav::DemoUi => ui::render_demo_ui(ui, inputs),
                 }
             });
+        }
+
+        // Developer window — a real, separate OS window (its own viewport), with
+        // native resize/maximize. Toggled by the bottom-left tool button.
+        if self.dev_open {
+            let LimenApp { dev_open, dev_tab, inputs, logs, log_autoscroll, .. } = self;
+            let mut close = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("limen_developer"),
+                egui::ViewportBuilder::default()
+                    .with_title("Limen — Developer")
+                    .with_inner_size([900.0, 620.0])
+                    .with_min_inner_size([420.0, 300.0]),
+                |ctx, _class| {
+                    ui::apply_theme(ctx);
+                    egui::TopBottomPanel::top("dev_tabs").show(ctx, |ui| {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(dev_tab, DevTab::Modules, "Modules");
+                            ui.selectable_value(dev_tab, DevTab::UiKit, "UI Kit");
+                            ui.selectable_value(dev_tab, DevTab::Console, "Console");
+                        });
+                        ui.add_space(4.0);
+                    });
+                    egui::CentralPanel::default().show(ctx, |ui| match dev_tab {
+                        DevTab::Modules => dev_modules_docs(ui),
+                        DevTab::UiKit => ui::render_demo_ui(ui, inputs),
+                        DevTab::Console => dev_console(ui, logs, log_autoscroll),
+                    });
+                    // The OS window's close button asks the viewport to close.
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        close = true;
+                    }
+                },
+            );
+            if close {
+                *dev_open = false;
+            }
+        }
+
+        // Settings — a separate OS window (its own viewport). First setting:
+        // global UI scale, in discrete steps.
+        if self.settings_open {
+            let mut close = false;
+            let mut scale_changed = false;
+            let scale = &mut self.ui_scale;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("limen_settings"),
+                egui::ViewportBuilder::default()
+                    .with_title("Limen — Settings")
+                    .with_inner_size([440.0, 300.0])
+                    .with_min_inner_size([360.0, 220.0]),
+                |ctx, _class| {
+                    ui::apply_theme(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.add_space(4.0);
+                        ui.heading("Settings");
+                        ui.separator();
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("UI scale").strong());
+                        ui.label(
+                            egui::RichText::new("Make the whole interface bigger or smaller.")
+                                .small()
+                                .color(ui::color::TEXT_MUTED),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            for pct in [100.0_f32, 125.0, 150.0, 175.0, 200.0] {
+                                let selected = (*scale - pct).abs() < 0.5;
+                                if ui
+                                    .selectable_label(selected, format!("{}%", pct as u32))
+                                    .clicked()
+                                {
+                                    *scale = pct;
+                                    scale_changed = true;
+                                }
+                            }
+                        });
+                    });
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        close = true;
+                    }
+                },
+            );
+            if close {
+                self.settings_open = false;
+            }
+            if scale_changed {
+                self.save_ui_scale();
+            }
         }
 
         if let Some(n) = nav_click {
@@ -306,6 +518,9 @@ impl eframe::App for LimenApp {
         }
         if go_modules {
             self.nav = Nav::Modules;
+        }
+        if let Some(n) = go_nav {
+            self.nav = n;
         }
         if let Some(name) = open_module {
             self.select_module(name);
@@ -319,6 +534,13 @@ impl eframe::App for LimenApp {
             self.busy = true;
             self.status = format!("installing {reference}…");
             self.worker.send(Command::AddModule(reference));
+        }
+        if let Some(name) = toggle_pin {
+            self.toggle_pin(&name);
+        }
+        if reload {
+            self.worker.send(Command::Refresh);
+            self.remote_fetched = false;
         }
         if let Some(a) = action {
             self.dispatch(a);
@@ -337,6 +559,152 @@ impl eframe::App for LimenApp {
 
 // --------------------------------------------------------------------------- //
 
+/// A bottom-left sidebar tool button — a glyph on a rounded tile. Highlights
+/// when its window is open.
+fn tool_button(ui: &mut egui::Ui, glyph: &str, active: bool, tooltip: &str) -> egui::Response {
+    let size = egui::vec2(34.0, 30.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let bg = if active {
+        ui::color::ACCENT
+    } else if resp.hovered() {
+        ui::color::BG_HOVER
+    } else {
+        ui::color::BG_WIDGET
+    };
+    let fg = if active { ui::color::ON_ACCENT } else { ui::color::TEXT };
+    let p = ui.painter();
+    p.rect_filled(rect, egui::Rounding::same(6.0_f32), bg);
+    p.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(17.0),
+        fg,
+    );
+    resp.on_hover_text(tooltip)
+}
+
+/// A pinned-module icon for the sidebar: a rounded tile with the module's
+/// initials, highlighted when it's the active module. Tooltip shows the name.
+fn pinned_icon(ui: &mut egui::Ui, name: &str, selected: bool) -> egui::Response {
+    let size = egui::vec2(40.0, 36.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let bg = if selected {
+        ui::color::ACCENT
+    } else if resp.hovered() {
+        ui::color::BG_HOVER
+    } else {
+        ui::color::BG_WIDGET
+    };
+    let fg = if selected { ui::color::ON_ACCENT } else { ui::color::TEXT };
+    let initials: String = name.chars().take(2).collect::<String>().to_uppercase();
+    let p = ui.painter();
+    p.rect_filled(rect, egui::Rounding::same(7.0_f32), bg);
+    p.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        &initials,
+        egui::FontId::proportional(14.0),
+        fg,
+    );
+    resp.on_hover_text(name)
+}
+
+/// The Developer window's "Modules" tab — concise module-authoring docs.
+fn dev_modules_docs(ui: &mut egui::Ui) {
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let h = |ui: &mut egui::Ui, t: &str| {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(t).strong().size(15.0));
+        };
+        let p = |ui: &mut egui::Ui, t: &str| {
+            ui.label(egui::RichText::new(t).color(ui::color::TEXT_MUTED));
+        };
+
+        ui.heading("Writing a module");
+        p(ui, "A module is an independent package loaded from ~/.limen/modules. \
+                It speaks JSON-RPC and addresses other modules by capability.");
+
+        h(ui, "Manifest — limen.toml");
+        ui.monospace(
+            "[module]\n\
+             name = \"usb\"\n\
+             version = \"0.1.0\"\n\
+             language = \"python\"   # python | lua | js | native\n\
+             entry = \"main.py\"\n\
+             description = \"…\"\n\
+             \n\
+             [provides]\n\
+             capabilities = [\"ops.usb\"]\n\
+             \n\
+             [requires.capabilities]\n\
+             \"crowdstrike.rtr\" = \">=0.1\"",
+        );
+
+        h(ui, "Python SDK (host-injected — just import it)");
+        ui.monospace(
+            "from limen_sdk import Module, Window, Label, Text, Button\n\
+             m = Module(\"usb\", capabilities=[\"ops.usb\"])\n\
+             \n\
+             @m.method(\"list\")\n\
+             def list_(params, host):\n\
+             \x20   out = host.call(\"crowdstrike.rtr\", \"runscript\", {...})\n\
+             \x20   return {\"devices\": out}\n\
+             \n\
+             @m.on(\"demo.tick\")          # event callback\n\
+             def on_tick(payload, host): ...\n\
+             \n\
+             @m.ui\n\
+             def ui():\n\
+             \x20   return Window(\"USB\", [Button(\"List\", calls=\"list\", primary=True)])\n\
+             \n\
+             m.run()",
+        );
+
+        h(ui, "Talking to other modules");
+        p(ui, "host.call(capability, method, params) — synchronous, routed by the broker.\n\
+                host.emit(topic, payload) — fire an event to subscribers.\n\
+                @m.on(topic) — receive events (callback).\n\
+                host.log(msg) — appears in the Console tab.");
+
+        h(ui, "Publish");
+        p(ui, "Repo CRC-BARRACUDA/limen-<name>, topic 'limen-module'. \
+                Install with `limen add <name>`.");
+    });
+}
+
+/// The Developer window's "Console" tab — all host + module log lines.
+fn dev_console(
+    ui: &mut egui::Ui,
+    logs: &std::collections::VecDeque<String>,
+    autoscroll: &mut bool,
+) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("{} lines", logs.len())).color(ui::color::TEXT_MUTED));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.checkbox(autoscroll, "Autoscroll");
+        });
+    });
+    ui.separator();
+
+    egui::Frame::none()
+        .fill(ui::color::BG_ELEVATED)
+        .inner_margin(egui::Margin::same(8.0))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(*autoscroll)
+                .show(ui, |ui| {
+                    if logs.is_empty() {
+                        ui.label(egui::RichText::new("No logs yet.").color(ui::color::TEXT_MUTED));
+                    }
+                    for line in logs {
+                        ui.label(egui::RichText::new(line).monospace().size(12.0));
+                    }
+                });
+        });
+}
+
 /// The Modules page — a Zed-Extensions-style list: installed modules plus the
 /// ones available in the GitHub org (installable in a click).
 #[allow(clippy::too_many_arguments)]
@@ -344,6 +712,7 @@ fn modules_page(
     ui: &mut egui::Ui,
     modules: &[ModuleSpec],
     git_installed: &HashSet<String>,
+    pinned: &[String],
     remote: &[RemoteModule],
     remote_loading: bool,
     remote_error: &Option<String>,
@@ -352,9 +721,18 @@ fn modules_page(
     open: &mut Option<String>,
     remove: &mut Option<String>,
     add: &mut Option<String>,
+    toggle_pin: &mut Option<String>,
+    reload: &mut bool,
 ) {
     ui.add_space(4.0);
-    ui.heading("Modules");
+    ui.horizontal(|ui| {
+        ui.heading("Modules");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Reload").clicked() {
+                *reload = true;
+            }
+        });
+    });
     ui.add_space(10.0);
 
     // One universal search across installed (local) and org (remote) modules.
@@ -402,7 +780,10 @@ fn modules_page(
                 if !module_matches(m, &query) {
                     continue;
                 }
-                module_card(ui, m, git_installed.contains(&m.name), open, remove);
+                let is_pinned = pinned.iter().any(|n| n == &m.name);
+                module_card(
+                    ui, m, git_installed.contains(&m.name), is_pinned, open, remove, toggle_pin,
+                );
                 ui.add_space(10.0);
                 shown += 1;
             }
@@ -457,8 +838,10 @@ fn module_card(
     ui: &mut egui::Ui,
     m: &ModuleSpec,
     from_git: bool,
+    pinned: bool,
     open: &mut Option<String>,
     remove: &mut Option<String>,
+    toggle_pin: &mut Option<String>,
 ) {
     egui::Frame::none()
         .fill(ui::color::BG_ELEVATED)
@@ -518,6 +901,10 @@ fn module_card(
                         let bw = egui::vec2(96.0, ui.spacing().interact_size.y);
                         if ui.add_sized(bw, egui::Button::new("Open")).clicked() {
                             *open = Some(m.name.clone());
+                        }
+                        let pin_label = if pinned { "📌 Unpin" } else { "📌 Pin" };
+                        if ui.add_sized(bw, egui::Button::new(pin_label)).clicked() {
+                            *toggle_pin = Some(m.name.clone());
                         }
                         if ui.add_sized(bw, egui::Button::new("Remove")).clicked() {
                             *remove = Some(m.name.clone());
@@ -617,8 +1004,10 @@ const TAGLINE: &str = "On-demand ops console for a Windows fleet, over CrowdStri
 const DISCLAIMER: &str = "Development-branch software — the developer is not liable for your actions, \
 for bugs, or for a copy obtained without consent.";
 
-fn about_view(ui: &mut egui::Ui) {
+/// The About page. Returns `true` if the "License" button was clicked.
+fn about_view(ui: &mut egui::Ui) -> bool {
     let muted = egui::Color32::from_rgb(0x7a, 0x82, 0x8e);
+    let mut license_clicked = false;
 
     // Push the block toward the vertical middle.
     let top = (ui.available_height() * 0.14).clamp(24.0, 140.0);
@@ -644,7 +1033,45 @@ fn about_view(ui: &mut egui::Ui) {
         ui.separator();
         ui.add_space(8.0);
         ui.label(egui::RichText::new(DISCLAIMER).small().color(muted));
+
+        ui.add_space(14.0);
+        ui.label(
+            egui::RichText::new("Free software under the GNU GPL v3.")
+                .small()
+                .color(muted),
+        );
+        ui.add_space(4.0);
+        if ui.button("License").clicked() {
+            license_clicked = true;
+        }
     });
+
+    license_clicked
+}
+
+/// The License page — the embedded GPLv3 text, scrollable.
+fn license_view(ui: &mut egui::Ui) {
+    ui.heading("License");
+    ui.label(
+        egui::RichText::new(
+            "Limen is free software: you can redistribute it and/or modify it under \
+             the terms of the GNU General Public License, version 3 or later.",
+        )
+        .color(ui::color::TEXT_MUTED),
+    );
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(6.0);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let mut text = LICENSE_TEXT;
+            ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .desired_width(f32::INFINITY)
+                    .code_editor(),
+            );
+        });
 }
 
 /// Draw the Limen brand mark — a concentric indigo diamond (◈) on a dark rounded

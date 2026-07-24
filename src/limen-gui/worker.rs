@@ -7,9 +7,10 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
-use limen_core::{paths, Config, Engine, ModuleSpec};
+use limen_core::{install_runtime, paths, Config, Engine, ModuleSpec};
 use limen_registry::{list_org_modules, Lockfile, Registry, RemoteModule};
 use serde_json::Value;
 
@@ -60,6 +61,8 @@ pub enum Event {
     RunDone { tag: RunTag, result: Result<Value, String> },
     /// A registry operation finished (human-readable outcome).
     Status(String),
+    /// A host/module log line (for the debug console).
+    Log(String),
     /// The engine could not start.
     Fatal(String),
 }
@@ -88,13 +91,15 @@ impl Drop for Worker {
     }
 }
 
-fn start_engine(dirs: &[PathBuf]) -> Result<Engine, String> {
-    Engine::load(dirs)
-        .and_then(|mut e| {
-            e.start()?;
-            Ok(e)
-        })
-        .map_err(|e| format!("{e:#}"))
+fn start_engine(dirs: &[PathBuf], evt_tx: &Sender<Event>) -> Result<Engine, String> {
+    let mut engine = Engine::load(dirs).map_err(|e| format!("{e:#}"))?;
+    // Route all host + module logs into the debug console.
+    let log_tx = evt_tx.clone();
+    engine.set_logger(Arc::new(move |line: &str| {
+        let _ = log_tx.send(Event::Log(line.to_string()));
+    }));
+    engine.start().map_err(|e| format!("{e:#}"))?;
+    Ok(engine)
 }
 
 /// Snapshot the installed modules and read the lockfile to mark which came from
@@ -125,7 +130,7 @@ fn org() -> String {
 /// Restart the engine after the installed set changed.
 fn reload(engine: &mut Engine, dirs: &[PathBuf], evt_tx: &Sender<Event>) -> bool {
     engine.shutdown();
-    match start_engine(dirs) {
+    match start_engine(dirs, evt_tx) {
         Ok(e) => {
             *engine = e;
             let _ = evt_tx.send(Event::Modules(snapshot(engine)));
@@ -139,7 +144,7 @@ fn reload(engine: &mut Engine, dirs: &[PathBuf], evt_tx: &Sender<Event>) -> bool
 }
 
 fn run(dirs: Vec<PathBuf>, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
-    let mut engine = match start_engine(&dirs) {
+    let mut engine = match start_engine(&dirs, &evt_tx) {
         Ok(e) => e,
         Err(err) => {
             let _ = evt_tx.send(Event::Fatal(err));
@@ -169,7 +174,35 @@ fn run(dirs: Vec<PathBuf>, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
                     Err(e) => format!("install failed: {e:#}"),
                 };
                 let _ = evt_tx.send(Event::Status(msg));
+                // Start the newly-installed module(s); any whose interpreter is
+                // missing get recorded in missing_runtimes.
                 if !reload(&mut engine, &dirs, &evt_tx) {
+                    return;
+                }
+                // Auto-install any interpreter a new module needs but that isn't
+                // available yet (bundled or on PATH) — download it, then reload.
+                let missing = engine.missing_runtimes().to_vec();
+                let mut installed_any = false;
+                for rt in missing {
+                    let _ = evt_tx.send(Event::Status(format!(
+                        "downloading {} interpreter…",
+                        rt.display()
+                    )));
+                    match install_runtime(rt) {
+                        Ok(()) => {
+                            installed_any = true;
+                            let _ =
+                                evt_tx.send(Event::Status(format!("installed {} runtime", rt.display())));
+                        }
+                        Err(e) => {
+                            let _ = evt_tx.send(Event::Status(format!(
+                                "{} setup failed: {e}",
+                                rt.display()
+                            )));
+                        }
+                    }
+                }
+                if installed_any && !reload(&mut engine, &dirs, &evt_tx) {
                     return;
                 }
             }

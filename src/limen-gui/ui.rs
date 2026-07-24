@@ -301,12 +301,13 @@ fn collect_ids(
     }
 }
 
-/// The debug-only component gallery, where the standardized styles live.
-#[cfg(debug_assertions)]
+/// The component gallery — the UI Kit shown in the Developer window, and the
+/// standardized source of truth for module widget styling.
 pub fn render_demo_ui(ui: &mut egui::Ui, inputs: &mut HashMap<String, String>) {
-    ui.heading("demo-ui");
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    ui.heading("UI Kit");
     ui.label(styled(
-        "Standardized Limen widgets — the single source of truth for module styling (debug build only).",
+        "Standardized Limen widgets — the single source of truth for module styling.",
         LabelStyle::Weak,
     ));
     ui.separator();
@@ -360,6 +361,7 @@ pub fn render_demo_ui(ui: &mut egui::Ui, inputs: &mut HashMap<String, String>) {
             );
         }
     });
+    }); // end ScrollArea
 }
 
 #[cfg(test)]

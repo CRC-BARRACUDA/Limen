@@ -33,6 +33,8 @@ fn main() -> eframe::Result<()> {
 
 /// Configured search paths, plus `./modules` when developing in-repo.
 fn resolve_search_dirs() -> Vec<PathBuf> {
+    // Make sure the portable modules dir exists so there's a place to drop modules.
+    limen_core::paths::ensure_dirs();
     let mut dirs = Config::load().map(|c| c.search_dirs()).unwrap_or_default();
     let local = PathBuf::from("modules");
     if local.is_dir() && !dirs.contains(&local) {
