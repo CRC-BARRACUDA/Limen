@@ -42,6 +42,8 @@ struct Resolved {
     version: String,
     source: SourceSpec,
     tempdir: PathBuf,
+    branch: String,
+    commit: String,
 }
 
 pub struct Registry {
@@ -177,6 +179,8 @@ impl Registry {
                 source: r.source.kind().to_string(),
                 reference: r.source.reference(),
                 digest,
+                branch: r.branch.clone(),
+                commit: r.commit.clone(),
             };
             lock.upsert(entry.clone());
             report.installed.push(entry);
@@ -190,7 +194,8 @@ impl Registry {
     /// Recursively fetch `spec` and its dependencies into temp dirs.
     fn resolve(&self, spec: SourceSpec, acc: &mut BTreeMap<String, Resolved>) -> Result<()> {
         let tempdir = self.new_temp()?;
-        spec.fetch(&tempdir)
+        let meta = spec
+            .fetch(&tempdir)
             .with_context(|| format!("fetching {}", spec.describe()))?;
 
         let manifest = Manifest::from_dir(&tempdir)
@@ -242,6 +247,8 @@ impl Registry {
                 version,
                 source: spec,
                 tempdir: tempdir.clone(),
+                branch: meta.branch,
+                commit: meta.commit,
             },
         );
 

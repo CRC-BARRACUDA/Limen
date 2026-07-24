@@ -21,6 +21,8 @@ use serde_json::Value;
 pub struct ModuleSnapshot {
     pub specs: Vec<ModuleSpec>,
     pub git_installed: Vec<String>,
+    /// name → (branch, short commit) for git-installed modules.
+    pub git_meta: std::collections::HashMap<String, (String, String)>,
 }
 
 /// A request from the UI to the worker.
@@ -130,18 +132,20 @@ fn start_engine(dirs: &[PathBuf], evt_tx: &Sender<Event>) -> Result<Engine, Stri
 /// Snapshot the installed modules and read the lockfile to mark which came from
 /// a git install (vs. manually placed).
 fn snapshot(engine: &Engine) -> ModuleSnapshot {
-    let git_installed = Lockfile::load(&paths::home().join("limen.lock"))
-        .map(|lock| {
-            lock.modules
-                .into_iter()
-                .filter(|e| e.source == "git")
-                .map(|e| e.name)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut git_installed = Vec::new();
+    let mut git_meta = std::collections::HashMap::new();
+    if let Ok(lock) = Lockfile::load(&paths::home().join("limen.lock")) {
+        for e in lock.modules.into_iter().filter(|e| e.source == "git") {
+            if !e.branch.is_empty() || !e.commit.is_empty() {
+                git_meta.insert(e.name.clone(), (e.branch, e.commit));
+            }
+            git_installed.push(e.name);
+        }
+    }
     ModuleSnapshot {
         specs: engine.modules().to_vec(),
         git_installed,
+        git_meta,
     }
 }
 

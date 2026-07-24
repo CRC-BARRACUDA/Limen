@@ -16,6 +16,12 @@ pub struct LockEntry {
     pub reference: String,
     /// `sha256:<hex>` of the installed tree.
     pub digest: String,
+    /// Git branch/ref the module was installed from (empty for path installs).
+    #[serde(default)]
+    pub branch: String,
+    /// Git short commit the module was installed from (empty for path installs).
+    #[serde(default)]
+    pub commit: String,
 }
 
 /// The whole lockfile.

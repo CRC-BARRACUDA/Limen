@@ -76,6 +76,8 @@ pub struct LimenApp {
     modules: Vec<ModuleSpec>,
     /// Names of installed modules that came from a git install (vs. manual).
     git_installed: HashSet<String>,
+    /// name → (branch, short commit) for git-installed modules.
+    git_meta: HashMap<String, (String, String)>,
     /// Names of modules the user has granted their declared permissions
     /// (trusted at their current content digest).
     trusted: HashSet<String>,
@@ -133,6 +135,7 @@ impl LimenApp {
             fatal: None,
             modules: Vec::new(),
             git_installed: HashSet::new(),
+            git_meta: HashMap::new(),
             trusted: HashSet::new(),
             pending_action: None,
             tabs: vec![Tab::About, Tab::Modules],
@@ -315,6 +318,7 @@ impl LimenApp {
                 Event::Ready(snap) | Event::Modules(snap) => {
                     self.modules = snap.specs;
                     self.git_installed = snap.git_installed.into_iter().collect();
+                    self.git_meta = snap.git_meta;
                     self.refresh_trust();
                     // A reload follows a completed install/remove — clear the spinner.
                     self.installing = None;
@@ -642,9 +646,9 @@ impl eframe::App for LimenApp {
         let updating = self.updating;
         {
             let LimenApp {
-                modules, git_installed, pinned, view, view_error, inputs, output, busy_action,
-                fatal, search, filter, remote, remote_error, remote_loading, installing, dev_tab,
-                logs, log_autoscroll, ui_scale, ..
+                modules, git_installed, git_meta, pinned, view, view_error, inputs, output,
+                busy_action, fatal, search, filter, remote, remote_error, remote_loading,
+                installing, dev_tab, logs, log_autoscroll, ui_scale, ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(err) = fatal {
@@ -667,9 +671,10 @@ impl eframe::App for LimenApp {
                     }
                     Some(Tab::License) => license_view(ui),
                     Some(Tab::Modules) => modules_page(
-                        ui, modules, git_installed, pinned, remote, *remote_loading, remote_error,
-                        installing, filter, search, &mut open_module, &mut remove_module,
-                        &mut add_module, &mut update_module, &mut toggle_pin, &mut reload,
+                        ui, modules, git_installed, git_meta, pinned, remote, *remote_loading,
+                        remote_error, installing, filter, search, &mut open_module,
+                        &mut remove_module, &mut add_module, &mut update_module, &mut toggle_pin,
+                        &mut reload,
                     ),
                     Some(Tab::Module(name)) => {
                         module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
@@ -1028,6 +1033,7 @@ fn modules_page(
     ui: &mut egui::Ui,
     modules: &[ModuleSpec],
     git_installed: &HashSet<String>,
+    git_meta: &HashMap<String, (String, String)>,
     pinned: &[String],
     remote: &[RemoteModule],
     remote_loading: bool,
@@ -1100,8 +1106,8 @@ fn modules_page(
                 }
                 let is_pinned = pinned.iter().any(|n| n == &m.name);
                 module_card(
-                    ui, m, git_installed.contains(&m.name), is_pinned, installing, open, remove,
-                    update, toggle_pin,
+                    ui, m, git_installed.contains(&m.name), git_meta.get(&m.name), is_pinned,
+                    installing, open, remove, update, toggle_pin,
                 );
                 ui.add_space(10.0);
                 shown += 1;
@@ -1158,6 +1164,7 @@ fn module_card(
     ui: &mut egui::Ui,
     m: &ModuleSpec,
     from_git: bool,
+    git_meta: Option<&(String, String)>,
     pinned: bool,
     installing: &Option<String>,
     open: &mut Option<String>,
@@ -1212,6 +1219,24 @@ fn module_card(
                                     .small()
                                     .color(ui::color::TEXT_MUTED),
                             );
+                        }
+                        // Git revision this module was installed from.
+                        if let Some((branch, commit)) = git_meta {
+                            let rev = match (branch.as_str(), commit.as_str()) {
+                                ("", "") => String::new(),
+                                ("", c) => format!("commit {c}"),
+                                (b, "") => b.to_string(),
+                                (b, c) => format!("{b} · {c}"),
+                            };
+                            if !rev.is_empty() {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(rev)
+                                        .monospace()
+                                        .small()
+                                        .color(ui::color::TEXT_MUTED),
+                                );
+                            }
                         }
                     },
                 );

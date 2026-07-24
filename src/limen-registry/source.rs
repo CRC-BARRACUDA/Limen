@@ -111,23 +111,32 @@ impl SourceSpec {
     }
 
     /// Fetch this source into `dest` (which must not already exist).
-    pub fn fetch(&self, dest: &Path) -> Result<()> {
+    pub fn fetch(&self, dest: &Path) -> Result<GitMeta> {
         match self {
             SourceSpec::Path { path } => {
                 if !path.is_dir() {
                     bail!("local module path {} is not a directory", path.display());
                 }
                 copy_tree(path, dest)
-                    .with_context(|| format!("copying module from {}", path.display()))
+                    .with_context(|| format!("copying module from {}", path.display()))?;
+                Ok(GitMeta::default())
             }
             SourceSpec::Git { repo, version } => clone_git(repo, version.as_deref(), dest),
         }
     }
 }
 
-/// `git clone --depth 1` the repo (optionally at a tag/branch), then strip the
-/// `.git` directory so only the module tree remains.
-fn clone_git(repo: &str, version: Option<&str>, dest: &Path) -> Result<()> {
+/// Git revision a module was installed from.
+#[derive(Debug, Clone, Default)]
+pub struct GitMeta {
+    pub branch: String,
+    pub commit: String,
+}
+
+/// `git clone --depth 1` the repo (optionally at a tag/branch), record the
+/// checked-out branch + commit, then strip the `.git` directory so only the
+/// module tree remains.
+fn clone_git(repo: &str, version: Option<&str>, dest: &Path) -> Result<GitMeta> {
     let url = if repo.contains("://") || repo.ends_with(".git") {
         repo.to_string()
     } else {
@@ -147,6 +156,25 @@ fn clone_git(repo: &str, version: Option<&str>, dest: &Path) -> Result<()> {
     if !status.success() {
         bail!("git clone {url} failed (exit {status})");
     }
+
+    // Capture the revision before the `.git` dir is removed.
+    let commit = git_out(dest, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    let branch = match git_out(dest, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        // A tag checkout is detached (`HEAD`); fall back to the requested ref.
+        Some(b) if b != "HEAD" => b,
+        _ => version.unwrap_or_default().to_string(),
+    };
+
     let _ = std::fs::remove_dir_all(dest.join(".git"));
-    Ok(())
+    Ok(GitMeta { branch, commit })
+}
+
+/// Run `git -C dir <args>` and return its trimmed stdout, if it succeeds.
+fn git_out(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
