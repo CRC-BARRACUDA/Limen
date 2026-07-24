@@ -75,6 +75,12 @@ impl ModuleSpec {
             cwd: dir.to_path_buf(),
         })
     }
+
+    /// Whether this module is loaded in-process as a dynamic library. Such
+    /// modules can't hot-swap their code, so updating one needs an app restart.
+    pub fn is_native_lib(&self) -> bool {
+        matches!(self.launch, Launch::Native(_))
+    }
 }
 
 /// Decide how to launch a module. `native` + `abi = "native"` loads in-process;
@@ -539,4 +545,40 @@ fn limen_home() -> PathBuf {
         .ok()
         .and_then(|exe| exe.parent().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod spec_tests {
+    use super::*;
+    use crate::runtimes::Runtime;
+
+    fn spec(launch: Launch) -> ModuleSpec {
+        ModuleSpec {
+            name: "m".into(),
+            version: "0".into(),
+            description: None,
+            authors: vec![],
+            repo: None,
+            capabilities: vec![],
+            requires: BTreeMap::new(),
+            permissions: Permissions::default(),
+            language: Language::Native,
+            launch,
+            cwd: PathBuf::from("."),
+        }
+    }
+
+    #[test]
+    fn is_native_lib_only_for_in_process_libraries() {
+        // Only a dynamic library loaded in-process needs a restart to update.
+        assert!(spec(Launch::Native("lib.so".into())).is_native_lib());
+        // A compiled RPC binary runs as a subprocess — no restart needed.
+        assert!(!spec(Launch::Binary("bin".into())).is_native_lib());
+        // A scripted module re-runs its source — no restart needed.
+        assert!(!spec(Launch::Script {
+            runtime: Runtime::Python,
+            script: "m.py".into(),
+        })
+        .is_native_lib());
+    }
 }

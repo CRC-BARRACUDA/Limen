@@ -178,12 +178,17 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
     // Best-effort cleanup of the extraction scratch dir.
     let _ = std::fs::remove_dir_all(exe.with_extension("update-extract"));
 
-    // Restart into the new binary.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    Command::new(&exe)
-        .args(&args)
-        .spawn()
-        .map_err(|e| format!("restarting: {e}"))?;
+    restart_app();
+}
+
+/// Relaunch the current executable with the same arguments and exit. Never
+/// returns. Used after a self-update, and to reload native modules whose code
+/// can't hot-swap in a running process.
+pub fn restart_app() -> ! {
+    if let Ok(exe) = std::env::current_exe() {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let _ = Command::new(&exe).args(&args).spawn();
+    }
     std::process::exit(0);
 }
 
@@ -250,6 +255,24 @@ mod tests {
         assert!(!is_newer("0.1.0", "0.1.0"));
         assert!(!is_newer("0.1.0", "0.2.0"));
         assert!(!is_newer("v0.1.0", "0.1.0"));
+    }
+
+    #[test]
+    fn version_comparison_edge_cases() {
+        // Differing arity — missing components read as 0.
+        assert!(!is_newer("1.2", "1.2.0"));
+        assert!(!is_newer("1.2.0", "1.2"));
+        // Components past patch are ignored.
+        assert!(is_newer("1.2.4", "1.2.3.99"));
+        // Pre-release-ish suffixes: only the leading digits count.
+        assert!(is_newer("1.2.3-rc1", "1.2.2"));
+        assert!(!is_newer("1.2.3-rc1", "1.2.3"));
+        // Major dominates minor/patch.
+        assert!(is_newer("2.0.0", "1.99.99"));
+        // `v` prefix on either/both sides is normalized.
+        assert!(is_newer("v2.0.0", "v1.0.0"));
+        // Garbage never claims to be newer than a real version.
+        assert!(!is_newer("", "0.0.1"));
     }
 
     #[test]

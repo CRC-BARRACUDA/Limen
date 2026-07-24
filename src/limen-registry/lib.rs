@@ -24,7 +24,7 @@ mod util;
 
 pub use github::{list_org_modules, RemoteModule};
 pub use lockfile::{LockEntry, Lockfile};
-pub use registry::{InstallReport, Registry, VerifyItem, VerifyStatus};
+pub use registry::{latest_release_version, InstallReport, Registry, VerifyItem, VerifyStatus};
 pub use source::SourceSpec;
 pub use trust::TrustStore;
 pub use util::digest_dir;

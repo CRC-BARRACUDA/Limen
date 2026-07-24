@@ -10,10 +10,13 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
+use std::collections::HashMap;
+
 use limen_core::{
-    apply_update, check_update, install_runtime, paths, Config, Engine, ModuleSpec, UpdateInfo,
+    apply_update, check_update, install_runtime, is_newer, paths, restart_app, Config, Engine,
+    ModuleSpec, UpdateInfo,
 };
-use limen_registry::{list_org_modules, Lockfile, Registry, RemoteModule};
+use limen_registry::{latest_release_version, list_org_modules, Lockfile, Registry, RemoteModule};
 use serde_json::Value;
 
 /// A snapshot of installed modules plus which ones came from a git install
@@ -51,6 +54,9 @@ pub enum Command {
     RemoveModule(String),
     /// Download and apply an available app update, then restart.
     ApplyUpdate(UpdateInfo),
+    /// Cleanly shut modules down and relaunch the app (e.g. to load an updated
+    /// native library whose code can't hot-swap).
+    Restart,
     /// Shut modules down and exit the worker.
     Quit,
 }
@@ -78,6 +84,8 @@ pub enum Event {
     Log(String),
     /// A newer app version is available.
     UpdateAvailable(UpdateInfo),
+    /// Installed git modules that have a newer release: name → latest version.
+    ModuleUpdates(HashMap<String, String>),
     /// The engine could not start.
     Fatal(String),
 }
@@ -149,6 +157,36 @@ fn snapshot(engine: &Engine) -> ModuleSnapshot {
     }
 }
 
+/// `(name, repo, installed_version)` for each git-installed module with a repo —
+/// the set to check for available updates.
+fn update_check_refs(snap: &ModuleSnapshot) -> Vec<(String, String, String)> {
+    let git: std::collections::HashSet<&String> = snap.git_installed.iter().collect();
+    snap.specs
+        .iter()
+        .filter(|m| git.contains(&m.name))
+        .filter_map(|m| m.repo.clone().map(|r| (m.name.clone(), r, m.version.clone())))
+        .collect()
+}
+
+/// In the background, check each git module's latest release vs its installed
+/// version and report which have an update available.
+fn spawn_update_check(refs: Vec<(String, String, String)>, evt_tx: Sender<Event>) {
+    if refs.is_empty() {
+        return;
+    }
+    thread::spawn(move || {
+        let mut updates = HashMap::new();
+        for (name, repo, version) in refs {
+            if let Some(latest) = latest_release_version(&repo)
+                && is_newer(&latest, &version)
+            {
+                updates.insert(name, latest);
+            }
+        }
+        let _ = evt_tx.send(Event::ModuleUpdates(updates));
+    });
+}
+
 fn org() -> String {
     Config::load()
         .ok()
@@ -162,7 +200,9 @@ fn reload(engine: &mut Engine, dirs: &[PathBuf], evt_tx: &Sender<Event>) -> bool
     match start_engine(dirs, evt_tx) {
         Ok(e) => {
             *engine = e;
-            let _ = evt_tx.send(Event::Modules(snapshot(engine)));
+            let snap = snapshot(engine);
+            spawn_update_check(update_check_refs(&snap), evt_tx.clone());
+            let _ = evt_tx.send(Event::Modules(snap));
             true
         }
         Err(err) => {
@@ -185,12 +225,16 @@ fn run(
             return;
         }
     };
-    let _ = evt_tx.send(Event::Ready(snapshot(&engine)));
+    let snap = snapshot(&engine);
+    spawn_update_check(update_check_refs(&snap), evt_tx.clone());
+    let _ = evt_tx.send(Event::Ready(snap));
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             Command::Refresh => {
-                let _ = evt_tx.send(Event::Modules(snapshot(&engine)));
+                let snap = snapshot(&engine);
+                spawn_update_check(update_check_refs(&snap), evt_tx.clone());
+                let _ = evt_tx.send(Event::Modules(snap));
             }
             Command::ListRemote => {
                 let result = list_org_modules(&org()).map_err(|e| format!("{e:#}"));
@@ -298,6 +342,11 @@ fn run(
                 if let Err(e) = apply_update(&info) {
                     let _ = evt_tx.send(Event::Status(format!("update failed: {e}")));
                 }
+            }
+            Command::Restart => {
+                // Shut modules down cleanly, then relaunch (never returns).
+                engine.shutdown();
+                restart_app();
             }
             Command::Quit => {
                 engine.shutdown();

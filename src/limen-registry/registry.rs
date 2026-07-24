@@ -277,6 +277,30 @@ impl Registry {
 // Prebuilt native-library download.
 // --------------------------------------------------------------------------- //
 
+/// The latest release tag for a repo (`owner/repo` or URL), version-normalized
+/// (leading `v` stripped). `None` if there's no release, or on any error.
+pub fn latest_release_version(repo: &str) -> Option<String> {
+    let slug = github_slug(repo);
+    let url = format!("https://api.github.com/repos/{slug}/releases/latest");
+    let out = std::process::Command::new("curl")
+        .args([
+            "-sSL",
+            "-H",
+            "User-Agent: limen",
+            "-H",
+            "Accept: application/vnd.github+json",
+            &url,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let tag = json.get("tag_name")?.as_str()?;
+    Some(tag.trim_start_matches('v').to_string())
+}
+
 /// The GitHub `owner/repo` slug from a repo ref (short form or full URL).
 fn github_slug(repo: &str) -> &str {
     repo.strip_prefix("https://github.com/")
