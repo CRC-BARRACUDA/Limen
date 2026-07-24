@@ -329,15 +329,27 @@ fn release_assets(slug: &str, version: Option<&str>) -> Result<Vec<(String, Stri
     Ok(assets)
 }
 
-/// Pick the release asset matching this platform's library: it must end with the
-/// platform's extension (`.so`/`.dll`/`.dylib`); an arch-tagged name is preferred.
+/// Whether an asset name is a loadable library for this platform.
+fn is_lib(name: &str) -> bool {
+    name.ends_with(std::env::consts::DLL_SUFFIX)
+}
+
+/// Whether an asset name is a distribution archive we can extract a lib from.
+fn is_archive(name: &str) -> bool {
+    [".tar.gz", ".tgz", ".tar", ".zip"].iter().any(|e| name.ends_with(e))
+}
+
+/// Pick the release asset for this platform. Prefer a raw library
+/// (`.so`/`.dll`/`.dylib`, arch-tagged first); otherwise a distribution archive
+/// (`.tar.gz`/`.zip`) that we extract the library out of.
 fn match_platform_asset(assets: &[(String, String)]) -> Option<&(String, String)> {
-    let suffix = std::env::consts::DLL_SUFFIX;
     let arch = std::env::consts::ARCH;
     assets
         .iter()
-        .find(|(n, _)| n.ends_with(suffix) && n.contains(arch))
-        .or_else(|| assets.iter().find(|(n, _)| n.ends_with(suffix)))
+        .find(|(n, _)| is_lib(n) && n.contains(arch))
+        .or_else(|| assets.iter().find(|(n, _)| is_lib(n)))
+        .or_else(|| assets.iter().find(|(n, _)| is_archive(n) && n.contains(arch)))
+        .or_else(|| assets.iter().find(|(n, _)| is_archive(n)))
 }
 
 /// List `repo`'s release files, pick the one for this platform, and download it
@@ -355,7 +367,7 @@ fn fetch_native_asset(
     }
     let (name, url) = match_platform_asset(&assets).ok_or_else(|| {
         anyhow::anyhow!(
-            "no {} asset among: {}",
+            "no {} or archive asset among: {}",
             std::env::consts::DLL_SUFFIX,
             assets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
         )
@@ -363,17 +375,83 @@ fn fetch_native_asset(
 
     let filename = native_lib_filename(entry);
     let dest = dest_dir.join(&filename);
+
+    if is_archive(&name.to_lowercase()) {
+        // Download the archive, extract, and move the library into place.
+        let staged = dest_dir.join(".native-download");
+        let _ = std::fs::remove_file(&staged);
+        download(url, &staged)?;
+        let lib = extract_lib(&staged, name, dest_dir).inspect_err(|_| {
+            let _ = std::fs::remove_file(&staged);
+        })?;
+        let _ = std::fs::remove_file(&dest);
+        std::fs::rename(&lib, &dest).context("installing extracted native library")?;
+        let _ = std::fs::remove_file(&staged);
+        let _ = std::fs::remove_dir_all(dest_dir.join(".native-extract"));
+        Ok(format!("{name} → {filename} (extracted)"))
+    } else {
+        download(url, &dest)?;
+        Ok(format!("{name} → {filename}"))
+    }
+}
+
+/// Download `url` to `dest` with curl, failing on a non-2xx response.
+fn download(url: &str, dest: &Path) -> Result<()> {
     let status = std::process::Command::new("curl")
         .args(["-fsSL", "-o"])
-        .arg(&dest)
+        .arg(dest)
         .arg(url)
         .status()
         .context("running curl")?;
     if !status.success() {
-        let _ = std::fs::remove_file(&dest);
-        bail!("downloading {name} failed");
+        let _ = std::fs::remove_file(dest);
+        bail!("download failed: {url}");
     }
-    Ok(format!("{name} → {filename}"))
+    Ok(())
+}
+
+/// Extract `archive` (whose original `name` gives its type) into a scratch dir
+/// next to `dest_dir` and return the path to the first library inside.
+fn extract_lib(archive: &Path, name: &str, dest_dir: &Path) -> Result<std::path::PathBuf> {
+    let dir = dest_dir.join(".native-extract");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).context("creating extract dir")?;
+
+    let lower = name.to_lowercase();
+    let run = |c: &mut std::process::Command| c.status().map(|s| s.success()).unwrap_or(false);
+    let ok = if lower.ends_with(".zip") {
+        run(std::process::Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(&dir))
+            || run(std::process::Command::new("unzip").arg("-oq").arg(archive).arg("-d").arg(&dir))
+    } else if lower.ends_with(".tar") {
+        run(std::process::Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(&dir))
+    } else {
+        run(std::process::Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(&dir))
+    };
+    if !ok {
+        bail!("extracting native archive failed");
+    }
+    locate_lib(&dir).ok_or_else(|| {
+        anyhow::anyhow!("no {} library inside the archive", std::env::consts::DLL_SUFFIX)
+    })
+}
+
+/// Recursively find the first file that is a loadable library for this platform.
+fn locate_lib(dir: &Path) -> Option<std::path::PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| is_lib(&n.to_string_lossy())) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -407,6 +485,47 @@ mod tests {
         ];
         let picked = match_platform_asset(&assets).unwrap();
         assert!(picked.0.ends_with(std::env::consts::DLL_SUFFIX));
+
+        // With no raw lib, an archive is chosen as the fallback.
+        let only_archives = vec![
+            ("local_devices-linux-x86_64.tar.gz".to_string(), "a1".to_string()),
+            ("README.txt".to_string(), "a2".to_string()),
+        ];
+        let picked = match_platform_asset(&only_archives).unwrap();
+        assert!(is_archive(&picked.0));
+
+        // A raw lib is preferred over an archive when both are present.
+        let mixed = vec![
+            (format!("m{}", std::env::consts::DLL_SUFFIX), "lib".to_string()),
+            ("m-linux-x86_64.tar.gz".to_string(), "arc".to_string()),
+        ];
+        assert_eq!(match_platform_asset(&mixed).unwrap().1, "lib");
+    }
+
+    #[test]
+    fn extracts_lib_from_archive() {
+        // A tarball shaped like a module release: <stem>/lib<name>.so inside.
+        let base = std::env::temp_dir().join(format!("limen-reg-extract-{}", std::process::id()));
+        let stem = base.join("local_devices-linux-x86_64");
+        std::fs::create_dir_all(&stem).unwrap();
+        let libname = native_lib_filename("local_devices");
+        std::fs::write(stem.join(&libname), b"\x7fELF-stub").unwrap();
+        std::fs::write(stem.join("README"), b"x").unwrap();
+        let archive = base.join("local_devices-linux-x86_64.tar.gz");
+        assert!(std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&base)
+            .arg("local_devices-linux-x86_64")
+            .status()
+            .unwrap()
+            .success());
+
+        let found = extract_lib(&archive, "local_devices-linux-x86_64.tar.gz", &base).unwrap();
+        assert!(is_lib(&found.file_name().unwrap().to_string_lossy()));
+        assert_eq!(std::fs::read(&found).unwrap(), b"\x7fELF-stub");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn write_module(dir: &Path, body: &str) {
