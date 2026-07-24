@@ -1220,22 +1220,26 @@ fn module_card(
                                     .color(ui::color::TEXT_MUTED),
                             );
                         }
-                        // Git revision this module was installed from.
+                        // Git revision this module was installed from — branch on
+                        // top, commit below.
                         if let Some((branch, commit)) = git_meta {
-                            let rev = match (branch.as_str(), commit.as_str()) {
-                                ("", "") => String::new(),
-                                ("", c) => format!("commit {c}"),
-                                (b, "") => b.to_string(),
-                                (b, c) => format!("{b} · {c}"),
-                            };
-                            if !rev.is_empty() {
+                            let mut lines: Vec<String> = Vec::new();
+                            if !branch.is_empty() {
+                                lines.push(format!("branch - {branch}"));
+                            }
+                            if !commit.is_empty() {
+                                lines.push(format!("commit - {commit}"));
+                            }
+                            if !lines.is_empty() {
                                 ui.add_space(4.0);
-                                ui.label(
-                                    egui::RichText::new(rev)
-                                        .monospace()
-                                        .small()
-                                        .color(ui::color::TEXT_MUTED),
-                                );
+                                for line in lines {
+                                    ui.label(
+                                        egui::RichText::new(line)
+                                            .monospace()
+                                            .small()
+                                            .color(ui::color::TEXT_MUTED),
+                                    );
+                                }
                             }
                         }
                     },
