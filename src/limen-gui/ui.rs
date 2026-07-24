@@ -111,7 +111,7 @@ pub struct View {
 }
 
 /// The capability + method a button invokes.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Action {
     pub capability: String,
     pub method: String,
@@ -174,16 +174,25 @@ pub enum Widget {
     Row {
         children: Vec<Widget>,
     },
+    /// A table with a header row and string cells.
+    Table {
+        #[serde(default)]
+        columns: Vec<String>,
+        #[serde(default)]
+        rows: Vec<Vec<String>>,
+    },
 }
 
-/// Render a view; returns the action of a clicked button, if any.
+/// Render a view; returns the action of a clicked button, if any. `busy` is the
+/// action currently in flight (its button shows a spinner).
 pub fn render_view(
     ui: &mut egui::Ui,
     view: &View,
     inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
 ) -> Option<Action> {
     let mut clicked = None;
-    render_widgets(ui, &view.widgets, inputs, &mut clicked);
+    render_widgets(ui, &view.widgets, inputs, busy, &mut clicked);
     clicked
 }
 
@@ -191,10 +200,11 @@ fn render_widgets(
     ui: &mut egui::Ui,
     widgets: &[Widget],
     inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
     clicked: &mut Option<Action>,
 ) {
     for w in widgets {
-        render_widget(ui, w, inputs, clicked);
+        render_widget(ui, w, inputs, busy, clicked);
     }
 }
 
@@ -202,6 +212,7 @@ fn render_widget(
     ui: &mut egui::Ui,
     widget: &Widget,
     inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
     clicked: &mut Option<Action>,
 ) {
     match widget {
@@ -251,17 +262,54 @@ fn render_widget(
                 .fill(color::ACCENT),
                 ButtonStyle::Default => egui::Button::new(text),
             };
-            if ui.add(button).clicked() {
-                *clicked = Some(action.clone());
-            }
+            let running = busy == Some(action);
+            ui.horizontal(|ui| {
+                if ui.add(button).clicked() {
+                    *clicked = Some(action.clone());
+                }
+                if running {
+                    ui.add_space(6.0);
+                    ui.spinner(); // animates while this action is in flight
+                }
+            });
         }
         Widget::Separator => {
             ui.separator();
         }
         Widget::Row { children } => {
-            ui.horizontal(|ui| render_widgets(ui, children, inputs, clicked));
+            ui.horizontal(|ui| render_widgets(ui, children, inputs, busy, clicked));
         }
+        Widget::Table { columns, rows } => render_table(ui, columns, rows),
     }
+}
+
+/// Render a [`Widget::Table`] as a striped grid inside a scroll area.
+fn render_table(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<String>]) {
+    let ncols = columns.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    if ncols == 0 {
+        return;
+    }
+    let id = ui.make_persistent_id(("limen_table", ncols, rows.len()));
+    egui::ScrollArea::horizontal()
+        .id_source(id)
+        .show(ui, |ui| {
+            egui::Grid::new(id)
+                .striped(true)
+                .num_columns(ncols)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    for c in columns {
+                        ui.label(egui::RichText::new(c).strong());
+                    }
+                    ui.end_row();
+                    for row in rows {
+                        for cell in row {
+                            ui.label(cell);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
 }
 
 fn styled(text: &str, style: LabelStyle) -> egui::RichText {

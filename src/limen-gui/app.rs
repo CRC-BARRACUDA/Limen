@@ -21,12 +21,28 @@ use limen_registry::RemoteModule;
 use crate::ui;
 use crate::worker::{Command, Event, RunTag, Worker};
 
+/// An open tab. All tabs are closable.
 #[derive(Clone, PartialEq)]
-enum Nav {
+enum Tab {
     About,
     License,
     Modules,
     Module(String),
+    Settings,
+    Developer,
+}
+
+impl Tab {
+    fn title(&self) -> String {
+        match self {
+            Tab::About => "About".into(),
+            Tab::License => "License".into(),
+            Tab::Modules => "Modules".into(),
+            Tab::Module(n) => n.clone(),
+            Tab::Settings => "Settings".into(),
+            Tab::Developer => "Developer".into(),
+        }
+    }
 }
 
 /// The full license text, embedded so it's always in sync with the repo.
@@ -58,13 +74,25 @@ pub struct LimenApp {
     modules: Vec<ModuleSpec>,
     /// Names of installed modules that came from a git install (vs. manual).
     git_installed: HashSet<String>,
+    /// Names of modules the user has granted their declared permissions
+    /// (trusted at their current content digest).
+    trusted: HashSet<String>,
+    /// An elevated action awaiting the user's consent (shown as a dialog).
+    pending_action: Option<ui::Action>,
 
-    nav: Nav,
+    /// Open tabs (in order) and the active index.
+    tabs: Vec<Tab>,
+    active: usize,
+    /// Per-module visit counts, for the "frequent" quick-open chips.
+    visits: HashMap<String, u32>,
+
     view: Option<ui::View>,
     view_error: Option<String>,
     inputs: HashMap<String, String>,
     output: String,
     busy: bool,
+    /// The action currently in flight (its button shows a spinner).
+    busy_action: Option<ui::Action>,
 
     // Modules page state
     search: String,
@@ -75,17 +103,14 @@ pub struct LimenApp {
     remote_loading: bool,
     remote_fetched: bool,
 
-    // Developer window (its own OS window / viewport)
-    dev_open: bool,
+    // Developer tab
     dev_tab: DevTab,
     logs: std::collections::VecDeque<String>,
     log_autoscroll: bool,
 
-    /// Module names pinned to the sidebar, in order (persisted in settings).
+    /// Module names pinned to the tab bar, in order (persisted in settings).
     pinned: Vec<String>,
 
-    // Settings window
-    settings_open: bool,
     /// Global UI scale as a percentage (persisted in settings).
     ui_scale: f32,
 }
@@ -99,28 +124,93 @@ impl LimenApp {
             fatal: None,
             modules: Vec::new(),
             git_installed: HashSet::new(),
-            nav: Nav::About,
+            trusted: HashSet::new(),
+            pending_action: None,
+            tabs: vec![Tab::About, Tab::Modules],
+            active: 0,
+            visits: HashMap::new(),
             view: None,
             view_error: None,
             inputs: HashMap::new(),
             output: String::new(),
             busy: false,
+            busy_action: None,
             search: String::new(),
             filter: ModuleFilter::All,
             remote: Vec::new(),
             remote_error: None,
             remote_loading: false,
             remote_fetched: false,
-            dev_open: false,
             dev_tab: DevTab::Modules,
             logs: std::collections::VecDeque::new(),
             log_autoscroll: true,
             pinned: limen_core::Config::load().map(|c| c.pinned_modules).unwrap_or_default(),
-            settings_open: false,
             ui_scale: {
                 let pct = limen_core::Config::load().map(|c| c.ui_scale_percent).unwrap_or(0);
                 if pct == 0 { 100.0 } else { pct as f32 }
             },
+        }
+    }
+
+    /// The active tab (cloned).
+    fn active_tab(&self) -> Option<Tab> {
+        self.tabs.get(self.active).cloned()
+    }
+
+    /// Open `tab` (focus it if already open, else append), and activate it.
+    fn open_tab(&mut self, tab: Tab) {
+        match self.tabs.iter().position(|t| *t == tab) {
+            Some(i) => self.active = i,
+            None => {
+                self.tabs.push(tab);
+                self.active = self.tabs.len() - 1;
+            }
+        }
+    }
+
+    /// Close the tab at `index`. Closing a pinned module also unpins it.
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if let Tab::Module(name) = &self.tabs[index] {
+            if self.pinned.iter().any(|n| n == name) {
+                let name = name.clone();
+                self.toggle_pin(&name); // unpin
+            }
+        }
+        self.tabs.remove(index);
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len().saturating_sub(1);
+        } else if self.active > index {
+            self.active -= 1;
+        }
+    }
+
+    /// The `n` most-visited installed modules that aren't already open as tabs.
+    fn frequent_modules(&self, n: usize) -> Vec<String> {
+        let mut v: Vec<(&String, u32)> = self
+            .visits
+            .iter()
+            .filter(|(name, c)| {
+                **c > 0
+                    && self.modules.iter().any(|m| &m.name == *name)
+                    && !self.tabs.iter().any(|t| *t == Tab::Module((*name).clone()))
+            })
+            .map(|(name, c)| (name, *c))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        v.into_iter().take(n).map(|(name, _)| name.clone()).collect()
+    }
+
+    /// Ensure every pinned+installed module has an open tab (pinned tabs persist).
+    fn sync_pinned_tabs(&mut self) {
+        for name in self.pinned.clone() {
+            if self.modules.iter().any(|m| m.name == name)
+                && !self.tabs.iter().any(|t| *t == Tab::Module(name.clone()))
+            {
+                self.tabs.push(Tab::Module(name));
+            }
         }
     }
 
@@ -146,6 +236,62 @@ impl LimenApp {
         }
     }
 
+    /// Recompute which sensitive modules the user has granted (trusted at their
+    /// current digest). Cheap enough to run on module load / after a grant.
+    fn refresh_trust(&mut self) {
+        let trust = limen_registry::TrustStore::load(&limen_core::paths::home())
+            .unwrap_or_default();
+        self.trusted.clear();
+        for m in &self.modules {
+            if !m.permissions.sensitive() {
+                continue;
+            }
+            if let Ok(digest) = limen_registry::digest_dir(&m.cwd) {
+                if trust.is_trusted(&m.name, &digest) {
+                    self.trusted.insert(m.name.clone());
+                }
+            }
+        }
+    }
+
+    /// The module that provides `capability`, if any.
+    fn module_of(&self, capability: &str) -> Option<&ModuleSpec> {
+        self.modules
+            .iter()
+            .find(|m| m.capabilities.iter().any(|c| c == capability))
+    }
+
+    /// Does this action invoke an elevated method on a module the user hasn't
+    /// granted yet? If so, it needs a consent prompt first.
+    fn action_needs_consent(&self, a: &ui::Action) -> bool {
+        match self.module_of(&a.capability) {
+            Some(m) => {
+                m.permissions.method_needs_consent(&a.method) && !self.trusted.contains(&m.name)
+            }
+            None => false,
+        }
+    }
+
+    /// Grant a module its declared permissions: pin trust to its current digest,
+    /// persist, and update the cached trusted set. Returns success.
+    fn grant_trust(&mut self, name: &str) -> bool {
+        let Some(spec) = self.modules.iter().find(|m| m.name == name) else {
+            return false;
+        };
+        let Ok(digest) = limen_registry::digest_dir(&spec.cwd) else {
+            return false;
+        };
+        let mut trust = limen_registry::TrustStore::load(&limen_core::paths::home())
+            .unwrap_or_default();
+        trust.approve(name, &digest);
+        if trust.save(&limen_core::paths::home()).is_ok() {
+            self.trusted.insert(name.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
     fn push_log(&mut self, line: String) {
         self.logs.push_back(line);
         while self.logs.len() > LOG_CAP {
@@ -159,6 +305,7 @@ impl LimenApp {
                 Event::Ready(snap) | Event::Modules(snap) => {
                     self.modules = snap.specs;
                     self.git_installed = snap.git_installed.into_iter().collect();
+                    self.refresh_trust();
                     self.status = format!("{} module(s) loaded", self.modules.len());
                 }
                 Event::RemoteModules(result) => {
@@ -173,8 +320,8 @@ impl LimenApp {
                 }
                 Event::RunDone { tag, result } => match tag {
                     RunTag::Ui { module } => {
-                        // Ignore late results for a module we've navigated away from.
-                        if self.nav == Nav::Module(module) {
+                        // Ignore late results if the active tab isn't that module.
+                        if self.active_tab() == Some(Tab::Module(module)) {
                             self.busy = false;
                             match result {
                                 Ok(v) => match serde_json::from_value::<ui::View>(v) {
@@ -198,15 +345,33 @@ impl LimenApp {
                     }
                     RunTag::Action => {
                         self.busy = false;
-                        self.output = match result {
-                            Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|e| e.to_string()),
-                            Err(e) => format!("error: {e}"),
-                        };
+                        self.busy_action = None;
+                        match result {
+                            // A method may return a *view* (object with "widgets")
+                            // to re-render the module UI in place (e.g. Refresh /
+                            // Search). Otherwise the result is shown as output.
+                            Ok(v) if v.get("widgets").is_some() => {
+                                match serde_json::from_value::<ui::View>(v) {
+                                    Ok(view) => {
+                                        self.view = Some(view);
+                                        self.view_error = None;
+                                        self.output.clear();
+                                    }
+                                    Err(e) => self.output = format!("invalid view: {e}"),
+                                }
+                            }
+                            Ok(v) => {
+                                self.output =
+                                    serde_json::to_string_pretty(&v).unwrap_or_else(|e| e.to_string())
+                            }
+                            Err(e) => self.output = format!("error: {e}"),
+                        }
                         self.status = "done".to_string();
                     }
                 },
                 Event::Status(msg) => {
                     self.busy = false;
+                    self.refresh_trust();
                     self.push_log(format!("[status] {msg}"));
                     self.status = msg;
                 }
@@ -221,7 +386,8 @@ impl LimenApp {
     }
 
     fn select_module(&mut self, name: String) {
-        self.nav = Nav::Module(name.clone());
+        self.open_tab(Tab::Module(name.clone()));
+        *self.visits.entry(name.clone()).or_insert(0) += 1;
         self.view = None;
         self.view_error = None;
         self.inputs.clear();
@@ -247,7 +413,8 @@ impl LimenApp {
             .map(|v| ui::collect_params(v, &self.inputs))
             .unwrap_or_else(|| serde_json::json!({}));
         self.busy = true;
-        self.output = "running…".to_string();
+        self.busy_action = Some(action.clone());
+        self.output.clear(); // the button spinner shows progress, not the Result pane
         self.status = format!("{}.{}", action.capability, action.method);
         self.worker.send(Command::Run {
             tag: RunTag::Action,
@@ -275,7 +442,16 @@ impl eframe::App for LimenApp {
         // Reload is requested from the Modules page (set during the central panel).
         let mut reload = false;
 
-        // Title bar
+        // Keep pinned modules present as tabs.
+        self.sync_pinned_tabs();
+
+        // Intents collected while rendering, applied after.
+        let mut open_tab: Option<Tab> = None;
+        let mut switch_to: Option<usize> = None;
+        let mut close_idx: Option<usize> = None;
+        let mut scale_changed = false;
+
+        // Title bar: brand + quick-open buttons + status.
         egui::TopBottomPanel::top("titlebar")
             .frame(
                 egui::Frame::none()
@@ -284,105 +460,84 @@ impl eframe::App for LimenApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading(egui::RichText::new("Limen").color(egui::Color32::from_rgb(0x5c, 0x9c, 0xf5)));
+                    // App icon (the ◈ brand mark) in place of the wordmark.
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+                    draw_brand(ui.painter(), rect);
+                    ui.add_space(12.0);
+                    if ui.button("About").clicked() {
+                        open_tab = Some(Tab::About);
+                    }
+                    if ui.button("Modules").clicked() {
+                        open_tab = Some(Tab::Modules);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(&self.status).weak());
+                        if ui.button("🛠").on_hover_text("Developer").clicked() {
+                            open_tab = Some(Tab::Developer);
+                        }
+                        if ui.button("⚙").on_hover_text("Settings").clicked() {
+                            open_tab = Some(Tab::Settings);
+                        }
                     });
                 });
             });
 
-        // Sidebar
-        let mut nav_click: Option<Nav> = None;
-        let mut toggle_dev = false;
-        let mut toggle_settings = false;
-        let mut open_pinned: Option<String> = None;
-        egui::SidePanel::left("nav")
-            .resizable(false)
-            .exact_width(168.0)
+        // Tab strip: open tabs (pinned modules marked), with close buttons; plus
+        // "frequent" quick-open chips on the right.
+        let pinned = self.pinned.clone();
+        let frequent = self.frequent_modules(4);
+        egui::TopBottomPanel::top("tabstrip")
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x18, 0x1a, 0x1f)).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
             .show(ctx, |ui| {
-                ui.add_space(8.0);
-                if ui
-                    .selectable_label(self.nav == Nav::About, egui::RichText::new("About").size(15.0))
-                    .clicked()
-                {
-                    nav_click = Some(Nav::About);
-                }
-                // "Modules" is selected both on the list page and any module detail.
-                let on_modules = matches!(self.nav, Nav::Modules | Nav::Module(_));
-                if ui
-                    .selectable_label(on_modules, egui::RichText::new("Modules").size(15.0))
-                    .clicked()
-                {
-                    nav_click = Some(Nav::Modules);
-                }
-
-                ui.add_space(8.0);
-                ui.separator();
-
-                // Middle: pinned-module icons, scrollable if there are many. Only
-                // show pins that are currently installed. Leave room at the bottom
-                // for the developer tool button (drawn last, bottom-anchored).
-                let pins: Vec<String> = self
-                    .pinned
-                    .iter()
-                    .filter(|n| self.modules.iter().any(|m| &m.name == *n))
-                    .cloned()
-                    .collect();
-                if !pins.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new("PINNED").small().weak());
-                    ui.add_space(2.0);
-                    let scroll_h = (ui.available_height() - 58.0).max(60.0);
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, true])
-                        .max_height(scroll_h)
-                        .show(ui, |ui| {
-                            for name in &pins {
-                                let selected = self.nav == Nav::Module(name.clone());
-                                if pinned_icon(ui, name, selected).clicked() {
-                                    open_pinned = Some(name.clone());
+                ui.horizontal_wrapped(|ui| {
+                    for (i, tab) in self.tabs.iter().enumerate() {
+                        let selected = i == self.active;
+                        let pinned = matches!(tab, Tab::Module(n) if pinned.iter().any(|p| p == n));
+                        let title = if pinned {
+                            format!("📌 {}", tab.title())
+                        } else {
+                            tab.title()
+                        };
+                        if ui.selectable_label(selected, title).clicked() {
+                            switch_to = Some(i);
+                        }
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("×").weak()).frame(false))
+                            .on_hover_text("Close")
+                            .clicked()
+                        {
+                            close_idx = Some(i);
+                        }
+                        ui.add_space(6.0);
+                    }
+                    // Frequently-visited modules not already open.
+                    if !frequent.is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            for name in frequent.iter().rev() {
+                                if ui
+                                    .add(egui::Button::new(egui::RichText::new(format!("↗ {name}")).small()).frame(false))
+                                    .on_hover_text("Frequently used — open")
+                                    .clicked()
+                                {
+                                    open_tab = Some(Tab::Module(name.clone()));
                                 }
-                                ui.add_space(4.0);
                             }
                         });
-                }
-
-                // Bottom: the developer + settings tool buttons.
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if tool_button(ui, "🛠", self.dev_open, "Developer").clicked() {
-                            toggle_dev = true;
-                        }
-                        if tool_button(ui, "⚙", self.settings_open, "Settings").clicked() {
-                            toggle_settings = true;
-                        }
-                    });
+                    }
                 });
             });
-        if toggle_dev {
-            self.dev_open = !self.dev_open;
-        }
-        if toggle_settings {
-            self.settings_open = !self.settings_open;
-        }
-        if let Some(name) = open_pinned {
-            self.select_module(name);
-        }
 
-        // Central content (split-borrow so the closure can mutate inputs while
-        // reading the rest of the app).
+        // Central content for the active tab (split-borrow to mutate inputs etc).
         let mut action: Option<ui::Action> = None;
         let mut open_module: Option<String> = None;
         let mut remove_module: Option<String> = None;
         let mut add_module: Option<String> = None;
         let mut toggle_pin: Option<String> = None;
-        let mut go_modules = false;
-        let mut go_nav: Option<Nav> = None;
+        let active_tab = self.active_tab();
         {
             let LimenApp {
-                nav, modules, git_installed, pinned, view, view_error, inputs, output, busy, fatal,
-                search, filter, remote, remote_error, remote_loading, ..
+                modules, git_installed, pinned, view, view_error, inputs, output, busy_action,
+                fatal, search, filter, remote, remote_error, remote_loading, dev_tab, logs,
+                log_autoscroll, ui_scale, ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(err) = fatal {
@@ -391,137 +546,55 @@ impl eframe::App for LimenApp {
                     ui.monospace(err.as_str());
                     return;
                 }
-                match nav {
-                    Nav::About => {
+                match active_tab {
+                    None => {
+                        ui.add_space(24.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new("No open tabs — use the buttons above.").weak());
+                        });
+                    }
+                    Some(Tab::About) => {
                         if about_view(ui) {
-                            go_nav = Some(Nav::License);
+                            open_tab = Some(Tab::License);
                         }
                     }
-                    Nav::License => {
-                        if ui.link("‹ About").clicked() {
-                            go_nav = Some(Nav::About);
-                        }
-                        ui.add_space(4.0);
-                        license_view(ui);
-                    }
-                    Nav::Modules => modules_page(
+                    Some(Tab::License) => license_view(ui),
+                    Some(Tab::Modules) => modules_page(
                         ui, modules, git_installed, pinned, remote, *remote_loading, remote_error,
                         filter, search, &mut open_module, &mut remove_module, &mut add_module,
                         &mut toggle_pin, &mut reload,
                     ),
-                    Nav::Module(name) => {
-                        if ui.link("‹ Modules").clicked() {
-                            go_modules = true;
-                        }
-                        ui.add_space(4.0);
-                        module_view(ui, name, view, view_error, inputs, output, *busy, &mut action)
+                    Some(Tab::Module(name)) => {
+                        module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
+                    }
+                    Some(Tab::Settings) => settings_view(ui, ui_scale, &mut scale_changed),
+                    Some(Tab::Developer) => {
+                        developer_view(ui, dev_tab, inputs, logs, log_autoscroll)
                     }
                 }
             });
         }
 
-        // Developer window — a real, separate OS window (its own viewport), with
-        // native resize/maximize. Toggled by the bottom-left tool button.
-        if self.dev_open {
-            let LimenApp { dev_open, dev_tab, inputs, logs, log_autoscroll, .. } = self;
-            let mut close = false;
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("limen_developer"),
-                egui::ViewportBuilder::default()
-                    .with_title("Limen — Developer")
-                    .with_inner_size([900.0, 620.0])
-                    .with_min_inner_size([420.0, 300.0]),
-                |ctx, _class| {
-                    ui::apply_theme(ctx);
-                    egui::TopBottomPanel::top("dev_tabs").show(ctx, |ui| {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(dev_tab, DevTab::Modules, "Modules");
-                            ui.selectable_value(dev_tab, DevTab::UiKit, "UI Kit");
-                            ui.selectable_value(dev_tab, DevTab::Console, "Console");
-                        });
-                        ui.add_space(4.0);
-                    });
-                    egui::CentralPanel::default().show(ctx, |ui| match dev_tab {
-                        DevTab::Modules => dev_modules_docs(ui),
-                        DevTab::UiKit => ui::render_demo_ui(ui, inputs),
-                        DevTab::Console => dev_console(ui, logs, log_autoscroll),
-                    });
-                    // The OS window's close button asks the viewport to close.
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        close = true;
-                    }
-                },
-            );
-            if close {
-                *dev_open = false;
+        // Apply tab intents.
+        if let Some(i) = switch_to {
+            match self.tabs.get(i).cloned() {
+                Some(Tab::Module(name)) => self.select_module(name), // re-fetch its UI
+                _ => self.active = i,
             }
+        }
+        if let Some(i) = close_idx {
+            self.close_tab(i);
+        }
+        if let Some(tab) = open_tab {
+            match tab {
+                Tab::Module(name) => self.select_module(name),
+                other => self.open_tab(other),
+            }
+        }
+        if scale_changed {
+            self.save_ui_scale();
         }
 
-        // Settings — a separate OS window (its own viewport). First setting:
-        // global UI scale, in discrete steps.
-        if self.settings_open {
-            let mut close = false;
-            let mut scale_changed = false;
-            let scale = &mut self.ui_scale;
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("limen_settings"),
-                egui::ViewportBuilder::default()
-                    .with_title("Limen — Settings")
-                    .with_inner_size([440.0, 300.0])
-                    .with_min_inner_size([360.0, 220.0]),
-                |ctx, _class| {
-                    ui::apply_theme(ctx);
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.add_space(4.0);
-                        ui.heading("Settings");
-                        ui.separator();
-                        ui.add_space(6.0);
-                        ui.label(egui::RichText::new("UI scale").strong());
-                        ui.label(
-                            egui::RichText::new("Make the whole interface bigger or smaller.")
-                                .small()
-                                .color(ui::color::TEXT_MUTED),
-                        );
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            for pct in [100.0_f32, 125.0, 150.0, 175.0, 200.0] {
-                                let selected = (*scale - pct).abs() < 0.5;
-                                if ui
-                                    .selectable_label(selected, format!("{}%", pct as u32))
-                                    .clicked()
-                                {
-                                    *scale = pct;
-                                    scale_changed = true;
-                                }
-                            }
-                        });
-                    });
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        close = true;
-                    }
-                },
-            );
-            if close {
-                self.settings_open = false;
-            }
-            if scale_changed {
-                self.save_ui_scale();
-            }
-        }
-
-        if let Some(n) = nav_click {
-            match n {
-                Nav::Module(name) => self.select_module(name),
-                other => self.nav = other,
-            }
-        }
-        if go_modules {
-            self.nav = Nav::Modules;
-        }
-        if let Some(n) = go_nav {
-            self.nav = n;
-        }
         if let Some(name) = open_module {
             self.select_module(name);
         }
@@ -543,11 +616,84 @@ impl eframe::App for LimenApp {
             self.remote_fetched = false;
         }
         if let Some(a) = action {
-            self.dispatch(a);
+            // Elevated methods prompt for consent (once) before running.
+            if self.action_needs_consent(&a) {
+                self.pending_action = Some(a);
+            } else {
+                self.dispatch(a);
+            }
+        }
+
+        // Consent dialog for a pending elevated action.
+        if let Some(pending) = self.pending_action.clone() {
+            let module = self.module_of(&pending.capability).cloned();
+            let mut decision: Option<bool> = None; // Some(true)=grant, Some(false)=deny
+            egui::Window::new("Permission required")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_max_width(420.0);
+                    let name = module.as_ref().map(|m| m.name.as_str()).unwrap_or("This module");
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "“{name}” wants to run “{}”, which needs elevated permissions.",
+                            pending.method
+                        ))
+                        .size(15.0),
+                    );
+                    if let Some(m) = &module {
+                        let perms = m.permissions.summary();
+                        if !perms.is_empty() {
+                            ui.add_space(8.0);
+                            for p in perms {
+                                let admin = p.contains("administrator");
+                                let col = if admin {
+                                    egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)
+                                } else {
+                                    ui::color::TEXT_MUTED
+                                };
+                                ui.label(egui::RichText::new(format!("•  {p}")).color(col));
+                            }
+                        }
+                    }
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        let grant = egui::Button::new(
+                            egui::RichText::new("Grant & Run").color(ui::color::ON_ACCENT),
+                        )
+                        .fill(ui::color::ACCENT);
+                        if ui.add(grant).clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Deny").clicked() {
+                            decision = Some(false);
+                        }
+                        ui.label(
+                            egui::RichText::new("Approval is remembered for this version.")
+                                .small()
+                                .color(ui::color::TEXT_MUTED),
+                        );
+                    });
+                });
+            match decision {
+                Some(true) => {
+                    if let Some(m) = &module {
+                        self.grant_trust(&m.name);
+                    }
+                    self.pending_action = None;
+                    self.dispatch(pending); // now allowed
+                }
+                Some(false) => {
+                    self.pending_action = None;
+                    self.status = "permission denied".to_string();
+                }
+                None => {}
+            }
         }
 
         // Fetch the org's module list the first time we land on the Modules page.
-        if matches!(self.nav, Nav::Modules) && !self.remote_fetched {
+        if self.active_tab() == Some(Tab::Modules) && !self.remote_fetched {
             self.remote_fetched = true;
             self.remote_loading = true;
             self.worker.send(Command::ListRemote);
@@ -559,55 +705,49 @@ impl eframe::App for LimenApp {
 
 // --------------------------------------------------------------------------- //
 
-/// A bottom-left sidebar tool button — a glyph on a rounded tile. Highlights
-/// when its window is open.
-fn tool_button(ui: &mut egui::Ui, glyph: &str, active: bool, tooltip: &str) -> egui::Response {
-    let size = egui::vec2(34.0, 30.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    let bg = if active {
-        ui::color::ACCENT
-    } else if resp.hovered() {
-        ui::color::BG_HOVER
-    } else {
-        ui::color::BG_WIDGET
-    };
-    let fg = if active { ui::color::ON_ACCENT } else { ui::color::TEXT };
-    let p = ui.painter();
-    p.rect_filled(rect, egui::Rounding::same(6.0_f32), bg);
-    p.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        egui::FontId::proportional(17.0),
-        fg,
+/// The Settings tab.
+fn settings_view(ui: &mut egui::Ui, scale: &mut f32, changed: &mut bool) {
+    ui.add_space(4.0);
+    ui.heading("Settings");
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("UI scale").strong());
+    ui.label(
+        egui::RichText::new("Make the whole interface bigger or smaller.")
+            .small()
+            .color(ui::color::TEXT_MUTED),
     );
-    resp.on_hover_text(tooltip)
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        for pct in [100.0_f32, 125.0, 150.0, 175.0, 200.0] {
+            let selected = (*scale - pct).abs() < 0.5;
+            if ui.selectable_label(selected, format!("{}%", pct as u32)).clicked() {
+                *scale = pct;
+                *changed = true;
+            }
+        }
+    });
 }
 
-/// A pinned-module icon for the sidebar: a rounded tile with the module's
-/// initials, highlighted when it's the active module. Tooltip shows the name.
-fn pinned_icon(ui: &mut egui::Ui, name: &str, selected: bool) -> egui::Response {
-    let size = egui::vec2(40.0, 36.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    let bg = if selected {
-        ui::color::ACCENT
-    } else if resp.hovered() {
-        ui::color::BG_HOVER
-    } else {
-        ui::color::BG_WIDGET
-    };
-    let fg = if selected { ui::color::ON_ACCENT } else { ui::color::TEXT };
-    let initials: String = name.chars().take(2).collect::<String>().to_uppercase();
-    let p = ui.painter();
-    p.rect_filled(rect, egui::Rounding::same(7.0_f32), bg);
-    p.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        &initials,
-        egui::FontId::proportional(14.0),
-        fg,
-    );
-    resp.on_hover_text(name)
+/// The Developer tab: sub-tabs for docs / UI kit / log console.
+fn developer_view(
+    ui: &mut egui::Ui,
+    dev_tab: &mut DevTab,
+    inputs: &mut HashMap<String, String>,
+    logs: &std::collections::VecDeque<String>,
+    autoscroll: &mut bool,
+) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(dev_tab, DevTab::Modules, "Modules");
+        ui.selectable_value(dev_tab, DevTab::UiKit, "UI Kit");
+        ui.selectable_value(dev_tab, DevTab::Console, "Console");
+    });
+    ui.separator();
+    match dev_tab {
+        DevTab::Modules => dev_modules_docs(ui),
+        DevTab::UiKit => ui::render_demo_ui(ui, inputs),
+        DevTab::Console => dev_console(ui, logs, autoscroll),
+    }
 }
 
 /// The Developer window's "Modules" tab — concise module-authoring docs.
@@ -1051,27 +1191,31 @@ fn about_view(ui: &mut egui::Ui) -> bool {
 
 /// The License page — the embedded GPLv3 text, scrollable.
 fn license_view(ui: &mut egui::Ui) {
-    ui.heading("License");
-    ui.label(
-        egui::RichText::new(
-            "Limen is free software: you can redistribute it and/or modify it under \
-             the terms of the GNU General Public License, version 3 or later.",
-        )
-        .color(ui::color::TEXT_MUTED),
-    );
-    ui.add_space(6.0);
-    ui.separator();
-    ui.add_space(6.0);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let mut text = LICENSE_TEXT;
-            ui.add(
-                egui::TextEdit::multiline(&mut text)
-                    .desired_width(f32::INFINITY)
-                    .code_editor(),
-            );
-        });
+    // Center the license in a fixed-width column.
+    ui.vertical_centered(|ui| {
+        ui.set_max_width(720.0);
+        ui.heading("License");
+        ui.label(
+            egui::RichText::new(
+                "Limen is free software: you can redistribute it and/or modify it under \
+                 the terms of the GNU General Public License, version 3 or later.",
+            )
+            .color(ui::color::TEXT_MUTED),
+        );
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut text = LICENSE_TEXT;
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_width(f32::INFINITY)
+                        .code_editor(),
+                );
+            });
+    });
 }
 
 /// Draw the Limen brand mark — a concentric indigo diamond (◈) on a dark rounded
@@ -1128,32 +1272,35 @@ fn module_view(
     view_error: &Option<String>,
     inputs: &mut HashMap<String, String>,
     output: &str,
-    busy: bool,
+    busy_action: Option<&ui::Action>,
     action: &mut Option<ui::Action>,
 ) {
     match view {
         Some(v) => {
             ui.heading(if v.title.is_empty() { name } else { &v.title });
             ui.separator();
-            if let Some(a) = ui::render_view(ui, v, inputs) {
-                *action = Some(a);
-            }
+            // Scroll the module content so tall views (long tables, big scale)
+            // don't overflow the window.
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // The in-flight button shows a spinner (via busy_action).
+                    if let Some(a) = ui::render_view(ui, v, inputs, busy_action) {
+                        *action = Some(a);
+                    }
 
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Result").strong());
-                if busy {
-                    ui.spinner();
-                }
-            });
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                let mut text = output;
-                ui.add(
-                    egui::TextEdit::multiline(&mut text)
-                        .desired_width(f32::INFINITY)
-                        .code_editor(),
-                );
-            });
+                    // Show the Result pane only when a method returned output.
+                    if !output.is_empty() {
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new("Result").strong());
+                        let mut text = output;
+                        ui.add(
+                            egui::TextEdit::multiline(&mut text)
+                                .desired_width(f32::INFINITY)
+                                .code_editor(),
+                        );
+                    }
+                });
         }
         None => {
             if let Some(err) = view_error {
