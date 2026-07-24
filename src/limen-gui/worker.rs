@@ -38,6 +38,11 @@ pub enum Command {
     },
     /// Install a module (and deps) from `owner/repo[@ver]` or a local path.
     AddModule(String),
+    /// Internal: a threaded module download finished — report it, then reload
+    /// (engine work must happen back on the worker thread).
+    FinishAdd { status: String, ok: bool },
+    /// Internal: threaded interpreter downloads finished — report, then reload.
+    FinishRuntimes { status: String },
     /// Uninstall a registry-installed module.
     RemoveModule(String),
     /// Download and apply an available app update, then restart.
@@ -91,7 +96,10 @@ impl Worker {
                 }
             });
         }
-        thread::spawn(move || run(dirs, cmd_rx, evt_tx));
+        // The worker keeps a sender so background install threads can hand engine
+        // work (reloads) back to it.
+        let self_tx = cmd_tx.clone();
+        thread::spawn(move || run(dirs, cmd_rx, evt_tx, self_tx));
         Worker { tx: cmd_tx, rx: evt_rx }
     }
 
@@ -158,7 +166,12 @@ fn reload(engine: &mut Engine, dirs: &[PathBuf], evt_tx: &Sender<Event>) -> bool
     }
 }
 
-fn run(dirs: Vec<PathBuf>, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
+fn run(
+    dirs: Vec<PathBuf>,
+    cmd_rx: Receiver<Command>,
+    evt_tx: Sender<Event>,
+    cmd_tx: Sender<Command>,
+) {
     let mut engine = match start_engine(&dirs, &evt_tx) {
         Ok(e) => e,
         Err(err) => {
@@ -184,40 +197,65 @@ fn run(dirs: Vec<PathBuf>, cmd_rx: Receiver<Command>, evt_tx: Sender<Event>) {
                 let _ = evt_tx.send(Event::RunDone { tag, result });
             }
             Command::AddModule(reference) => {
-                let msg = match Registry::new(paths::home()).add(&reference) {
-                    Ok(report) => format!("installed {} module(s)", report.installed.len()),
-                    Err(e) => format!("install failed: {e:#}"),
-                };
-                let _ = evt_tx.send(Event::Status(msg));
+                // Download on its own thread so the worker keeps serving other
+                // commands (e.g. running another module's UI). The reload — which
+                // needs the live engine — is marshaled back via `FinishAdd`.
+                let cmd_tx = cmd_tx.clone();
+                thread::spawn(move || {
+                    let (status, ok) = match Registry::new(paths::home()).add(&reference) {
+                        Ok(report) => {
+                            (format!("installed {} module(s)", report.installed.len()), true)
+                        }
+                        Err(e) => (format!("install failed: {e:#}"), false),
+                    };
+                    let _ = cmd_tx.send(Command::FinishAdd { status, ok });
+                });
+            }
+            Command::FinishAdd { status, ok } => {
+                let _ = evt_tx.send(Event::Status(status));
+                if !ok {
+                    // No reload on failure — re-send the snapshot so the UI clears
+                    // its "installing" spinner.
+                    let _ = evt_tx.send(Event::Modules(snapshot(&engine)));
+                    continue;
+                }
                 // Start the newly-installed module(s); any whose interpreter is
                 // missing get recorded in missing_runtimes.
                 if !reload(&mut engine, &dirs, &evt_tx) {
                     return;
                 }
                 // Auto-install any interpreter a new module needs but that isn't
-                // available yet (bundled or on PATH) — download it, then reload.
+                // available yet — off-thread too; reload again via FinishRuntimes.
                 let missing = engine.missing_runtimes().to_vec();
-                let mut installed_any = false;
-                for rt in missing {
-                    let _ = evt_tx.send(Event::Status(format!(
-                        "downloading {} interpreter…",
-                        rt.display()
-                    )));
-                    match install_runtime(rt) {
-                        Ok(()) => {
-                            installed_any = true;
-                            let _ =
-                                evt_tx.send(Event::Status(format!("installed {} runtime", rt.display())));
-                        }
-                        Err(e) => {
+                if !missing.is_empty() {
+                    let evt_tx = evt_tx.clone();
+                    let cmd_tx = cmd_tx.clone();
+                    thread::spawn(move || {
+                        let mut done: Vec<String> = Vec::new();
+                        for rt in missing {
                             let _ = evt_tx.send(Event::Status(format!(
-                                "{} setup failed: {e}",
+                                "downloading {} interpreter…",
                                 rt.display()
                             )));
+                            match install_runtime(rt) {
+                                Ok(()) => done.push(format!("installed {} runtime", rt.display())),
+                                Err(e) => {
+                                    let _ = evt_tx.send(Event::Status(format!(
+                                        "{} setup failed: {e}",
+                                        rt.display()
+                                    )));
+                                }
+                            }
                         }
-                    }
+                        let _ = cmd_tx.send(Command::FinishRuntimes { status: done.join("; ") });
+                    });
                 }
-                if installed_any && !reload(&mut engine, &dirs, &evt_tx) {
+            }
+            Command::FinishRuntimes { status } => {
+                if !status.is_empty() {
+                    let _ = evt_tx.send(Event::Status(status));
+                }
+                if !reload(&mut engine, &dirs, &evt_tx) {
                     return;
                 }
             }

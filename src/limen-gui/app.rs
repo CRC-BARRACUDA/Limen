@@ -104,6 +104,8 @@ pub struct LimenApp {
     remote_error: Option<String>,
     remote_loading: bool,
     remote_fetched: bool,
+    /// The repo currently being installed, if any (disables Install + shows a spinner).
+    installing: Option<String>,
 
     // Developer tab
     dev_tab: DevTab,
@@ -148,6 +150,7 @@ impl LimenApp {
             remote_error: None,
             remote_loading: false,
             remote_fetched: false,
+            installing: None,
             dev_tab: DevTab::Modules,
             logs: std::collections::VecDeque::new(),
             log_autoscroll: true,
@@ -182,12 +185,11 @@ impl LimenApp {
         if index >= self.tabs.len() {
             return;
         }
-        if let Tab::Module(name) = &self.tabs[index] {
-            if self.pinned.iter().any(|n| n == name) {
+        if let Tab::Module(name) = &self.tabs[index]
+            && self.pinned.iter().any(|n| n == name) {
                 let name = name.clone();
                 self.toggle_pin(&name); // unpin
             }
-        }
         self.tabs.remove(index);
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
@@ -255,11 +257,10 @@ impl LimenApp {
             if !m.permissions.sensitive() {
                 continue;
             }
-            if let Ok(digest) = limen_registry::digest_dir(&m.cwd) {
-                if trust.is_trusted(&m.name, &digest) {
+            if let Ok(digest) = limen_registry::digest_dir(&m.cwd)
+                && trust.is_trusted(&m.name, &digest) {
                     self.trusted.insert(m.name.clone());
                 }
-            }
         }
     }
 
@@ -315,6 +316,8 @@ impl LimenApp {
                     self.modules = snap.specs;
                     self.git_installed = snap.git_installed.into_iter().collect();
                     self.refresh_trust();
+                    // A reload follows a completed install/remove — clear the spinner.
+                    self.installing = None;
                     self.status = format!("{} module(s) loaded", self.modules.len());
                 }
                 Event::RemoteModules(result) => {
@@ -635,8 +638,8 @@ impl eframe::App for LimenApp {
         {
             let LimenApp {
                 modules, git_installed, pinned, view, view_error, inputs, output, busy_action,
-                fatal, search, filter, remote, remote_error, remote_loading, dev_tab, logs,
-                log_autoscroll, ui_scale, ..
+                fatal, search, filter, remote, remote_error, remote_loading, installing, dev_tab,
+                logs, log_autoscroll, ui_scale, ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(err) = fatal {
@@ -660,8 +663,8 @@ impl eframe::App for LimenApp {
                     Some(Tab::License) => license_view(ui),
                     Some(Tab::Modules) => modules_page(
                         ui, modules, git_installed, pinned, remote, *remote_loading, remote_error,
-                        filter, search, &mut open_module, &mut remove_module, &mut add_module,
-                        &mut toggle_pin, &mut reload,
+                        installing, filter, search, &mut open_module, &mut remove_module,
+                        &mut add_module, &mut toggle_pin, &mut reload,
                     ),
                     Some(Tab::Module(name)) => {
                         module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
@@ -677,12 +680,11 @@ impl eframe::App for LimenApp {
             });
         }
 
-        if do_update {
-            if let Some(info) = self.update.clone() {
+        if do_update
+            && let Some(info) = self.update.clone() {
                 self.updating = true;
                 self.worker.send(Command::ApplyUpdate(info));
             }
-        }
 
         // Apply tab intents.
         if let Some(i) = switch_to {
@@ -714,6 +716,7 @@ impl eframe::App for LimenApp {
         }
         if let Some(reference) = add_module {
             self.busy = true;
+            self.installing = Some(reference.clone());
             self.status = format!("installing {reference}…");
             self.worker.send(Command::AddModule(reference));
         }
@@ -1018,6 +1021,7 @@ fn modules_page(
     remote: &[RemoteModule],
     remote_loading: bool,
     remote_error: &Option<String>,
+    installing: &Option<String>,
     filter: &mut ModuleFilter,
     search: &mut String,
     open: &mut Option<String>,
@@ -1097,7 +1101,7 @@ fn modules_page(
                 if installed_names.contains(r.name.as_str()) || !remote_matches(r, &query) {
                     continue;
                 }
-                available_card(ui, r, add);
+                available_card(ui, r, installing, add);
                 ui.add_space(10.0);
                 shown += 1;
             }
@@ -1212,15 +1216,13 @@ fn module_card(
                             *remove = Some(m.name.clone());
                         }
                         // GitHub only for git-installed modules.
-                        if from_git {
-                            if let Some(repo) = &m.repo {
-                                if ui.add_sized(bw, egui::Button::new("GitHub ↗")).clicked() {
+                        if from_git
+                            && let Some(repo) = &m.repo
+                                && ui.add_sized(bw, egui::Button::new("GitHub ↗")).clicked() {
                                     ui.output_mut(|o| {
                                         o.open_url = Some(egui::OpenUrl::new_tab(repo_url(repo)));
                                     });
                                 }
-                            }
-                        }
                     },
                 );
             });
@@ -1228,7 +1230,16 @@ fn module_card(
 }
 
 /// An "available in the org, not installed" card, with an Install action.
-fn available_card(ui: &mut egui::Ui, r: &RemoteModule, add: &mut Option<String>) {
+fn available_card(
+    ui: &mut egui::Ui,
+    r: &RemoteModule,
+    installing: &Option<String>,
+    add: &mut Option<String>,
+) {
+    // While any install runs, every Install button is disabled; the one being
+    // installed shows a spinner in place of the button.
+    let this_installing = installing.as_deref() == Some(r.repo.as_str());
+    let any_installing = installing.is_some();
     egui::Frame::none()
         .fill(ui::color::BG_ELEVATED)
         .stroke(egui::Stroke::new(1.0_f32, ui::color::BORDER))
@@ -1264,12 +1275,33 @@ fn available_card(ui: &mut egui::Ui, r: &RemoteModule, add: &mut Option<String>)
                     egui::Layout::top_down(egui::Align::Max),
                     |ui| {
                         let bw = egui::vec2(96.0, ui.spacing().interact_size.y);
-                        let install = egui::Button::new(
-                            egui::RichText::new("Install").color(ui::color::ON_ACCENT),
-                        )
-                        .fill(ui::color::ACCENT);
-                        if ui.add_sized(bw, install).clicked() {
-                            *add = Some(r.repo.clone());
+                        if this_installing {
+                            // This module is downloading — spinner + label.
+                            ui.allocate_ui_with_layout(
+                                bw,
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.spinner();
+                                    ui.label(
+                                        egui::RichText::new("Installing…")
+                                            .small()
+                                            .color(ui::color::TEXT_MUTED),
+                                    );
+                                },
+                            );
+                        } else {
+                            let install = egui::Button::new(
+                                egui::RichText::new("Install").color(ui::color::ON_ACCENT),
+                            )
+                            .fill(ui::color::ACCENT);
+                            // Disable while another install is in flight.
+                            let clicked = ui
+                                .add_enabled_ui(!any_installing, |ui| ui.add_sized(bw, install))
+                                .inner
+                                .clicked();
+                            if clicked {
+                                *add = Some(r.repo.clone());
+                            }
                         }
                         if ui.add_sized(bw, egui::Button::new("GitHub ↗")).clicked() {
                             let url = r.url.clone();
