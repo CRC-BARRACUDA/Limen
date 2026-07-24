@@ -188,11 +188,16 @@ impl Host {
     /// startup order. Does not spawn anything yet — call [`Host::start`].
     pub fn load(dirs: &[PathBuf]) -> Result<Self> {
         let mut specs = Vec::with_capacity(dirs.len());
+        let mut seen_names = std::collections::HashSet::new();
         for dir in dirs {
-            specs.push(
-                ModuleSpec::from_manifest_dir(dir)
-                    .with_context(|| format!("loading module at {}", dir.display()))?,
-            );
+            let spec = ModuleSpec::from_manifest_dir(dir)
+                .with_context(|| format!("loading module at {}", dir.display()))?;
+            // The same module can appear in several search dirs (e.g. the portable
+            // base and a local ./modules). Keep the first; skip re-discoveries so
+            // it isn't mistaken for a duplicate-capability conflict.
+            if seen_names.insert(spec.name.clone()) {
+                specs.push(spec);
+            }
         }
         let order = resolve_order(&specs)?;
         Ok(Self {
@@ -355,6 +360,7 @@ fn host_handler(
         "host.call" => broker.route(params),
         "host.subscribe" => broker.subscribe(params),
         "host.emit" => broker.emit(params),
+        "host.about" => Ok(host_about()),
         "host.log" => {
             let msg = params.as_str().map(str::to_string).unwrap_or_else(|| params.to_string());
             logger(&format!("[module] {msg}"));
@@ -365,6 +371,22 @@ fn host_handler(
             format!("unknown host method {other}"),
         )),
     }
+}
+
+/// Host environment info returned by `host.about`: the OS/arch Limen is running
+/// on, its version, the hostname, and the portable base directory it runs from.
+fn host_about() -> Value {
+    let hostname = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_default();
+    json!({
+        "os": std::env::consts::OS,          // "linux" | "windows" | "macos" | …
+        "arch": std::env::consts::ARCH,      // "x86_64" | "aarch64" | …
+        "family": std::env::consts::FAMILY,  // "unix" | "windows"
+        "hostname": hostname,
+        "limen_version": env!("CARGO_PKG_VERSION"),
+        "base_dir": limen_home().to_string_lossy(),
+    })
 }
 
 /// Topologically sort modules so every provider starts before its dependents,
@@ -457,22 +479,38 @@ fn resolve_order(specs: &[ModuleSpec]) -> Result<Vec<ModuleSpec>> {
 // --------------------------------------------------------------------------- //
 
 const PY_SDK: &str = include_str!("../../sdk/python/limen_sdk.py");
+const JS_SDK: &str = include_str!("../../sdk/js/limen.js");
+const LUA_SDK: &str = include_str!("../../sdk/lua/limen.lua");
 
 /// Paths to the extracted SDKs, and the env each language needs to find them.
 struct SdkPaths {
     python: PathBuf,
+    js: PathBuf,
+    lua: PathBuf,
 }
 
 impl SdkPaths {
-    /// The env vars to set when spawning a module of `language`.
+    /// The env vars to set when spawning a module of `language` so its runtime
+    /// can find the injected SDK.
     fn env_for(&self, language: Language) -> Vec<(String, String)> {
         match language {
             Language::Python => vec![(
                 "PYTHONPATH".to_string(),
                 self.python.to_string_lossy().into_owned(),
             )],
-            // Lua/JS SDKs land here once written.
-            _ => Vec::new(),
+            // Node searches each NODE_PATH entry like a node_modules dir, so
+            // `require("limen")` resolves to <js>/limen.js.
+            Language::Js => vec![(
+                "NODE_PATH".to_string(),
+                self.js.to_string_lossy().into_owned(),
+            )],
+            // Lua's require uses package.path patterns; `require("limen")` maps
+            // to <lua>/limen.lua.
+            Language::Lua => vec![(
+                "LUA_PATH".to_string(),
+                format!("{}/?.lua;;", self.lua.to_string_lossy()),
+            )],
+            Language::Native => Vec::new(),
         }
     }
 }
@@ -481,11 +519,15 @@ impl SdkPaths {
 fn install_sdks() -> Result<SdkPaths> {
     let base = limen_home().join("sdk");
     let python = base.join("python");
-    std::fs::create_dir_all(&python)
-        .with_context(|| format!("creating {}", python.display()))?;
-    std::fs::write(python.join("limen_sdk.py"), PY_SDK)
-        .context("writing embedded python SDK")?;
-    Ok(SdkPaths { python })
+    let js = base.join("js");
+    let lua = base.join("lua");
+    for dir in [&python, &js, &lua] {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(python.join("limen_sdk.py"), PY_SDK).context("writing python SDK")?;
+    std::fs::write(js.join("limen.js"), JS_SDK).context("writing js SDK")?;
+    std::fs::write(lua.join("limen.lua"), LUA_SDK).context("writing lua SDK")?;
+    Ok(SdkPaths { python, js, lua })
 }
 
 /// The Limen base dir: `$LIMEN_HOME`, else the executable's directory (portable).
