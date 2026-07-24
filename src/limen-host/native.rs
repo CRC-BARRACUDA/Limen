@@ -148,6 +148,11 @@ impl Module for NativeModule {
         }
     }
 
+    fn notify(&self, method: &str, params: Value) {
+        // In-process: just invoke and discard the result.
+        let _ = self.call(method, params);
+    }
+
     fn shutdown(&self) {
         self.do_shutdown();
     }

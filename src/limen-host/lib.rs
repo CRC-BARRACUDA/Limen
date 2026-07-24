@@ -19,9 +19,11 @@ mod connection;
 mod host;
 mod module;
 mod native;
+pub mod runtimes;
 
 pub use broker::Broker;
 pub use connection::ModuleConnection;
 pub use host::{Host, Launch, ModuleSpec};
-pub use module::{IncomingHandler, Module};
+pub use module::{stderr_logger, IncomingHandler, Logger, Module};
 pub use native::NativeModule;
+pub use runtimes::{Runtime, RuntimeStatus};

@@ -25,7 +25,7 @@ use limen_proto::rpc::MODULE_ERROR;
 use limen_proto::{Message, Request, Response, RpcError};
 use serde_json::Value;
 
-use crate::module::{IncomingHandler, Module};
+use crate::module::{IncomingHandler, Logger, Module};
 
 type PendingMap = Mutex<HashMap<u64, Sender<std::result::Result<Value, RpcError>>>>;
 
@@ -45,22 +45,39 @@ impl ModuleConnection {
         name: String,
         argv: &[String],
         cwd: Option<&Path>,
+        env: &[(String, String)],
         handler: Arc<IncomingHandler>,
+        logger: Logger,
     ) -> Result<Arc<Self>> {
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
-        // stderr is inherited so a module's logs surface on the host console.
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        // Capture stderr so a module's logs (and tracebacks) reach the logger.
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawning module {name}: {argv:?}"))?;
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+
+        // Forward the module's stderr, line by line, to the logger.
+        {
+            let name = name.clone();
+            let logger = logger.clone();
+            thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    logger(&format!("[{name}] {line}"));
+                }
+            });
+        }
 
         let conn = Arc::new(Self {
             name,
@@ -114,6 +131,14 @@ impl Module for ModuleConnection {
                 format!("module {} disconnected", self.name),
             )),
         }
+    }
+
+    /// Fire-and-forget: send a notification frame (no id, no response awaited).
+    fn notify(&self, method: &str, params: Value) {
+        let _ = self.send(&Message::Request(Request::notification(
+            method.to_string(),
+            params,
+        )));
     }
 
     /// Ask the module to shut down, then make sure the process is gone.

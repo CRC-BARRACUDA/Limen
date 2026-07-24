@@ -12,14 +12,21 @@ use serde_json::{json, Value};
 
 use crate::broker::Broker;
 use crate::connection::ModuleConnection;
-use crate::module::{IncomingHandler, Module};
+use crate::module::{stderr_logger, IncomingHandler, Logger, Module};
 use crate::native::NativeModule;
 
 /// How a module is launched, chosen from its manifest.
 #[derive(Debug, Clone)]
 pub enum Launch {
-    /// A subprocess speaking JSON-RPC over stdio (the argv to spawn).
-    Process(Vec<String>),
+    /// A scripted module: run `<interpreter> <script>`. The interpreter is
+    /// resolved at start time (bundled or system), so a missing interpreter is
+    /// non-fatal — the module is skipped and Quick Setup is offered.
+    Script {
+        runtime: crate::runtimes::Runtime,
+        script: String,
+    },
+    /// A compiled binary that speaks JSON-RPC over stdio (path to run).
+    Binary(String),
     /// A dynamic library loaded in-process (path to the `.so`/`.dll`/`.dylib`).
     Native(String),
 }
@@ -41,6 +48,8 @@ pub struct ModuleSpec {
     pub requires: BTreeMap<String, String>,
     /// What the module declares it needs to do.
     pub permissions: Permissions,
+    /// Implementation language (selects the SDK search-path env on spawn).
+    pub language: Language,
     /// How to launch this module.
     pub launch: Launch,
     /// Working directory (the module's own folder).
@@ -61,6 +70,7 @@ impl ModuleSpec {
             capabilities: manifest.provides.capabilities,
             requires: manifest.requires.capabilities,
             permissions: manifest.permissions,
+            language: manifest.module.language,
             launch,
             cwd: dir.to_path_buf(),
         })
@@ -75,7 +85,18 @@ fn build_launch(dir: &Path, manifest: &Manifest) -> Result<Launch> {
         (Language::Native, Abi::Native) => {
             Ok(Launch::Native(resolve_native_lib(dir, &manifest.module.entry)?))
         }
-        _ => Ok(Launch::Process(build_argv(dir, manifest)?)),
+        (Language::Native, _) => {
+            // A compiled binary that speaks RPC over stdio.
+            Ok(Launch::Binary(resolve_native(dir, &manifest.module.entry)?))
+        }
+        (lang, _) => {
+            // A scripted module: remember its runtime + script; resolve the
+            // interpreter at start time.
+            let runtime = crate::runtimes::Runtime::for_language(lang)
+                .ok_or_else(|| anyhow!("unsupported scripted language for {}", manifest.module.name))?;
+            let script = abspath(dir.join(&manifest.module.entry));
+            Ok(Launch::Script { runtime, script })
+        }
     }
 }
 
@@ -118,26 +139,6 @@ fn resolve_native_lib(dir: &Path, entry: &str) -> Result<String> {
     bail!("could not find native library for {entry:?} — did you `cargo build` the module? (looked in {bases:?})")
 }
 
-/// Map a module's language to the argv that launches it. (`native` here means a
-/// compiled binary that speaks RPC over stdio; the in-process path is
-/// [`resolve_native_lib`].)
-fn build_argv(dir: &Path, manifest: &Manifest) -> Result<Vec<String>> {
-    let interpreter = match manifest.module.language {
-        Language::Python => Some("python3"),
-        Language::Lua => Some("lua"),
-        Language::Js => Some("node"),
-        Language::Native => None,
-    };
-    match interpreter {
-        Some(bin) => {
-            // Absolute so it stays correct once the child's cwd is the module dir.
-            let script = abspath(dir.join(&manifest.module.entry));
-            Ok(vec![bin.to_string(), script])
-        }
-        None => Ok(vec![resolve_native(dir, &manifest.module.entry)?]),
-    }
-}
-
 /// Make a path absolute (lexically, without touching the filesystem), falling
 /// back to the original string if that fails.
 fn abspath(p: PathBuf) -> String {
@@ -177,6 +178,9 @@ pub struct Host {
     broker: Arc<Broker>,
     order: Vec<ModuleSpec>,
     connections: Vec<Arc<dyn Module>>,
+    logger: Logger,
+    /// Runtimes that were needed but unavailable, so a module was skipped.
+    missing_runtimes: Vec<crate::runtimes::Runtime>,
 }
 
 impl Host {
@@ -195,22 +199,83 @@ impl Host {
             broker: Broker::new(),
             order,
             connections: Vec::new(),
+            logger: stderr_logger(),
+            missing_runtimes: Vec::new(),
         })
+    }
+
+    /// Install a log sink for host + module log lines (defaults to stderr).
+    /// Call before [`Host::start`] to capture startup logs.
+    pub fn set_logger(&mut self, logger: Logger) {
+        self.logger = logger;
+    }
+
+    /// Runtimes that were needed by a module but unavailable at start (so the
+    /// module was skipped). Drives the GUI's Quick Setup prompt.
+    pub fn missing_runtimes(&self) -> &[crate::runtimes::Runtime] {
+        &self.missing_runtimes
     }
 
     /// Spawn every module in dependency order, register its capabilities, and
     /// `initialize` it.
     pub fn start(&mut self) -> Result<()> {
+        // Make the embedded language SDKs available on disk so scripted modules
+        // can `import limen_sdk` (etc.) without vendoring anything.
+        let sdk = install_sdks()?;
+
+        let logger = self.logger.clone();
         let handler: Arc<IncomingHandler> = {
             let broker = self.broker.clone();
-            Arc::new(move |method: &str, params: Value| host_handler(&broker, method, params))
+            let logger = logger.clone();
+            Arc::new(move |method: &str, params: Value| {
+                host_handler(&broker, &logger, method, params)
+            })
         };
 
+        self.missing_runtimes.clear();
         for spec in &self.order {
             let conn: Arc<dyn Module> = match &spec.launch {
-                Launch::Process(argv) => {
-                    ModuleConnection::spawn(spec.name.clone(), argv, Some(&spec.cwd), handler.clone())
-                        .with_context(|| format!("spawning module {}", spec.name))?
+                Launch::Script { runtime, script } => {
+                    // Resolve the interpreter now; if missing, skip the module
+                    // (non-fatal) and record the runtime for Quick Setup.
+                    match crate::runtimes::resolve(&limen_home(), *runtime) {
+                        Some(interp) => {
+                            let env = sdk.env_for(spec.language);
+                            let argv = [interp, script.clone()];
+                            ModuleConnection::spawn(
+                                spec.name.clone(),
+                                &argv,
+                                Some(&spec.cwd),
+                                &env,
+                                handler.clone(),
+                                logger.clone(),
+                            )
+                            .with_context(|| format!("spawning module {}", spec.name))?
+                        }
+                        None => {
+                            logger(&format!(
+                                "[host] skipping {}: no {} interpreter — run Quick Setup",
+                                spec.name,
+                                runtime.display()
+                            ));
+                            if !self.missing_runtimes.contains(runtime) {
+                                self.missing_runtimes.push(*runtime);
+                            }
+                            continue;
+                        }
+                    }
+                }
+                Launch::Binary(path) => {
+                    let argv = [path.clone()];
+                    ModuleConnection::spawn(
+                        spec.name.clone(),
+                        &argv,
+                        Some(&spec.cwd),
+                        &[],
+                        handler.clone(),
+                        logger.clone(),
+                    )
+                    .with_context(|| format!("spawning module {}", spec.name))?
                 }
                 Launch::Native(path) => NativeModule::load(spec.name.clone(), path, handler.clone())
                     .with_context(|| format!("loading native module {}", spec.name))?,
@@ -219,6 +284,7 @@ impl Host {
             for capability in &spec.capabilities {
                 self.broker.register(capability, conn.clone());
             }
+            self.broker.register_name(&spec.name, conn.clone());
 
             let info = conn
                 .call(
@@ -231,10 +297,10 @@ impl Host {
                 )
                 .map_err(|e| anyhow!("initialize {}: {e}", spec.name))?;
 
-            eprintln!(
+            logger(&format!(
                 "[host] started {} v{} caps={:?} -> {info}",
                 spec.name, spec.version, spec.capabilities
-            );
+            ));
             self.connections.push(conn);
         }
         Ok(())
@@ -279,11 +345,19 @@ impl Host {
 
 /// Dispatch a module→host request. Phase 1 supports `host.call` (broker routing)
 /// and `host.log`.
-fn host_handler(broker: &Broker, method: &str, params: Value) -> std::result::Result<Value, RpcError> {
+fn host_handler(
+    broker: &Broker,
+    logger: &Logger,
+    method: &str,
+    params: Value,
+) -> std::result::Result<Value, RpcError> {
     match method {
         "host.call" => broker.route(params),
+        "host.subscribe" => broker.subscribe(params),
+        "host.emit" => broker.emit(params),
         "host.log" => {
-            eprintln!("[module] {params}");
+            let msg = params.as_str().map(str::to_string).unwrap_or_else(|| params.to_string());
+            logger(&format!("[module] {msg}"));
             Ok(Value::Null)
         }
         other => Err(RpcError::new(
@@ -371,4 +445,58 @@ fn resolve_order(specs: &[ModuleSpec]) -> Result<Vec<ModuleSpec>> {
     }
 
     Ok(order.into_iter().map(|i| specs[i].clone()).collect())
+}
+
+// --------------------------------------------------------------------------- //
+// Language SDK injection.
+//
+// The scripted-language SDKs are embedded in the host binary and extracted to
+// ~/.limen/sdk/<lang>/ at startup, so a module can `import limen_sdk` (etc.)
+// with no vendoring. When spawning a module we set the interpreter's search-path
+// env var to that directory.
+// --------------------------------------------------------------------------- //
+
+const PY_SDK: &str = include_str!("../../sdk/python/limen_sdk.py");
+
+/// Paths to the extracted SDKs, and the env each language needs to find them.
+struct SdkPaths {
+    python: PathBuf,
+}
+
+impl SdkPaths {
+    /// The env vars to set when spawning a module of `language`.
+    fn env_for(&self, language: Language) -> Vec<(String, String)> {
+        match language {
+            Language::Python => vec![(
+                "PYTHONPATH".to_string(),
+                self.python.to_string_lossy().into_owned(),
+            )],
+            // Lua/JS SDKs land here once written.
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Extract the embedded SDKs under `<limen home>/sdk/` and return their paths.
+fn install_sdks() -> Result<SdkPaths> {
+    let base = limen_home().join("sdk");
+    let python = base.join("python");
+    std::fs::create_dir_all(&python)
+        .with_context(|| format!("creating {}", python.display()))?;
+    std::fs::write(python.join("limen_sdk.py"), PY_SDK)
+        .context("writing embedded python SDK")?;
+    Ok(SdkPaths { python })
+}
+
+/// The Limen base dir: `$LIMEN_HOME`, else the executable's directory (portable).
+/// Kept local so limen-host needn't depend on limen-core (must match
+/// `limen_core::paths::home`).
+fn limen_home() -> PathBuf {
+    if let Some(dir) = std::env::var_os("LIMEN_HOME") {
+        return PathBuf::from(dir);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
