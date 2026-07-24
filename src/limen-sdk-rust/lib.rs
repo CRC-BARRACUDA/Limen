@@ -29,6 +29,8 @@
 use core::ffi::c_void;
 use std::sync::Mutex;
 
+pub mod ui;
+
 pub use limen_proto::abi::{HostCallFn, SinkFn, ABI_VERSION};
 pub use limen_proto::{rpc, RpcError};
 pub use serde_json::{json, Value};
