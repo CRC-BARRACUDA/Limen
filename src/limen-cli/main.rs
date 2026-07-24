@@ -100,11 +100,10 @@ fn main() -> Result<()> {
         } => {
             let mut params: Value =
                 serde_json::from_str(params).context("--params must be a valid JSON object")?;
-            if !targets.is_empty() {
-                if let Value::Object(map) = &mut params {
+            if !targets.is_empty()
+                && let Value::Object(map) = &mut params {
                     map.insert("targets".into(), json!(targets));
                 }
-            }
             let mut engine = Engine::load(&dirs)?;
             consent_gate(&engine, cli.allow_untrusted)?;
             engine.start()?;

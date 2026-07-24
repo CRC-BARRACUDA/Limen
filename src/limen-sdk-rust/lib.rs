@@ -98,7 +98,7 @@ impl Host {
     }
 }
 
-unsafe extern "C" fn sink(ctx: *mut c_void, is_error: i32, ptr: *const u8, len: usize) {
+unsafe extern "C" fn sink(ctx: *mut c_void, is_error: i32, ptr: *const u8, len: usize) { unsafe {
     let out = &mut *(ctx as *mut Option<(i32, Vec<u8>)>);
     let bytes = if ptr.is_null() || len == 0 {
         Vec::new()
@@ -106,7 +106,7 @@ unsafe extern "C" fn sink(ctx: *mut c_void, is_error: i32, ptr: *const u8, len: 
         std::slice::from_raw_parts(ptr, len).to_vec()
     };
     *out = Some((is_error, bytes));
-}
+}}
 
 /// Internal runtime the [`export_module!`] macro calls into. Not part of the
 /// stable API — do not use directly.
@@ -144,7 +144,7 @@ pub mod __rt {
         params_len: usize,
         sink: SinkFn,
         sink_ctx: *mut c_void,
-    ) {
+    ) { unsafe {
         let state = &*(handle as *const State<H>);
         let method = String::from_utf8_lossy(bytes(method_ptr, method_len)).into_owned();
         let params: Value =
@@ -159,13 +159,13 @@ pub mod __rt {
             Err(e) => (1, serde_json::to_vec(&e).unwrap_or_default()),
         };
         sink(sink_ctx, is_error, out.as_ptr(), out.len());
-    }
+    }}
 
     /// # Safety
     /// `handle` must have come from [`init`] for the same `H`; not used after.
-    pub unsafe fn shutdown<H: Handler + 'static>(handle: *mut c_void) {
+    pub unsafe fn shutdown<H: Handler + 'static>(handle: *mut c_void) { unsafe {
         drop(Box::from_raw(handle as *mut State<H>));
-    }
+    }}
 
     /// Translate the host's lifecycle methods into [`Handler`] calls.
     fn dispatch<H: Handler>(
@@ -191,13 +191,13 @@ pub mod __rt {
         }
     }
 
-    unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] { unsafe {
         if ptr.is_null() || len == 0 {
             &[]
         } else {
             std::slice::from_raw_parts(ptr, len)
         }
-    }
+    }}
 }
 
 /// Emit the C-ABI symbols the host looks up, wiring them to your [`Handler`].

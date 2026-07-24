@@ -166,10 +166,10 @@ impl Drop for NativeModule {
 }
 
 /// Sink used by [`NativeModule::call`] to capture the module's result bytes.
-unsafe extern "C" fn capture_sink(ctx: *mut c_void, is_error: i32, ptr: *const u8, len: usize) {
+unsafe extern "C" fn capture_sink(ctx: *mut c_void, is_error: i32, ptr: *const u8, len: usize) { unsafe {
     let out = &mut *(ctx as *mut Option<(i32, Vec<u8>)>);
     *out = Some((is_error, bytes(ptr, len).to_vec()));
-}
+}}
 
 /// Handed to the module as its `host_call`. Recovers the [`HostCtx`], runs the
 /// shared handler, and returns the result through the module's sink.
@@ -181,7 +181,7 @@ unsafe extern "C" fn host_call_trampoline(
     params_len: usize,
     sink: SinkFn,
     sink_ctx: *mut c_void,
-) {
+) { unsafe {
     let ctx = &*(host_ctx as *const HostCtx);
     let method = String::from_utf8_lossy(bytes(method_ptr, method_len)).into_owned();
     let params: Value = serde_json::from_slice(bytes(params_ptr, params_len)).unwrap_or(Value::Null);
@@ -191,12 +191,12 @@ unsafe extern "C" fn host_call_trampoline(
         Err(e) => (1, serde_json::to_vec(&e).unwrap_or_default()),
     };
     sink(sink_ctx, is_error, out.as_ptr(), out.len());
-}
+}}
 
-unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] { unsafe {
     if ptr.is_null() || len == 0 {
         &[]
     } else {
         std::slice::from_raw_parts(ptr, len)
     }
-}
+}}

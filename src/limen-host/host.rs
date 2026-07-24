@@ -122,11 +122,10 @@ fn resolve_native_lib(dir: &Path, entry: &str) -> Result<String> {
         dir.join("target").join("debug"),
         dir.join("target").join("release"),
     ];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent() {
             bases.push(exe_dir.to_path_buf());
         }
-    }
 
     for base in &bases {
         for name in &candidates {
@@ -161,8 +160,8 @@ fn resolve_native(dir: &Path, entry: &str) -> Result<String> {
             return Ok(abspath(p));
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent() {
             for name in &candidates {
                 let p = exe_dir.join(name);
                 if p.exists() {
@@ -170,7 +169,6 @@ fn resolve_native(dir: &Path, entry: &str) -> Result<String> {
                 }
             }
         }
-    }
     Ok(entry.to_string())
 }
 

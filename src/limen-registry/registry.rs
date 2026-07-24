@@ -221,8 +221,8 @@ impl Registry {
         // for this platform so the operator needs no toolchain. If there's no
         // matching release asset, the module still installs as source (and must
         // be built).
-        if manifest.module.language == Language::Native && manifest.module.abi == Abi::Native {
-            if let SourceSpec::Git { repo, version } = &spec {
+        if manifest.module.language == Language::Native && manifest.module.abi == Abi::Native
+            && let SourceSpec::Git { repo, version } = &spec {
                 match fetch_native_asset(repo, &manifest.module.entry, version.as_deref(), &tempdir)
                 {
                     Ok(lib) => eprintln!("[registry] {name}: downloaded prebuilt {lib}"),
@@ -234,7 +234,6 @@ impl Registry {
                     ),
                 }
             }
-        }
 
         // Record before recursing so a dependency cycle terminates.
         acc.insert(
