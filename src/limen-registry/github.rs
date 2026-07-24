@@ -71,11 +71,10 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
         Ok(v) => v,
         Err(_) => {
             // GitHub returns `{ "message": "..." }` on errors (rate limit, 404…).
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                && let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
                     bail!("GitHub: {msg}");
                 }
-            }
             bail!("unexpected response from GitHub for org {org}");
         }
     };
