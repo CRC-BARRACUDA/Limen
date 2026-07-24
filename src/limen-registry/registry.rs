@@ -137,7 +137,9 @@ impl Registry {
 
         let mut report = InstallReport::default();
         for entry in targets {
-            let spec = SourceSpec::from_lock(&entry.source, &entry.reference, &entry.version);
+            // Update re-resolves to the latest (unpinned), so a git module can
+            // actually move past the version it was first installed at.
+            let spec = SourceSpec::from_lock_latest(&entry.source, &entry.reference);
             let sub = self.install_from(spec)?;
             report.installed.extend(sub.installed);
         }

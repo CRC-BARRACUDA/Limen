@@ -97,7 +97,7 @@ impl SourceSpec {
         }
     }
 
-    /// Rebuild a spec from a lockfile record.
+    /// Rebuild a spec from a lockfile record, pinned to the recorded version.
     pub fn from_lock(source: &str, reference: &str, version: &str) -> Self {
         match source {
             "path" => SourceSpec::Path {
@@ -106,6 +106,21 @@ impl SourceSpec {
             _ => SourceSpec::Git {
                 repo: reference.to_string(),
                 version: Some(version.to_string()),
+            },
+        }
+    }
+
+    /// Rebuild a spec from a lockfile record for **update**: git sources are left
+    /// unpinned so they re-resolve to the repo's latest (default branch), rather
+    /// than re-fetching the currently-installed version forever.
+    pub fn from_lock_latest(source: &str, reference: &str) -> Self {
+        match source {
+            "path" => SourceSpec::Path {
+                path: PathBuf::from(reference),
+            },
+            _ => SourceSpec::Git {
+                repo: reference.to_string(),
+                version: None,
             },
         }
     }
