@@ -33,6 +33,10 @@ pub struct RemoteModule {
     pub capabilities: Vec<String>,
     /// Human-readable summary of the permissions the module declares.
     pub permissions: Vec<String>,
+    /// The repo's default branch on GitHub.
+    pub branch: Option<String>,
+    /// Short commit of that branch's tip (what a fresh install would fetch).
+    pub commit: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -107,12 +111,37 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
                 version: Some(m.module.version.clone()),
                 capabilities: m.provides.capabilities.clone(),
                 permissions: m.permissions.summary(),
+                commit: fetch_latest_commit(org, &r.name, &r.default_branch),
+                branch: Some(r.default_branch),
             })
         })
         .collect();
 
     modules.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(modules)
+}
+
+/// The short commit of `org/repo`'s `branch` tip on GitHub — the revision a
+/// fresh install would fetch. `None` on any error.
+fn fetch_latest_commit(org: &str, repo: &str, branch: &str) -> Option<String> {
+    let url = format!("https://api.github.com/repos/{org}/{repo}/commits/{branch}");
+    let out = Command::new("curl")
+        .args([
+            "-fsSL",
+            "-H",
+            "User-Agent: limen",
+            "-H",
+            "Accept: application/vnd.github+json",
+            &url,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let sha = json.get("sha")?.as_str()?;
+    Some(sha.chars().take(7).collect())
 }
 
 /// Fetch and parse `org/repo`'s root `limen.toml` from its default branch.
