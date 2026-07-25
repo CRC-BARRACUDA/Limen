@@ -235,6 +235,23 @@ impl Host {
         &self.failed
     }
 
+    /// Runtimes used by loaded scripted modules that are **not yet bundled** under
+    /// `<base>/runtimes/`. Installing these makes the app self-contained (portable)
+    /// so it no longer depends on a system interpreter — even when one is present.
+    pub fn unbundled_runtimes(&self) -> Vec<crate::runtimes::Runtime> {
+        let base = limen_home();
+        let mut out: Vec<crate::runtimes::Runtime> = Vec::new();
+        for spec in &self.order {
+            if let Launch::Script { runtime, .. } = &spec.launch
+                && crate::runtimes::bundled(&base, *runtime).is_none()
+                && !out.contains(runtime)
+            {
+                out.push(*runtime);
+            }
+        }
+        out
+    }
+
     /// Spawn every module in dependency order, register its capabilities, and
     /// `initialize` it.
     pub fn start(&mut self) -> Result<()> {
