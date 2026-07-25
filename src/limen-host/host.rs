@@ -141,6 +141,30 @@ fn resolve_native_lib(dir: &Path, entry: &str) -> Result<String> {
             }
         }
     }
+
+    // Fallback: scan the dirs for any platform library whose name carries the
+    // module's name — so a release-style asset dropped in as-is (e.g.
+    // `limen-devices-0.3.0-linux-x86_64.so`) still resolves without renaming.
+    // Prefer one that also names this arch (in case several are present).
+    let suffix = std::env::consts::DLL_SUFFIX;
+    let arch = std::env::consts::ARCH;
+    for require_arch in [true, false] {
+        for base in &bases {
+            let Ok(entries) = std::fs::read_dir(base) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.ends_with(suffix)
+                    && name.contains(entry)
+                    && (!require_arch || name.contains(arch))
+                {
+                    return Ok(abspath(e.path()));
+                }
+            }
+        }
+    }
+
     bail!("could not find native library for {entry:?} — did you `cargo build` the module? (looked in {bases:?})")
 }
 
