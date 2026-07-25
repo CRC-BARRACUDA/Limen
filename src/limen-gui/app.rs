@@ -61,7 +61,7 @@ enum ModuleFilter {
 /// Tabs inside the Developer window.
 #[derive(Clone, Copy, PartialEq)]
 enum DevTab {
-    Modules,
+    DevMode,
     UiKit,
     Console,
 }
@@ -80,10 +80,6 @@ pub struct LimenApp {
     git_meta: HashMap<String, (String, String)>,
     /// Installed git modules with a newer release available: name → latest version.
     available_updates: HashMap<String, String>,
-    /// Native modules updated but awaiting an app restart to load the new code.
-    pending_restart: HashSet<String>,
-    /// A native module whose update is in flight (→ `pending_restart` when done).
-    native_update_in_flight: Option<String>,
     /// Modules that failed to start: name → error (shown in the module's tab).
     failed: HashMap<String, String>,
     /// Names of modules the user has granted their declared permissions
@@ -122,6 +118,12 @@ pub struct LimenApp {
     logs: std::collections::VecDeque<String>,
     log_autoscroll: bool,
 
+    /// Dev mode: source app/module updates from local dirs instead of GitHub.
+    /// Session-only — never persisted, so it resets on restart.
+    dev_mode_on: bool,
+    dev_limen_path: String,
+    dev_modules_path: String,
+
     /// Module names pinned to the tab bar, in order (persisted in settings).
     pinned: Vec<String>,
 
@@ -147,8 +149,6 @@ impl LimenApp {
             git_installed: HashSet::new(),
             git_meta: HashMap::new(),
             available_updates: HashMap::new(),
-            pending_restart: HashSet::new(),
-            native_update_in_flight: None,
             failed: HashMap::new(),
             trusted: HashSet::new(),
             pending_action: None,
@@ -168,9 +168,12 @@ impl LimenApp {
             remote_loading: false,
             remote_fetched: false,
             installing: None,
-            dev_tab: DevTab::Modules,
+            dev_tab: DevTab::DevMode,
             logs: std::collections::VecDeque::new(),
             log_autoscroll: true,
+            dev_mode_on: false,
+            dev_limen_path: String::new(),
+            dev_modules_path: String::new(),
             pinned: limen_core::Config::load().map(|c| c.pinned_modules).unwrap_or_default(),
             ui_scale: {
                 let pct = limen_core::Config::load().map(|c| c.ui_scale_percent).unwrap_or(0);
@@ -338,18 +341,10 @@ impl LimenApp {
                     self.refresh_trust();
                     // A reload follows a completed install/remove — clear the spinner.
                     self.installing = None;
-                    // A native module's update just completed: its new code can't
-                    // hot-swap, so mark it as needing a restart.
-                    if let Some(name) = self.native_update_in_flight.take() {
-                        self.available_updates.remove(&name);
-                        self.pending_restart.insert(name);
-                    }
                     self.status = format!("{} module(s) loaded", self.modules.len());
                 }
                 Event::ModuleUpdates(map) => {
-                    // Don't re-surface an update for something already awaiting restart.
-                    self.available_updates =
-                        map.into_iter().filter(|(n, _)| !self.pending_restart.contains(n)).collect();
+                    self.available_updates = map;
                 }
                 Event::RuntimeInstalling(rt) => {
                     self.installing_runtime = rt;
@@ -510,6 +505,7 @@ impl eframe::App for LimenApp {
         let mut switch_to: Option<usize> = None;
         let mut close_idx: Option<usize> = None;
         let mut scale_changed = false;
+        let mut dev_applied = false;
 
         // Title bar: brand + quick-open buttons + status.
         egui::TopBottomPanel::top("titlebar")
@@ -688,15 +684,15 @@ impl eframe::App for LimenApp {
         let mut update_module: Option<String> = None;
         let mut toggle_pin: Option<String> = None;
         let mut do_update = false;
-        let mut do_restart = false;
         let active_tab = self.active_tab();
         let update_info = self.update.clone();
         let updating = self.updating;
         {
             let LimenApp {
-                modules, git_installed, git_meta, available_updates, pending_restart, pinned, view,
+                modules, git_installed, git_meta, available_updates, pinned, view,
                 view_error, inputs, output, busy_action, fatal, search, filter, remote,
                 remote_error, remote_loading, installing, dev_tab, logs, log_autoscroll, ui_scale,
+                dev_mode_on, dev_limen_path, dev_modules_path,
                 ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -720,18 +716,19 @@ impl eframe::App for LimenApp {
                     }
                     Some(Tab::License) => license_view(ui),
                     Some(Tab::Modules) => modules_page(
-                        ui, modules, git_installed, git_meta, available_updates, pending_restart,
+                        ui, modules, git_installed, git_meta, available_updates,
                         pinned, remote, *remote_loading, remote_error, installing, filter, search,
                         &mut open_module, &mut remove_module, &mut add_module, &mut update_module,
-                        &mut toggle_pin, &mut do_restart, &mut reload,
+                        &mut toggle_pin, &mut reload,
                     ),
                     Some(Tab::Module(name)) => {
                         module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
                     }
                     Some(Tab::Settings) => settings_view(ui, ui_scale, &mut scale_changed),
-                    Some(Tab::Developer) => {
-                        developer_view(ui, dev_tab, inputs, logs, log_autoscroll)
-                    }
+                    Some(Tab::Developer) => developer_view(
+                        ui, dev_tab, inputs, logs, log_autoscroll,
+                        dev_mode_on, dev_limen_path, dev_modules_path, &mut dev_applied,
+                    ),
                     Some(Tab::Update) => {
                         update_view(ui, update_info.as_ref(), updating, &mut do_update)
                     }
@@ -764,6 +761,13 @@ impl eframe::App for LimenApp {
         if scale_changed {
             self.save_ui_scale();
         }
+        if dev_applied {
+            // Re-run both update checks now so the change is reflected without a
+            // restart: the app check is otherwise startup-only, and Refresh
+            // re-runs the module check against the (possibly new) source.
+            self.worker.send(Command::CheckUpdate);
+            self.worker.send(Command::Refresh);
+        }
 
         if let Some(name) = open_module {
             self.select_module(name);
@@ -784,24 +788,19 @@ impl eframe::App for LimenApp {
             if let Some(i) = self.tabs.iter().position(|t| *t == Tab::Module(name.clone())) {
                 self.close_tab(i);
             }
-            // A native (in-process) module can't hot-swap; remember so we can
-            // prompt for a restart once its update completes.
-            if self.modules.iter().any(|m| m.name == name && m.is_native_lib()) {
-                self.native_update_in_flight = Some(name.clone());
-            }
             self.busy = true;
             self.installing = Some(name.clone());
             self.status = format!("updating {name}…");
             self.worker.send(Command::UpdateModule(name));
         }
-        if do_restart {
-            self.worker.send(Command::Restart);
-        }
         if let Some(name) = toggle_pin {
             self.toggle_pin(&name);
         }
         if reload {
-            self.worker.send(Command::Refresh);
+            // Re-scan the module directories from disk: pick up newly-added
+            // modules and drop any whose folder is gone (not just re-list what's
+            // already loaded).
+            self.worker.send(Command::Reload);
             self.remote_fetched = false;
         }
         if let Some(a) = action {
@@ -971,88 +970,109 @@ fn settings_view(ui: &mut egui::Ui, scale: &mut f32, changed: &mut bool) {
     });
 }
 
+/// The Developer tab's "Dev mode" sub-tab: source app/module updates from local
+/// directories instead of GitHub, for testing. Session-only (resets on restart).
+/// `applied` is set when the source changes so the caller can re-run the checks.
+fn dev_mode_view(
+    ui: &mut egui::Ui,
+    dev_mode_on: &mut bool,
+    dev_limen_path: &mut String,
+    dev_modules_path: &mut String,
+    applied: &mut bool,
+) {
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Dev mode").strong());
+    ui.label(
+        egui::RichText::new(
+            "Source app and module updates from local directories instead of \
+             GitHub — for testing update flows. A relative path resolves against \
+             the working directory. Resets when Limen restarts.",
+        )
+        .small()
+        .color(ui::color::TEXT_MUTED),
+    );
+    ui.add_space(8.0);
+    egui::Grid::new("dev_mode_paths")
+        .num_columns(2)
+        .spacing([10.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Limen update path");
+            ui.add(
+                egui::TextEdit::singleline(dev_limen_path)
+                    .hint_text("dir of Limen-<ver>-<platform>.tar.gz")
+                    .desired_width(320.0),
+            );
+            ui.end_row();
+            ui.label("Module update path");
+            ui.add(
+                egui::TextEdit::singleline(dev_modules_path)
+                    .hint_text("dir of <name>/ module folders")
+                    .desired_width(320.0),
+            );
+            ui.end_row();
+        });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let label = if *dev_mode_on { "Update dev mode" } else { "Set dev mode" };
+        if ui
+            .add(
+                egui::Button::new(egui::RichText::new(label).color(ui::color::ON_ACCENT))
+                    .fill(ui::color::ACCENT),
+            )
+            .clicked()
+        {
+            let as_dir = |s: &str| {
+                let t = s.trim();
+                (!t.is_empty()).then(|| std::path::PathBuf::from(t))
+            };
+            limen_core::set_update_dir(as_dir(dev_limen_path));
+            limen_registry::set_update_modules_dir(as_dir(dev_modules_path));
+            *dev_mode_on = true;
+            *applied = true;
+        }
+        if *dev_mode_on && ui.button("Turn off").clicked() {
+            limen_core::set_update_dir(None);
+            limen_registry::set_update_modules_dir(None);
+            *dev_mode_on = false;
+            *applied = true;
+        }
+    });
+    if *dev_mode_on {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Dev mode on — updates sourced from the paths above.")
+                .small()
+                .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
+        );
+    }
+}
+
 /// The Developer tab: sub-tabs for docs / UI kit / log console.
+#[allow(clippy::too_many_arguments)]
 fn developer_view(
     ui: &mut egui::Ui,
     dev_tab: &mut DevTab,
     inputs: &mut HashMap<String, String>,
     logs: &std::collections::VecDeque<String>,
     autoscroll: &mut bool,
+    dev_mode_on: &mut bool,
+    dev_limen_path: &mut String,
+    dev_modules_path: &mut String,
+    dev_applied: &mut bool,
 ) {
     ui.horizontal(|ui| {
-        ui.selectable_value(dev_tab, DevTab::Modules, "Modules");
+        ui.selectable_value(dev_tab, DevTab::DevMode, "Dev mode");
         ui.selectable_value(dev_tab, DevTab::UiKit, "UI Kit");
         ui.selectable_value(dev_tab, DevTab::Console, "Console");
     });
     ui.separator();
     match dev_tab {
-        DevTab::Modules => dev_modules_docs(ui),
+        DevTab::DevMode => {
+            dev_mode_view(ui, dev_mode_on, dev_limen_path, dev_modules_path, dev_applied)
+        }
         DevTab::UiKit => ui::render_demo_ui(ui, inputs),
         DevTab::Console => dev_console(ui, logs, autoscroll),
     }
-}
-
-/// The Developer window's "Modules" tab — concise module-authoring docs.
-fn dev_modules_docs(ui: &mut egui::Ui) {
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let h = |ui: &mut egui::Ui, t: &str| {
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(t).strong().size(15.0));
-        };
-        let p = |ui: &mut egui::Ui, t: &str| {
-            ui.label(egui::RichText::new(t).color(ui::color::TEXT_MUTED));
-        };
-
-        ui.heading("Writing a module");
-        p(ui, "A module is an independent package loaded from ~/.limen/modules. \
-                It speaks JSON-RPC and addresses other modules by capability.");
-
-        h(ui, "Manifest — limen.toml");
-        ui.monospace(
-            "[module]\n\
-             name = \"usb\"\n\
-             version = \"0.1.0\"\n\
-             language = \"python\"   # python | lua | js | native\n\
-             entry = \"main.py\"\n\
-             description = \"…\"\n\
-             \n\
-             [provides]\n\
-             capabilities = [\"ops.usb\"]\n\
-             \n\
-             [requires.capabilities]\n\
-             \"crowdstrike.rtr\" = \">=0.1\"",
-        );
-
-        h(ui, "Python SDK (host-injected — just import it)");
-        ui.monospace(
-            "from limen_sdk import Module, Window, Label, Text, Button\n\
-             m = Module(\"usb\", capabilities=[\"ops.usb\"])\n\
-             \n\
-             @m.method(\"list\")\n\
-             def list_(params, host):\n\
-             \x20   out = host.call(\"crowdstrike.rtr\", \"runscript\", {...})\n\
-             \x20   return {\"devices\": out}\n\
-             \n\
-             @m.on(\"demo.tick\")          # event callback\n\
-             def on_tick(payload, host): ...\n\
-             \n\
-             @m.ui\n\
-             def ui():\n\
-             \x20   return Window(\"USB\", [Button(\"List\", calls=\"list\", primary=True)])\n\
-             \n\
-             m.run()",
-        );
-
-        h(ui, "Talking to other modules");
-        p(ui, "host.call(capability, method, params) — synchronous, routed by the broker.\n\
-                host.emit(topic, payload) — fire an event to subscribers.\n\
-                @m.on(topic) — receive events (callback).\n\
-                host.log(msg) — appears in the Console tab.");
-
-        h(ui, "Publish");
-        p(ui, "Repo CRC-BARRACUDA/limen-<name>, topic 'limen-module'. \
-                Install with `limen add <name>`.");
-    });
 }
 
 /// The Developer window's "Console" tab — all host + module log lines.
@@ -1096,7 +1116,6 @@ fn modules_page(
     git_installed: &HashSet<String>,
     git_meta: &HashMap<String, (String, String)>,
     available_updates: &HashMap<String, String>,
-    pending_restart: &HashSet<String>,
     pinned: &[String],
     remote: &[RemoteModule],
     remote_loading: bool,
@@ -1109,7 +1128,6 @@ fn modules_page(
     add: &mut Option<String>,
     update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
-    restart: &mut bool,
     reload: &mut bool,
 ) {
     ui.add_space(4.0);
@@ -1172,8 +1190,8 @@ fn modules_page(
                 module_card(
                     ui, m, git_installed.contains(&m.name), git_meta.get(&m.name),
                     available_updates.get(&m.name).map(String::as_str),
-                    pending_restart.contains(&m.name), is_pinned, installing, open, remove, update,
-                    toggle_pin, restart,
+                    is_pinned, installing, open, remove, update,
+                    toggle_pin,
                 );
                 ui.add_space(10.0);
                 shown += 1;
@@ -1232,14 +1250,12 @@ fn module_card(
     from_git: bool,
     git_meta: Option<&(String, String)>,
     latest: Option<&str>,
-    awaiting_restart: bool,
     pinned: bool,
     installing: &Option<String>,
     open: &mut Option<String>,
     remove: &mut Option<String>,
     update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
-    restart: &mut bool,
 ) {
     // This card is mid-update; another install/update is running somewhere.
     let this_busy = installing.as_deref() == Some(m.name.as_str());
@@ -1348,31 +1364,10 @@ fn module_card(
                             );
                             return;
                         }
-                        // Open — disabled while awaiting a restart (the loaded code
-                        // is stale, so opening would show the old UI).
-                        let open_clicked = ui
-                            .add_enabled_ui(!awaiting_restart, |ui| {
-                                ui.add_sized(bw, egui::Button::new("Open"))
-                            })
-                            .inner
-                            .clicked();
-                        if open_clicked {
+                        if ui.add_sized(bw, egui::Button::new("Open")).clicked() {
                             *open = Some(m.name.clone());
                         }
-                        if awaiting_restart {
-                            // A native update landed — replace Update with a restart.
-                            let btn = egui::Button::new(
-                                egui::RichText::new("Restart").color(ui::color::ON_ACCENT),
-                            )
-                            .fill(egui::Color32::from_rgb(0xd9, 0x8a, 0x3a));
-                            if ui
-                                .add_sized(bw, btn)
-                                .on_hover_text("Restart Limen to apply the update")
-                                .clicked()
-                            {
-                                *restart = true;
-                            }
-                        } else if from_git && latest.is_some() {
+                        if from_git && latest.is_some() {
                             // Update only shows when a newer release exists.
                             let label = match latest {
                                 Some(v) => format!("Update {v}"),

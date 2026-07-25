@@ -13,7 +13,7 @@ use std::thread;
 use std::collections::HashMap;
 
 use limen_core::{
-    apply_update, can_install, check_update, install_runtime, is_newer, paths, restart_app, Config,
+    apply_update, can_install, check_update, install_runtime, is_newer, paths, Config,
     Engine, ModuleSpec, UpdateInfo,
 };
 use limen_registry::{latest_release_version, list_org_modules, Lockfile, Registry, RemoteModule};
@@ -32,8 +32,11 @@ pub struct ModuleSnapshot {
 
 /// A request from the UI to the worker.
 pub enum Command {
-    /// Re-list installed modules.
+    /// Re-list installed modules from the already-loaded engine (no disk scan).
     Refresh,
+    /// Re-scan the module directories and rebuild the engine — picks up added
+    /// modules and drops ones whose folder is gone. Heavier than `Refresh`.
+    Reload,
     /// List the modules published in the configured GitHub org.
     ListRemote,
     /// Invoke `capability.method(params)`. `tag` routes the result back.
@@ -56,9 +59,8 @@ pub enum Command {
     RemoveModule(String),
     /// Download and apply an available app update, then restart.
     ApplyUpdate(UpdateInfo),
-    /// Cleanly shut modules down and relaunch the app (e.g. to load an updated
-    /// native library whose code can't hot-swap).
-    Restart,
+    /// Re-run the app-update check (e.g. after dev mode changed the source).
+    CheckUpdate,
     /// Shut modules down and exit the worker.
     Quit,
 }
@@ -276,6 +278,10 @@ fn run(
                 spawn_update_check(update_check_refs(&snap), evt_tx.clone());
                 let _ = evt_tx.send(Event::Modules(snap));
             }
+            Command::Reload => {
+                // Rebuild the engine from disk (Event::Modules is sent inside).
+                reload(&mut engine, &dirs, &evt_tx);
+            }
             Command::ListRemote => {
                 let result = list_org_modules(&org()).map_err(|e| format!("{e:#}"));
                 let _ = evt_tx.send(Event::RemoteModules(result));
@@ -359,10 +365,13 @@ fn run(
                     let _ = evt_tx.send(Event::Status(format!("update failed: {e}")));
                 }
             }
-            Command::Restart => {
-                // Shut modules down cleanly, then relaunch (never returns).
-                engine.shutdown();
-                restart_app();
+            Command::CheckUpdate => {
+                let evt_tx = evt_tx.clone();
+                thread::spawn(move || {
+                    if let Some(info) = check_update(env!("CARGO_PKG_VERSION")) {
+                        let _ = evt_tx.send(Event::UpdateAvailable(info));
+                    }
+                });
             }
             Command::Quit => {
                 engine.shutdown();

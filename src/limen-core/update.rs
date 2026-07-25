@@ -11,9 +11,30 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 /// The GitHub repo the app updates from.
 pub const APP_REPO: &str = "CRC-BARRACUDA/Limen";
+
+/// Dev-mode override: a local directory of `Limen-<ver>-<platform>.tar.gz` builds
+/// to source app updates from instead of GitHub. Session-only (see below).
+static UPDATE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Point the app self-update at a local directory (or `None` to clear). Drop
+/// `Limen-<ver>-<platform>.tar.gz` builds there and the update check/apply read
+/// from the newest one. Set from the in-app **dev mode** (available to everyone);
+/// not persisted, so it resets when the app restarts. A relative path resolves
+/// against the working directory.
+pub fn set_update_dir(dir: Option<PathBuf>) {
+    if let Ok(mut slot) = UPDATE_DIR.lock() {
+        *slot = dir;
+    }
+}
+
+/// The active dev-mode update dir this session, if one was set.
+fn update_dir() -> Option<PathBuf> {
+    UPDATE_DIR.lock().ok().and_then(|slot| slot.clone())
+}
 
 /// An available update.
 #[derive(Debug, Clone)]
@@ -71,9 +92,50 @@ fn select_asset(assets: &[(String, String)]) -> Option<String> {
         .map(|(_, url)| url.clone())
 }
 
+/// Testing variant of [`check_update`]: find the newest `Limen-<ver>-<platform>`
+/// archive in `dir` and, if it's newer than `current`, return it as the update —
+/// its local path becomes the "asset" that [`apply_update`] copies in.
+fn check_update_local(dir: &Path, current: &str) -> Option<UpdateInfo> {
+    let (os, arch) = platform_needle();
+    let mut best: Option<((u32, u32, u32), String, String)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let fname = entry.file_name().to_string_lossy().to_lowercase();
+        if !fname.starts_with("limen-")
+            || !is_extractable_archive(&fname)
+            || !fname.contains(os)
+            || !fname.contains(arch)
+        {
+            continue;
+        }
+        let ver = fname.trim_start_matches("limen-").split('-').next().unwrap_or("");
+        if ver.is_empty() {
+            continue;
+        }
+        let vt = version_tuple(ver);
+        if best.as_ref().is_none_or(|(b, _, _)| vt > *b) {
+            best = Some((vt, ver.to_string(), entry.path().to_string_lossy().into_owned()));
+        }
+    }
+    let (_, latest, path) = best?;
+    if !is_newer(&latest, current) {
+        return None;
+    }
+    Some(UpdateInfo {
+        current: current.to_string(),
+        latest,
+        url: String::new(),
+        notes: format!("Local test build: {path}"),
+        asset_url: Some(path),
+    })
+}
+
 /// Check GitHub for a newer release than `current` (e.g. `env!("CARGO_PKG_VERSION")`).
-/// Returns `None` if up to date, offline, or there's no release.
+/// Returns `None` if up to date, offline, or there's no release. When dev mode set
+/// an update dir (see [`set_update_dir`]), it sources from there instead.
 pub fn check_update(current: &str) -> Option<UpdateInfo> {
+    if let Some(dir) = update_dir() {
+        return check_update_local(&dir, current);
+    }
     let url = format!("https://api.github.com/repos/{APP_REPO}/releases/latest");
     let out = Command::new("curl")
         .args([
@@ -134,18 +196,23 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
         .ok_or("executable has no file name")?
         .to_owned();
 
-    // Download next to the current executable.
+    // Fetch next to the current executable — over the network, or (testing) copy
+    // from a local path when the "asset" is a filesystem path rather than a URL.
     let staged = exe.with_extension("update-download");
     let _ = std::fs::remove_file(&staged);
-    let status = Command::new("curl")
-        .args(["-fsSL", "-o"])
-        .arg(&staged)
-        .arg(asset)
-        .status()
-        .map_err(|e| format!("running curl: {e}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&staged);
-        return Err("download failed".into());
+    if asset.starts_with("http://") || asset.starts_with("https://") {
+        let status = Command::new("curl")
+            .args(["-fsSL", "-o"])
+            .arg(&staged)
+            .arg(asset)
+            .status()
+            .map_err(|e| format!("running curl: {e}"))?;
+        if !status.success() {
+            let _ = std::fs::remove_file(&staged);
+            return Err("download failed".into());
+        }
+    } else {
+        std::fs::copy(asset, &staged).map_err(|e| format!("copying local update: {e}"))?;
     }
 
     // If the asset is a distribution archive, extract the executable out of it;
@@ -253,6 +320,31 @@ fn locate(dir: &Path, wanted: &std::ffi::OsStr) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_update_dir_picks_newest_matching_archive() {
+        let (os, arch) = platform_needle();
+        let dir = std::env::temp_dir().join(format!("limen-updtest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for v in ["0.8.3", "9.9.9", "0.1.0"] {
+            std::fs::write(dir.join(format!("Limen-{v}-{os}-{arch}.tar.gz")), b"x").unwrap();
+        }
+        // Wrong platform → ignored even though its version is higher.
+        std::fs::write(dir.join("Limen-99.0.0-otheros-otherarch.tar.gz"), b"x").unwrap();
+
+        let info = check_update_local(&dir, "0.8.4").expect("update found");
+        assert_eq!(info.latest, "9.9.9");
+        assert!(info
+            .asset_url
+            .as_deref()
+            .unwrap()
+            .ends_with(&format!("Limen-9.9.9-{os}-{arch}.tar.gz")));
+
+        // Already up to date → nothing.
+        assert!(check_update_local(&dir, "9.9.9").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn version_comparison() {

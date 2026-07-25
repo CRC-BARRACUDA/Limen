@@ -12,7 +12,8 @@
 //! cross-module calls are fine.)
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
@@ -39,6 +40,28 @@ struct Handle(*mut c_void);
 unsafe impl Send for Handle {}
 unsafe impl Sync for Handle {}
 
+/// Monotonic per-process counter giving each library load a unique filename.
+static LOAD_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Copy the module's library to a unique, private path and return it, so the
+/// caller `dlopen`s the **copy** rather than the canonical file. `dlopen` dedupes
+/// by path, so re-opening the canonical path after an update would map the *old*
+/// code; loading a fresh, uniquely-named copy always maps the new code — this is
+/// what lets a native module update **without an app restart**. It also keeps the
+/// canonical file unlocked (on Windows the updater can then overwrite it).
+fn stage_copy(name: &str, lib_path: &str) -> Result<PathBuf> {
+    let src = Path::new(lib_path);
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("so");
+    let dir = std::env::temp_dir().join("limen-native");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating native staging dir for {name}"))?;
+    let seq = LOAD_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dst = dir.join(format!("{name}.{}.{seq}.{ext}", std::process::id()));
+    std::fs::copy(src, &dst)
+        .with_context(|| format!("staging native lib {name} from {lib_path}"))?;
+    Ok(dst)
+}
+
 pub struct NativeModule {
     name: String,
     handle: Handle,
@@ -56,8 +79,17 @@ pub struct NativeModule {
 impl NativeModule {
     /// dlopen `lib_path`, verify its ABI, initialize it, and return a handle.
     pub fn load(name: String, lib_path: &str, handler: Arc<IncomingHandler>) -> Result<Arc<Self>> {
-        let lib = unsafe { Library::new(lib_path) }
+        // Load a private per-load copy, never the canonical file (see
+        // `stage_copy`) — this is what makes native updates hot-swap without a
+        // restart.
+        let staged = stage_copy(&name, lib_path)?;
+        let lib = unsafe { Library::new(&staged) }
             .with_context(|| format!("loading native module {name} from {lib_path}"))?;
+        // The mapping survives unlinking on Unix, so delete the copy right away to
+        // self-clean. A loaded file stays locked on Windows; leave it for the OS
+        // temp sweep.
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(&staged);
 
         unsafe {
             let abi_version: Symbol<AbiVersionFn> = lib

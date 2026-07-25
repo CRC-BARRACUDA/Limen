@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use limen_proto::{Abi, Language, Manifest};
@@ -13,6 +14,40 @@ use crate::source::SourceSpec;
 use crate::util::{copy_tree, digest_dir};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Dev-mode override: a local directory of module builds to update from instead
+/// of GitHub. Layout: `<dir>/<name>/` holding the module's `limen.toml` and built
+/// library — the same shape as the dev `modules/` tree. Session-only.
+static UPDATE_MODULES_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Point module updates at a local directory (or `None` to clear). Set from the
+/// in-app **dev mode** (available to everyone); not persisted, so it resets when
+/// the app restarts. A relative path resolves against the working directory.
+pub fn set_update_modules_dir(dir: Option<PathBuf>) {
+    if let Ok(mut slot) = UPDATE_MODULES_DIR.lock() {
+        *slot = dir;
+    }
+}
+
+/// The active dev-mode module-update dir this session, if one was set.
+fn update_modules_dir() -> Option<PathBuf> {
+    UPDATE_MODULES_DIR.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// A module's name as used for the local update dir: the repo slug's last segment
+/// without the `limen-` prefix (`owner/limen-devices` → `devices`).
+fn module_name_from_repo(repo: &str) -> &str {
+    let last = repo.rsplit('/').next().unwrap_or(repo);
+    last.strip_prefix("limen-").unwrap_or(last)
+}
+
+/// The version declared in `<dir>/<name>/limen.toml`, for the local update check.
+fn local_module_version(dir: &Path, repo: &str) -> Option<String> {
+    let name = module_name_from_repo(repo);
+    let text = std::fs::read_to_string(dir.join(name).join("limen.toml")).ok()?;
+    let manifest: Manifest = toml::from_str(&text).ok()?;
+    Some(manifest.module.version)
+}
 
 /// What an `add`/`update` installed.
 #[derive(Debug, Default)]
@@ -138,8 +173,12 @@ impl Registry {
         let mut report = InstallReport::default();
         for entry in targets {
             // Update re-resolves to the latest (unpinned), so a git module can
-            // actually move past the version it was first installed at.
-            let spec = SourceSpec::from_lock_latest(&entry.source, &entry.reference);
+            // actually move past the version it was first installed at. In debug
+            // builds a `--update-modules-dir` override installs from a local copy.
+            let spec = match update_modules_dir() {
+                Some(dir) => SourceSpec::Path { path: dir.join(&entry.name) },
+                None => SourceSpec::from_lock_latest(&entry.source, &entry.reference),
+            };
             let sub = self.install_from(spec)?;
             report.installed.extend(sub.installed);
         }
@@ -280,6 +319,9 @@ impl Registry {
 /// The latest release tag for a repo (`owner/repo` or URL), version-normalized
 /// (leading `v` stripped). `None` if there's no release, or on any error.
 pub fn latest_release_version(repo: &str) -> Option<String> {
+    if let Some(dir) = update_modules_dir() {
+        return local_module_version(&dir, repo);
+    }
     let slug = github_slug(repo);
     let url = format!("https://api.github.com/repos/{slug}/releases/latest");
     let out = std::process::Command::new("curl")
@@ -498,6 +540,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn local_module_update_reads_manifest_version() {
+        assert_eq!(module_name_from_repo("owner/limen-devices"), "devices");
+        assert_eq!(module_name_from_repo("devices"), "devices");
+
+        let root = tmp("modupd");
+        let mod_dir = root.join("devices");
+        std::fs::create_dir_all(&mod_dir).unwrap();
+        std::fs::write(
+            mod_dir.join("limen.toml"),
+            "[module]\nname = \"devices\"\nversion = \"9.9.9\"\nlanguage = \"native\"\nentry = \"devices\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            local_module_version(&root, "CRC-BARRACUDA/limen-devices").as_deref(),
+            Some("9.9.9")
+        );
+        // Missing module folder → None.
+        assert!(local_module_version(&root, "owner/limen-nope").is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
