@@ -178,18 +178,25 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
     // Best-effort cleanup of the extraction scratch dir.
     let _ = std::fs::remove_dir_all(exe.with_extension("update-extract"));
 
-    restart_app();
+    // Relaunch the *captured* exe path — after the swap `current_exe()` points at
+    // the replaced (deleted) inode, so re-deriving it would fail to spawn.
+    relaunch(&exe);
 }
 
-/// Relaunch the current executable with the same arguments and exit. Never
-/// returns. Used after a self-update, and to reload native modules whose code
-/// can't hot-swap in a running process.
-pub fn restart_app() -> ! {
-    if let Ok(exe) = std::env::current_exe() {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let _ = Command::new(&exe).args(&args).spawn();
-    }
+/// Relaunch `exe` with the current arguments and exit. Never returns.
+fn relaunch(exe: &Path) -> ! {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let _ = Command::new(exe).args(&args).spawn();
     std::process::exit(0);
+}
+
+/// Relaunch the running executable and exit — for cases without a binary swap
+/// (e.g. reloading native modules whose code can't hot-swap in-process).
+pub fn restart_app() -> ! {
+    match std::env::current_exe() {
+        Ok(exe) => relaunch(&exe),
+        Err(_) => std::process::exit(0),
+    }
 }
 
 /// Extract `archive` into a scratch dir next to the exe and return the path to
