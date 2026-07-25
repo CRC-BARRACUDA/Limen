@@ -1457,6 +1457,25 @@ fn available_card(
                                     .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
                             );
                         }
+                        // Git status of what a fresh install would fetch — same
+                        // shape as installed modules (branch / commit).
+                        if let Some(b) = &r.branch {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("branch - {b}"))
+                                    .monospace()
+                                    .small()
+                                    .color(ui::color::TEXT_MUTED),
+                            );
+                        }
+                        if let Some(c) = &r.commit {
+                            ui.label(
+                                egui::RichText::new(format!("commit - {c}"))
+                                    .monospace()
+                                    .small()
+                                    .color(ui::color::TEXT_MUTED),
+                            );
+                        }
                         ui.add_space(6.0);
                         ui.label(egui::RichText::new(&r.repo).small().color(ui::color::TEXT_MUTED));
                     },
