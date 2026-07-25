@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Extra directories to search for modules, in addition to the default
     /// `~/.limen/modules`. Each entry may be a modules root (containing module
@@ -29,6 +33,22 @@ pub struct Config {
     /// Global UI scale, as a percentage (100 = default). 0/absent means default.
     #[serde(default)]
     pub ui_scale_percent: u32,
+
+    /// Whether UI animations are enabled. Defaults to on.
+    #[serde(default = "default_true")]
+    pub animations: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            module_dirs: Vec::new(),
+            default_org: None,
+            pinned_modules: Vec::new(),
+            ui_scale_percent: 0,
+            animations: true,
+        }
+    }
 }
 
 /// The org used when none is configured.

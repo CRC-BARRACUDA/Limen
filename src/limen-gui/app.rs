@@ -130,6 +130,23 @@ pub struct LimenApp {
     /// Global UI scale as a percentage (persisted in settings).
     ui_scale: f32,
 
+    /// Whether UI animations are enabled (persisted in settings).
+    animations: bool,
+
+    /// When the About tab was last shown — drives its staggered content reveal.
+    about_revealed_at: Option<f64>,
+    /// When the Modules tab was last shown — drives the staggered list reveal.
+    modules_revealed_at: Option<f64>,
+    /// The filter the current reveal was started for; a change replays the reveal.
+    shown_filter: ModuleFilter,
+    /// When the async GitHub list arrived — the reveal base for the available
+    /// cards, so they animate in when they load (not from tab-open).
+    remote_revealed_at: Option<f64>,
+
+    /// Modules mid-removal: name → animation start time (or a negative sentinel
+    /// once the actual removal has been sent). Drives the exit animation.
+    removing: HashMap<String, f64>,
+
     /// An available app update (from the background check), if any.
     update: Option<limen_core::UpdateInfo>,
     /// True while an update download/install is in flight.
@@ -141,6 +158,8 @@ pub struct LimenApp {
 impl LimenApp {
     pub fn new(cc: &eframe::CreationContext<'_>, dirs: Vec<std::path::PathBuf>) -> Self {
         ui::apply_theme(&cc.egui_ctx);
+        let animations = limen_core::Config::load().map(|c| c.animations).unwrap_or(true);
+        ui::set_animations(animations);
         Self {
             worker: Worker::spawn(dirs),
             status: "starting modules…".to_string(),
@@ -179,6 +198,12 @@ impl LimenApp {
                 let pct = limen_core::Config::load().map(|c| c.ui_scale_percent).unwrap_or(0);
                 if pct == 0 { 100.0 } else { pct as f32 }
             },
+            animations,
+            about_revealed_at: None,
+            modules_revealed_at: None,
+            shown_filter: ModuleFilter::All,
+            remote_revealed_at: None,
+            removing: HashMap::new(),
             update: None,
             updating: false,
             installing_runtime: None,
@@ -201,16 +226,11 @@ impl LimenApp {
         }
     }
 
-    /// Close the tab at `index`. Closing a pinned module also unpins it.
+    /// Close the tab at `index`.
     fn close_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
-        if let Tab::Module(name) = &self.tabs[index]
-            && self.pinned.iter().any(|n| n == name) {
-                let name = name.clone();
-                self.toggle_pin(&name); // unpin
-            }
         self.tabs.remove(index);
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
@@ -235,21 +255,18 @@ impl LimenApp {
         v.into_iter().take(n).map(|(name, _)| name.clone()).collect()
     }
 
-    /// Ensure every pinned+installed module has an open tab (pinned tabs persist).
-    fn sync_pinned_tabs(&mut self) {
-        for name in self.pinned.clone() {
-            if self.modules.iter().any(|m| m.name == name)
-                && !self.tabs.iter().any(|t| *t == Tab::Module(name.clone()))
-            {
-                self.tabs.push(Tab::Module(name));
-            }
-        }
-    }
-
     /// Persist the current UI scale to settings.json (without clobbering others).
     fn save_ui_scale(&self) {
         if let Ok(mut cfg) = limen_core::Config::load() {
             cfg.ui_scale_percent = self.ui_scale.round() as u32;
+            let _ = cfg.save();
+        }
+    }
+
+    /// Persist the animations toggle to settings.json (without clobbering others).
+    fn save_animations(&self) {
+        if let Ok(mut cfg) = limen_core::Config::load() {
+            cfg.animations = self.animations;
             let _ = cfg.save();
         }
     }
@@ -330,7 +347,7 @@ impl LimenApp {
         }
     }
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, now: f64) {
         while let Ok(evt) = self.worker.rx.try_recv() {
             match evt {
                 Event::Ready(snap) | Event::Modules(snap) => {
@@ -355,6 +372,9 @@ impl LimenApp {
                         Ok(list) => {
                             self.remote = list;
                             self.remote_error = None;
+                            // Timestamp the load so the available cards animate in
+                            // when they actually arrive (async), not from tab-open.
+                            self.remote_revealed_at = Some(now);
                         }
                         Err(e) => self.remote_error = Some(e),
                     }
@@ -489,7 +509,8 @@ impl LimenApp {
 
 impl eframe::App for LimenApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_events();
+        let now_t = ctx.input(|i| i.time);
+        self.drain_events(now_t);
 
         // Apply the global UI scale (set_zoom_factor no-ops if unchanged).
         ctx.set_zoom_factor(self.ui_scale / 100.0);
@@ -497,14 +518,12 @@ impl eframe::App for LimenApp {
         // Reload is requested from the Modules page (set during the central panel).
         let mut reload = false;
 
-        // Keep pinned modules present as tabs.
-        self.sync_pinned_tabs();
-
         // Intents collected while rendering, applied after.
         let mut open_tab: Option<Tab> = None;
         let mut switch_to: Option<usize> = None;
         let mut close_idx: Option<usize> = None;
         let mut scale_changed = false;
+        let mut anim_changed = false;
         let mut dev_applied = false;
 
         // Title bar: brand + quick-open buttons + status.
@@ -560,9 +579,8 @@ impl eframe::App for LimenApp {
                 });
             });
 
-        // Tab strip: open tabs (pinned modules marked), with close buttons; plus
-        // "frequent" quick-open chips on the right.
-        let pinned = self.pinned.clone();
+        // Tab strip: open tabs with close buttons; plus "frequent" quick-open
+        // chips on the right.
         let frequent = self.frequent_modules(4);
         egui::TopBottomPanel::top("tabstrip")
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x18, 0x1a, 0x1f)).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
@@ -572,13 +590,7 @@ impl eframe::App for LimenApp {
                     let font_id = egui::TextStyle::Button.resolve(ui.style());
                     for (i, tab) in self.tabs.iter().enumerate() {
                         let selected = i == self.active;
-                        let is_pinned =
-                            matches!(tab, Tab::Module(n) if pinned.iter().any(|p| p == n));
-                        let text = if is_pinned {
-                            format!("📌 {}", tab.title())
-                        } else {
-                            tab.title()
-                        };
+                        let text = tab.title();
 
                         // Zed-style tab: stable width (the close slot is always
                         // reserved), the × only shows on hover or when active.
@@ -595,32 +607,53 @@ impl eframe::App for LimenApp {
                         // hover, making the tab flicker as the × shows/hides.
                         let hovered = ui.rect_contains_pointer(rect);
 
-                        // Active tab adopts the panel colour; hover lightens.
+                        // Smoothly fade the hover fill in, and grow the active
+                        // underline out from the tab's centre toward its edges.
+                        let anim = ui::animations_enabled();
+                        let hover_t = if anim {
+                            ui.ctx().animate_bool_with_time(
+                                resp.id.with("hover"),
+                                hovered && !selected,
+                                0.14,
+                            )
+                        } else {
+                            (hovered && !selected) as u8 as f32
+                        };
+                        let active_t = if anim {
+                            ui.ctx().animate_bool_with_time(resp.id.with("active"), selected, 0.05)
+                        } else {
+                            selected as u8 as f32
+                        };
+
+                        // Active tab adopts the panel colour; hover fades in.
                         let fill = if selected {
                             ui::color::BG
-                        } else if hovered {
-                            ui::color::BG_ELEVATED
                         } else {
-                            egui::Color32::TRANSPARENT
+                            let e = ui::color::BG_ELEVATED;
+                            egui::Color32::from_rgba_unmultiplied(
+                                e.r(),
+                                e.g(),
+                                e.b(),
+                                (255.0 * hover_t) as u8,
+                            )
                         };
                         ui.painter().rect_filled(
                             rect,
                             egui::Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 },
                             fill,
                         );
-                        if selected {
+                        if active_t > 0.0 {
+                            let half = rect.width() / 2.0 * active_t;
+                            let cx = rect.center().x;
                             ui.painter().hline(
-                                rect.x_range(),
+                                (cx - half)..=(cx + half),
                                 rect.bottom() - 1.0,
                                 egui::Stroke::new(2.0_f32, ui::color::ACCENT),
                             );
                         }
 
-                        let tcol = if selected || hovered {
-                            ui::color::TEXT
-                        } else {
-                            ui::color::TEXT_MUTED
-                        };
+                        let text_t = if selected { 1.0 } else { hover_t };
+                        let tcol = ui::lerp_color(ui::color::TEXT_MUTED, ui::color::TEXT, text_t);
                         let tpos =
                             egui::pos2(rect.left() + pad, rect.center().y - galley.size().y / 2.0);
                         ui.painter().galley(tpos, galley, tcol);
@@ -687,12 +720,27 @@ impl eframe::App for LimenApp {
         let active_tab = self.active_tab();
         let update_info = self.update.clone();
         let updating = self.updating;
+        // Arm the reveal on first show of the Modules tab; the filter-change replay
+        // is handled inside `modules_page` so it lands on the same frame as the
+        // click (avoiding a one-frame flash).
+        if active_tab == Some(Tab::Modules) {
+            self.modules_revealed_at.get_or_insert(now_t);
+        } else {
+            self.modules_revealed_at = None;
+        }
+        if active_tab == Some(Tab::About) {
+            self.about_revealed_at.get_or_insert(now_t);
+        } else {
+            self.about_revealed_at = None;
+        }
+        let about_reveal = self.about_revealed_at.unwrap_or(now_t);
         {
             let LimenApp {
                 modules, git_installed, git_meta, available_updates, pinned, view,
                 view_error, inputs, output, busy_action, fatal, search, filter, remote,
                 remote_error, remote_loading, installing, dev_tab, logs, log_autoscroll, ui_scale,
-                dev_mode_on, dev_limen_path, dev_modules_path,
+                animations, dev_mode_on, dev_limen_path, dev_modules_path, removing,
+                modules_revealed_at, shown_filter, remote_revealed_at,
                 ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -710,7 +758,7 @@ impl eframe::App for LimenApp {
                         });
                     }
                     Some(Tab::About) => {
-                        if about_view(ui) {
+                        if about_view(ui, about_reveal) {
                             open_tab = Some(Tab::License);
                         }
                     }
@@ -719,12 +767,15 @@ impl eframe::App for LimenApp {
                         ui, modules, git_installed, git_meta, available_updates,
                         pinned, remote, *remote_loading, remote_error, installing, filter, search,
                         &mut open_module, &mut remove_module, &mut add_module, &mut update_module,
-                        &mut toggle_pin, &mut reload,
+                        &mut toggle_pin, &mut reload, modules_revealed_at, shown_filter,
+                        *remote_revealed_at, removing,
                     ),
                     Some(Tab::Module(name)) => {
                         module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
                     }
-                    Some(Tab::Settings) => settings_view(ui, ui_scale, &mut scale_changed),
+                    Some(Tab::Settings) => {
+                        settings_view(ui, ui_scale, &mut scale_changed, animations, &mut anim_changed)
+                    }
                     Some(Tab::Developer) => developer_view(
                         ui, dev_tab, inputs, logs, log_autoscroll,
                         dev_mode_on, dev_limen_path, dev_modules_path, &mut dev_applied,
@@ -761,6 +812,10 @@ impl eframe::App for LimenApp {
         if scale_changed {
             self.save_ui_scale();
         }
+        if anim_changed {
+            ui::set_animations(self.animations);
+            self.save_animations();
+        }
         if dev_applied {
             // Re-run both update checks now so the change is reflected without a
             // restart: the app check is otherwise startup-only, and Refresh
@@ -773,9 +828,36 @@ impl eframe::App for LimenApp {
             self.select_module(name);
         }
         if let Some(name) = remove_module {
-            self.busy = true;
             self.status = format!("removing {name}…");
-            self.worker.send(Command::RemoveModule(name));
+            if self.animations {
+                // Play the exit animation first; the actual removal fires when it
+                // finishes (see the removal processing below).
+                self.removing.insert(name, now_t);
+            } else {
+                self.busy = true;
+                self.worker.send(Command::RemoveModule(name));
+            }
+        }
+        // Drive in-flight removals: once a card's exit animation has run for its
+        // duration, send the real removal (once); keep the entry so the card stays
+        // invisible until the reload drops it, then clean it up.
+        {
+            let present: HashSet<&String> = self.modules.iter().map(|m| &m.name).collect();
+            self.removing.retain(|name, _| present.contains(name));
+            let mut fire: Vec<String> = Vec::new();
+            for (name, start) in self.removing.iter_mut() {
+                if *start >= 0.0 && now_t - *start >= 0.34 {
+                    fire.push(name.clone());
+                    *start = -1.0; // mark sent; card stays faded out
+                }
+            }
+            for name in fire {
+                self.busy = true;
+                self.worker.send(Command::RemoveModule(name));
+            }
+            if !self.removing.is_empty() {
+                ctx.request_repaint();
+            }
         }
         if let Some(reference) = add_module {
             self.busy = true;
@@ -847,11 +929,7 @@ impl eframe::App for LimenApp {
                     }
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
-                        let grant = egui::Button::new(
-                            egui::RichText::new("Grant & Run").color(ui::color::ON_ACCENT),
-                        )
-                        .fill(ui::color::ACCENT);
-                        if ui.add(grant).clicked() {
+                        if ui::primary_button(ui, "Grant & Run").clicked() {
                             decision = Some(true);
                         }
                         if ui.button("Deny").clicked() {
@@ -947,7 +1025,13 @@ fn update_view(
 }
 
 /// The Settings tab.
-fn settings_view(ui: &mut egui::Ui, scale: &mut f32, changed: &mut bool) {
+fn settings_view(
+    ui: &mut egui::Ui,
+    scale: &mut f32,
+    changed: &mut bool,
+    animations: &mut bool,
+    anim_changed: &mut bool,
+) {
     ui.add_space(4.0);
     ui.heading("Settings");
     ui.separator();
@@ -968,6 +1052,20 @@ fn settings_view(ui: &mut egui::Ui, scale: &mut f32, changed: &mut bool) {
             }
         }
     });
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Animations").strong());
+    ui.label(
+        egui::RichText::new("Smoothly animate buttons and transitions.")
+            .small()
+            .color(ui::color::TEXT_MUTED),
+    );
+    ui.add_space(6.0);
+    if ui.checkbox(animations, "Enable animations").changed() {
+        *anim_changed = true;
+    }
 }
 
 /// The Developer tab's "Dev mode" sub-tab: source app/module updates from local
@@ -1014,13 +1112,7 @@ fn dev_mode_view(
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         let label = if *dev_mode_on { "Update dev mode" } else { "Set dev mode" };
-        if ui
-            .add(
-                egui::Button::new(egui::RichText::new(label).color(ui::color::ON_ACCENT))
-                    .fill(ui::color::ACCENT),
-            )
-            .clicked()
-        {
+        if ui::primary_button(ui, label).clicked() {
             let as_dir = |s: &str| {
                 let t = s.trim();
                 (!t.is_empty()).then(|| std::path::PathBuf::from(t))
@@ -1129,6 +1221,10 @@ fn modules_page(
     update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
     reload: &mut bool,
+    modules_revealed_at: &mut Option<f64>,
+    shown_filter: &mut ModuleFilter,
+    remote_revealed_at: Option<f64>,
+    removing: &HashMap<String, f64>,
 ) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -1156,12 +1252,7 @@ fn modules_page(
             (ModuleFilter::Installed, "Installed"),
             (ModuleFilter::Available, "Available"),
         ] {
-            let text = if *filter == value {
-                egui::RichText::new(label).color(ui::color::ACCENT)
-            } else {
-                egui::RichText::new(label)
-            };
-            if ui.selectable_label(*filter == value, text).clicked() {
+            if ui::filter_chip(ui, label, *filter == value).clicked() {
                 *filter = value;
             }
         }
@@ -1170,6 +1261,17 @@ fn modules_page(
             ui.spinner();
         }
     });
+
+    // The chips above may have just flipped the filter — reset the reveal timer
+    // *this* frame so the new list animates in from opacity 0 rather than flashing
+    // at full opacity for one frame before restarting.
+    let now = ui.input(|i| i.time);
+    if *filter != *shown_filter {
+        *modules_revealed_at = Some(now);
+        *shown_filter = *filter;
+    }
+    let reveal_at = modules_revealed_at.unwrap_or(now);
+
     ui.add_space(6.0);
     ui.separator();
 
@@ -1179,35 +1281,52 @@ fn modules_page(
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(4.0);
         let mut shown = 0;
+        let animate = ui::animations_enabled();
 
-        // Installed modules.
-        if *filter != ModuleFilter::Available {
-            for m in modules {
-                if !module_matches(m, &query) {
-                    continue;
-                }
-                let is_pinned = pinned.iter().any(|n| n == &m.name);
+        // Installed modules — pinned first (in pin order), then the rest in their
+        // existing order (stable sort keeps non-pinned relative order).
+        let mut ordered: Vec<&ModuleSpec> = modules.iter().collect();
+        ordered.sort_by_key(|m| pinned.iter().position(|n| n == &m.name).unwrap_or(usize::MAX));
+        for m in ordered {
+            if *filter == ModuleFilter::Available || !module_matches(m, &query) {
+                continue;
+            }
+            let rt = match removing.get(m.name.as_str()) {
+                Some(&s) if s < 0.0 => 1.0, // removal sent — stay faded out
+                Some(&s) => (((now - s) / 0.34).clamp(0.0, 1.0)) as f32,
+                None => 0.0,
+            };
+            let is_pinned = pinned.iter().any(|n| n == &m.name);
+            let id = egui::Id::new(("modcard", m.name.as_str()));
+            reveal_card(ui, id, shown, reveal_at, now, animate, rt, |ui| {
                 module_card(
                     ui, m, git_installed.contains(&m.name), git_meta.get(&m.name),
                     available_updates.get(&m.name).map(String::as_str),
                     is_pinned, installing, open, remove, update,
                     toggle_pin,
                 );
-                ui.add_space(10.0);
-                shown += 1;
-            }
+            });
+            shown += 1;
         }
 
-        // Available in the org (not already installed).
-        if *filter != ModuleFilter::Installed {
-            for r in remote {
-                if installed_names.contains(r.name.as_str()) || !remote_matches(r, &query) {
-                    continue;
-                }
-                available_card(ui, r, installing, add);
-                ui.add_space(10.0);
-                shown += 1;
+        // Available in the org (not already installed). These load asynchronously,
+        // so their entrance is timed from when the list arrived (or the last filter
+        // switch, whichever is later) with its own stagger index.
+        let avail_reveal = reveal_at.max(remote_revealed_at.unwrap_or(reveal_at));
+        let mut avail_i = 0usize;
+        for r in remote {
+            if *filter == ModuleFilter::Installed
+                || installed_names.contains(r.name.as_str())
+                || !remote_matches(r, &query)
+            {
+                continue;
             }
+            let id = egui::Id::new(("availcard", r.name.as_str()));
+            reveal_card(ui, id, avail_i, avail_reveal, now, animate, 0.0, |ui| {
+                available_card(ui, r, installing, add);
+            });
+            avail_i += 1;
+            shown += 1;
         }
 
         if let Some(err) = remote_error {
@@ -1243,6 +1362,80 @@ fn remote_matches(r: &RemoteModule, query: &str) -> bool {
 /// A single installed-module card, in its own rounded box. `from_git` shows the
 /// GitHub action only for modules installed from a repo (manual ones get just
 /// Open + Remove).
+/// Wrap a list card in its animations: a staggered slide-in from the left on first
+/// reveal (delayed by `k`), multiplied by `filter_t` — the card's fade as it
+/// enters/leaves the list on a filter change. `filter_t` is 1 while shown, eases
+/// to 0 as it leaves; persistent cards sit at 1 and don't re-animate.
+#[allow(clippy::too_many_arguments)]
+fn reveal_card(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    k: usize,
+    reveal_at: f64,
+    now: f64,
+    animate: bool,
+    remove_t: f32,
+    draw: impl FnOnce(&mut egui::Ui),
+) {
+    // Trailing gap between cards (also collapses during a removal).
+    const GAP: f32 = 10.0;
+    if !animate {
+        draw(ui);
+        ui.add_space(GAP);
+        return;
+    }
+    // Time-based entrance, eased and staggered by index. Replays whenever the
+    // reveal timer resets (tab shown, or the filter changed).
+    let start = reveal_at + k as f64 * 0.05;
+    let raw = (((now - start) / 0.30).clamp(0.0, 1.0)) as f32;
+    let inv = 1.0 - raw;
+    let enter = 1.0 - inv * inv * inv; // ease-out cubic
+    // Exit uses smoothstep (ease in *and* out) so the fade, slide, and — most
+    // importantly — the height collapse all progress steadily; a cubic ease-in
+    // held the height near full and then snapped it shut at the end.
+    let exit = remove_t * remove_t * (3.0 - 2.0 * remove_t); // smoothstep
+
+    let dx = (1.0 - enter) * 28.0 + exit * 28.0;
+    if enter < 1.0 || (remove_t > 0.0 && remove_t < 1.0) {
+        ui.ctx().request_repaint(); // keep animating until settled
+    }
+
+    if exit <= 0.0 {
+        // Normal render — and remember the height so a later removal can collapse
+        // it smoothly (measured on a non-collapsing frame).
+        let inner = ui.scope(|ui| {
+            ui.set_opacity(enter);
+            ui.horizontal(|ui| {
+                ui.add_space(dx);
+                draw(ui);
+            });
+        });
+        ui.data_mut(|d| d.insert_temp(id, inner.response.rect.height()));
+        ui.add_space(GAP);
+        return;
+    }
+
+    // Removing: shrink the vertical space (card height + gap) so the cards below
+    // slide up to fill it, while the card fades and slides out to the right.
+    let full_h: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(90.0);
+    let width = ui.available_width();
+    let h = full_h * (1.0 - exit);
+    let (outer, _) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
+    let mut child = ui.child_ui_with_id_source(
+        egui::Rect::from_min_size(outer.min, egui::vec2(width, full_h)),
+        egui::Layout::top_down(egui::Align::Min),
+        id,
+        None,
+    );
+    child.set_clip_rect(child.clip_rect().intersect(outer));
+    child.set_opacity(enter * (1.0 - exit));
+    child.horizontal(|ui| {
+        ui.add_space(dx);
+        draw(ui);
+    });
+    ui.add_space(GAP * (1.0 - exit));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn module_card(
     ui: &mut egui::Ui,
@@ -1364,7 +1557,7 @@ fn module_card(
                             );
                             return;
                         }
-                        if ui.add_sized(bw, egui::Button::new("Open")).clicked() {
+                        if ui::outline_button(ui, "Open", bw).clicked() {
                             *open = Some(m.name.clone());
                         }
                         if from_git && latest.is_some() {
@@ -1386,16 +1579,16 @@ fn module_card(
                             }
                         }
                         let pin_label = if pinned { "📌 Unpin" } else { "📌 Pin" };
-                        if ui.add_sized(bw, egui::Button::new(pin_label)).clicked() {
+                        if ui::outline_button(ui, pin_label, bw).clicked() {
                             *toggle_pin = Some(m.name.clone());
                         }
-                        if ui.add_sized(bw, egui::Button::new("Remove")).clicked() {
+                        if ui::outline_button(ui, "Remove", bw).clicked() {
                             *remove = Some(m.name.clone());
                         }
                         // GitHub only for git-installed modules.
                         if from_git
                             && let Some(repo) = &m.repo
-                                && ui.add_sized(bw, egui::Button::new("GitHub ↗")).clicked() {
+                                && ui::outline_button(ui, "GitHub ↗", bw).clicked() {
                                     ui.output_mut(|o| {
                                         o.open_url = Some(egui::OpenUrl::new_tab(repo_url(repo)));
                                     });
@@ -1543,59 +1736,100 @@ fn badge(ui: &mut egui::Ui, text: &str) {
 const TAGLINE: &str = "A modular tool for security and analysis.";
 
 /// The About page. Returns `true` if the "License" button was clicked.
-fn about_view(ui: &mut egui::Ui) -> bool {
+/// Fade a single About-screen element in, staggered by `k`, so the block
+/// assembles itself one line at a time when the tab is shown.
+fn reveal_item(
+    ui: &mut egui::Ui,
+    k: usize,
+    reveal_at: f64,
+    now: f64,
+    animate: bool,
+    draw: impl FnOnce(&mut egui::Ui),
+) {
+    if !animate {
+        draw(ui);
+        return;
+    }
+    let start = reveal_at + k as f64 * 0.035;
+    let raw = (((now - start) / 0.18).clamp(0.0, 1.0)) as f32;
+    let inv = 1.0 - raw;
+    let t = 1.0 - inv * inv * inv; // ease-out cubic
+    if t < 1.0 {
+        ui.ctx().request_repaint();
+    }
+    ui.scope(|ui| {
+        ui.set_opacity(t);
+        draw(ui);
+    });
+}
+
+fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
     let muted = ui::color::TEXT_MUTED;
     let mut license_clicked = false;
+    let now = ui.input(|i| i.time);
+    let animate = ui::animations_enabled();
 
     // Scroll so nothing (footer, button) is clipped on short windows / high scale.
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-    // Push the block toward the vertical middle.
-    let top = (ui.available_height() * 0.10).clamp(20.0, 120.0);
-    ui.add_space(top);
+        // Push the block toward the vertical middle.
+        let top = (ui.available_height() * 0.10).clamp(20.0, 120.0);
+        ui.add_space(top);
 
-    ui.vertical_centered(|ui| {
-        ui.set_max_width(480.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(480.0);
 
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(92.0, 92.0), egui::Sense::hover());
-        draw_brand(ui.painter(), rect);
+            reveal_item(ui, 0, reveal_at, now, animate, |ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(92.0, 92.0), egui::Sense::hover());
+                draw_brand(ui.painter(), rect);
+            });
 
-        ui.add_space(14.0);
-        ui.label(egui::RichText::new("LIMEN").size(30.0).strong());
-        ui.label(
-            egui::RichText::new(format!(
-                "v{} · {} branch",
-                env!("CARGO_PKG_VERSION"),
-                env!("LIMEN_GIT_BRANCH"),
-            ))
-            .monospace()
-            .color(muted),
-        );
-        ui.label(
-            egui::RichText::new(format!("commit {}", env!("LIMEN_GIT_COMMIT")))
-                .monospace()
-                .small()
-                .color(muted),
-        );
+            ui.add_space(14.0);
+            reveal_item(ui, 1, reveal_at, now, animate, |ui| {
+                ui.label(egui::RichText::new("LIMEN").size(30.0).strong());
+            });
+            reveal_item(ui, 2, reveal_at, now, animate, |ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "v{} · {} branch",
+                        env!("CARGO_PKG_VERSION"),
+                        env!("LIMEN_GIT_BRANCH"),
+                    ))
+                    .monospace()
+                    .color(muted),
+                );
+                ui.label(
+                    egui::RichText::new(format!("commit {}", env!("LIMEN_GIT_COMMIT")))
+                        .monospace()
+                        .small()
+                        .color(muted),
+                );
+            });
 
-        ui.add_space(18.0);
-        ui.label(egui::RichText::new(TAGLINE).size(15.0));
+            ui.add_space(18.0);
+            reveal_item(ui, 3, reveal_at, now, animate, |ui| {
+                ui.label(egui::RichText::new(TAGLINE).size(15.0));
+            });
 
-        ui.add_space(18.0);
-        ui.separator();
+            ui.add_space(18.0);
+            reveal_item(ui, 4, reveal_at, now, animate, |ui| {
+                ui.separator();
+                ui.add_space(14.0);
+                if ui.button("View license").clicked() {
+                    license_clicked = true;
+                }
+            });
 
-        ui.add_space(14.0);
-        if ui.button("View license").clicked() {
-            license_clicked = true;
-        }
-
-        ui.add_space(16.0);
-        ui.label(
-            egui::RichText::new("Powered by CRC BARRACUDA")
-                .small()
-                .color(muted),
-        );
-        ui.add_space(12.0);
-    });
+            ui.add_space(16.0);
+            reveal_item(ui, 5, reveal_at, now, animate, |ui| {
+                ui.label(
+                    egui::RichText::new("Powered by CRC BARRACUDA")
+                        .small()
+                        .color(muted),
+                );
+            });
+            ui.add_space(12.0);
+        });
     });
 
     license_clicked
