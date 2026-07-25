@@ -1448,14 +1448,42 @@ fn available_card(
                             ui.label(desc);
                         }
                         // What the module will be allowed to do — shown before
-                        // install so there are no surprises.
+                        // install so there are no surprises. Structured: a header,
+                        // then each permission; a "category: a, b, c" entry breaks
+                        // into the category and its values on their own lines.
                         if !r.permissions.is_empty() {
+                            let amber = egui::Color32::from_rgb(0xe6, 0x9a, 0x5c);
                             ui.add_space(6.0);
-                            ui.label(
-                                egui::RichText::new(format!("Requests: {}", r.permissions.join(", ")))
-                                    .small()
-                                    .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
-                            );
+                            ui.label(egui::RichText::new("Requests").small().strong().color(amber));
+                            for item in &r.permissions {
+                                match item.split_once(": ") {
+                                    Some((cat, list)) if list.contains(", ") => {
+                                        // Category (e.g. "network") bold; values in
+                                        // the same colour so the block reads as one.
+                                        ui.label(
+                                            egui::RichText::new(format!("   {cat}"))
+                                                .small()
+                                                .strong()
+                                                .color(amber),
+                                        );
+                                        for v in list.split(", ") {
+                                            ui.label(
+                                                egui::RichText::new(format!("      {v}"))
+                                                    .small()
+                                                    .color(amber),
+                                            );
+                                        }
+                                    }
+                                    _ => {
+                                        ui.label(
+                                            egui::RichText::new(format!("   {item}"))
+                                                .small()
+                                                .strong()
+                                                .color(amber),
+                                        );
+                                    }
+                                }
+                            }
                         }
                         // Git status of what a fresh install would fetch — same
                         // shape as installed modules (branch / commit).
@@ -1723,7 +1751,9 @@ fn module_view(
             if let Some(err) = view_error {
                 ui.heading(name);
                 ui.separator();
-                ui.label(err.as_str());
+                // Rendered as Markdown so failure messages can bold the required
+                // capability/module (e.g. "requires capability **crowdstrike**").
+                ui::markdown(ui, err);
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();

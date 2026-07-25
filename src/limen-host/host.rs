@@ -206,14 +206,14 @@ impl Host {
                 specs.push(spec);
             }
         }
-        let order = resolve_order(&specs)?;
+        let (order, failed) = resolve_order(&specs);
         Ok(Self {
             broker: Broker::new(),
             order,
             connections: Vec::new(),
             logger: stderr_logger(),
             missing_runtimes: Vec::new(),
-            failed: HashMap::new(),
+            failed,
         })
     }
 
@@ -269,10 +269,17 @@ impl Host {
         };
 
         self.missing_runtimes.clear();
-        self.failed.clear();
+        // Note: `self.failed` is NOT cleared — `load` already recorded modules
+        // whose dependencies can't be satisfied; we keep those and add any that
+        // fail to spawn/init below.
         // Clone the order so we can mutate self (broker, connections, …) per module.
         let order = self.order.clone();
         for spec in &order {
+            // Skip modules load already flagged (unsatisfiable deps): they aren't
+            // started, but stay listed so the GUI shows the reason in their tab.
+            if self.failed.contains_key(&spec.name) {
+                continue;
+            }
             if let Err(e) = self.start_one(spec, &sdk, &handler, &logger) {
                 let msg = format!("{e:#}");
                 logger(&format!("[host] {} failed to start: {msg}", spec.name));
@@ -447,81 +454,128 @@ fn host_about() -> Value {
 /// Topologically sort modules so every provider starts before its dependents,
 /// validating that each required capability exists and satisfies its semver
 /// requirement. Rejects duplicate providers and dependency cycles.
-fn resolve_order(specs: &[ModuleSpec]) -> Result<Vec<ModuleSpec>> {
-    // capability -> index of the module providing it.
+/// Resolve module startup order. A module that can't be satisfied — a required
+/// capability with no (working) provider, a semver mismatch, a duplicate
+/// capability, or a dependency cycle — is **isolated**: recorded in the returned
+/// `failed` map and excluded from the order, rather than failing the whole engine.
+/// The returned specs include the failed modules (appended, unordered) so the GUI
+/// still lists them and shows the reason in their tab.
+fn resolve_order(specs: &[ModuleSpec]) -> (Vec<ModuleSpec>, HashMap<String, String>) {
+    let mut failed: HashMap<String, String> = HashMap::new();
+
+    // capability -> index of the module providing it. A duplicate provider is a
+    // conflict: keep the first, fail the later one.
     let mut provider: HashMap<&str, usize> = HashMap::new();
     for (i, spec) in specs.iter().enumerate() {
         for cap in &spec.capabilities {
-            if let Some(prev) = provider.insert(cap, i) {
-                bail!(
-                    "capability {cap} is provided by both {} and {}",
-                    specs[prev].name,
-                    spec.name
-                );
+            match provider.get(cap.as_str()) {
+                Some(prev) => {
+                    failed.insert(
+                        spec.name.clone(),
+                        format!("capability {cap} is already provided by **{}**", specs[*prev].name),
+                    );
+                }
+                None => {
+                    provider.insert(cap, i);
+                }
             }
         }
     }
 
-    // Build dependency edges (i depends on j) with semver validation.
-    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); specs.len()];
+    // Fail any module whose requirements can't be met — repeat until stable, so a
+    // failed provider cascades to everything that depends on it.
+    loop {
+        let mut changed = false;
+        for spec in specs.iter() {
+            if failed.contains_key(&spec.name) {
+                continue;
+            }
+            let mut reason = None;
+            for (cap, req) in &spec.requires {
+                reason = match provider.get(cap.as_str()) {
+                    None => Some(format!("requires capability **{cap}**, but no module provides it")),
+                    Some(&j) if failed.contains_key(&specs[j].name) => {
+                        Some(format!("requires {cap} from **{}**, which failed to load", specs[j].name))
+                    }
+                    Some(&j) => match (
+                        semver::VersionReq::parse(req),
+                        semver::Version::parse(&specs[j].version),
+                    ) {
+                        (Ok(rq), Ok(hv)) if !rq.matches(&hv) => Some(format!(
+                            "requires {cap} {req}, but **{}** is v{}",
+                            specs[j].name, specs[j].version
+                        )),
+                        (Err(_), _) => Some(format!("bad version requirement {req:?} for {cap}")),
+                        (_, Err(_)) => Some(format!("**{}** has invalid version", specs[j].name)),
+                        _ => None,
+                    },
+                };
+                if reason.is_some() {
+                    break;
+                }
+            }
+            if let Some(r) = reason {
+                failed.insert(spec.name.clone(), r);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Dependencies (among still-good modules), for the topological sort.
+    let is_good = |i: usize, failed: &HashMap<String, String>| !failed.contains_key(&specs[i].name);
+    let deps: Vec<Vec<usize>> = specs
+        .iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            if !is_good(i, &failed) {
+                return Vec::new();
+            }
+            spec.requires
+                .keys()
+                .filter_map(|cap| provider.get(cap.as_str()).copied())
+                .filter(|&j| is_good(j, &failed))
+                .collect()
+        })
+        .collect();
+
+    // Kahn-style topo sort: emit a good module once all its deps are emitted.
+    // Anything left over is in a cycle — fail it.
+    let mut order_idx: Vec<usize> = Vec::new();
+    let mut emitted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    loop {
+        let mut added = false;
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..specs.len() {
+            if !is_good(i, &failed) || emitted.contains(&i) {
+                continue;
+            }
+            if deps[i].iter().all(|j| emitted.contains(j)) {
+                order_idx.push(i);
+                emitted.insert(i);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
     for (i, spec) in specs.iter().enumerate() {
-        for (cap, req) in &spec.requires {
-            let j = *provider.get(cap.as_str()).ok_or_else(|| {
-                anyhow!("module {} requires capability {cap}, but no module provides it", spec.name)
-            })?;
-            let req = semver::VersionReq::parse(req)
-                .with_context(|| format!("bad version requirement {req:?} in module {}", spec.name))?;
-            let have = semver::Version::parse(&specs[j].version).with_context(|| {
-                format!("module {} has invalid version {:?}", specs[j].name, specs[j].version)
-            })?;
-            if !req.matches(&have) {
-                bail!(
-                    "module {} requires {cap} {req}, but provider {} is v{}",
-                    spec.name,
-                    specs[j].name,
-                    specs[j].version
-                );
-            }
-            deps[i].push(j);
+        if is_good(i, &failed) && !emitted.contains(&i) {
+            failed.insert(spec.name.clone(), "part of a dependency cycle".to_string());
         }
     }
 
-    // DFS topological sort with cycle detection.
-    #[derive(Clone, Copy, PartialEq)]
-    enum Mark {
-        Unvisited,
-        InProgress,
-        Done,
-    }
-    let mut marks = vec![Mark::Unvisited; specs.len()];
-    let mut order = Vec::with_capacity(specs.len());
-
-    fn visit(
-        i: usize,
-        deps: &[Vec<usize>],
-        marks: &mut [Mark],
-        order: &mut Vec<usize>,
-        specs: &[ModuleSpec],
-    ) -> Result<()> {
-        match marks[i] {
-            Mark::Done => return Ok(()),
-            Mark::InProgress => bail!("dependency cycle involving module {}", specs[i].name),
-            Mark::Unvisited => {}
+    // Good modules in dependency order, then the failed ones (still listed).
+    let mut result: Vec<ModuleSpec> = order_idx.into_iter().map(|i| specs[i].clone()).collect();
+    for spec in specs {
+        if failed.contains_key(&spec.name) {
+            result.push(spec.clone());
         }
-        marks[i] = Mark::InProgress;
-        for &j in &deps[i] {
-            visit(j, deps, marks, order, specs)?;
-        }
-        marks[i] = Mark::Done;
-        order.push(i);
-        Ok(())
     }
-
-    for i in 0..specs.len() {
-        visit(i, &deps, &mut marks, &mut order, specs)?;
-    }
-
-    Ok(order.into_iter().map(|i| specs[i].clone()).collect())
+    (result, failed)
 }
 
 // --------------------------------------------------------------------------- //
