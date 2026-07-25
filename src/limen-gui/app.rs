@@ -1281,6 +1281,16 @@ fn module_card(
                             ui.add_space(6.0);
                             ui.label(desc);
                         }
+                        // Host-privilege heads-up: some methods may need admin on
+                        // this machine. Informational only — no listing, no prompt.
+                        if m.permissions.may_require_admin {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new("Some methods may require elevated permissions.")
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
+                            );
+                        }
                         if !m.authors.is_empty() {
                             ui.add_space(6.0);
                             ui.label(
@@ -1446,44 +1456,6 @@ fn available_card(
                         if let Some(desc) = &r.description {
                             ui.add_space(6.0);
                             ui.label(desc);
-                        }
-                        // What the module will be allowed to do — shown before
-                        // install so there are no surprises. Structured: a header,
-                        // then each permission; a "category: a, b, c" entry breaks
-                        // into the category and its values on their own lines.
-                        if !r.permissions.is_empty() {
-                            let amber = egui::Color32::from_rgb(0xe6, 0x9a, 0x5c);
-                            ui.add_space(6.0);
-                            ui.label(egui::RichText::new("Requests").small().strong().color(amber));
-                            for item in &r.permissions {
-                                match item.split_once(": ") {
-                                    Some((cat, list)) if list.contains(", ") => {
-                                        // Category (e.g. "network") bold; values in
-                                        // the same colour so the block reads as one.
-                                        ui.label(
-                                            egui::RichText::new(format!("   {cat}"))
-                                                .small()
-                                                .strong()
-                                                .color(amber),
-                                        );
-                                        for v in list.split(", ") {
-                                            ui.label(
-                                                egui::RichText::new(format!("      {v}"))
-                                                    .small()
-                                                    .color(amber),
-                                            );
-                                        }
-                                    }
-                                    _ => {
-                                        ui.label(
-                                            egui::RichText::new(format!("   {item}"))
-                                                .small()
-                                                .strong()
-                                                .color(amber),
-                                        );
-                                    }
-                                }
-                            }
                         }
                         // Git status of what a fresh install would fetch — same
                         // shape as installed modules (branch / commit).

@@ -141,6 +141,13 @@ pub struct Permissions {
     /// consent prompt only appears when one of these is actually invoked.
     #[serde(default)]
     pub elevated_methods: Vec<String>,
+    /// Some of the module's methods may need elevated / administrator privileges
+    /// **on the host running Limen** to work fully (e.g. reading protected system
+    /// state). This is purely a heads-up the UI surfaces — it does not gate,
+    /// prompt, or list which methods. (Scripts run on *remote* fleet hosts via
+    /// RTR are not this: they run elevated on the remote machine, not the host.)
+    #[serde(default)]
+    pub may_require_admin: bool,
 }
 
 impl Permissions {

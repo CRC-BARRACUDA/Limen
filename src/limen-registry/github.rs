@@ -31,8 +31,6 @@ pub struct RemoteModule {
     pub version: Option<String>,
     /// Capabilities the module provides (from the manifest).
     pub capabilities: Vec<String>,
-    /// Human-readable summary of the permissions the module declares.
-    pub permissions: Vec<String>,
     /// The repo's default branch on GitHub.
     pub branch: Option<String>,
     /// Short commit of that branch's tip (what a fresh install would fetch).
@@ -110,7 +108,6 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
                 url: r.html_url,
                 version: Some(m.module.version.clone()),
                 capabilities: m.provides.capabilities.clone(),
-                permissions: m.permissions.summary(),
                 commit: fetch_latest_commit(org, &r.name, &r.default_branch),
                 branch: Some(r.default_branch),
             })
