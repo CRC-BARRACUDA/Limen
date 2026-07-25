@@ -132,6 +132,8 @@ pub struct LimenApp {
     update: Option<limen_core::UpdateInfo>,
     /// True while an update download/install is in flight.
     updating: bool,
+    /// A portable interpreter currently being installed (e.g. "Python"), if any.
+    installing_runtime: Option<String>,
 }
 
 impl LimenApp {
@@ -176,6 +178,7 @@ impl LimenApp {
             },
             update: None,
             updating: false,
+            installing_runtime: None,
         }
     }
 
@@ -347,6 +350,9 @@ impl LimenApp {
                     // Don't re-surface an update for something already awaiting restart.
                     self.available_updates =
                         map.into_iter().filter(|(n, _)| !self.pending_restart.contains(n)).collect();
+                }
+                Event::RuntimeInstalling(rt) => {
+                    self.installing_runtime = rt;
                 }
                 Event::RemoteModules(result) => {
                     self.remote_loading = false;
@@ -535,6 +541,17 @@ impl eframe::App for LimenApp {
                         if ui.add(pill).on_hover_text("A newer version is available").clicked() {
                             open_tab = Some(Tab::Update);
                         }
+                    }
+                    // Portable-interpreter install indicator (spinner + label),
+                    // shown while a runtime like Python is being bundled.
+                    if let Some(rt) = &self.installing_runtime {
+                        ui.add_space(8.0);
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new(format!("Installing {rt}…"))
+                                .small()
+                                .color(ui::color::TEXT_MUTED),
+                        );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("🛠").on_hover_text("Developer").clicked() {
@@ -905,7 +922,7 @@ fn update_view(
     if !info.notes.trim().is_empty() {
         ui.add_space(8.0);
         egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-            ui.label(egui::RichText::new(info.notes.trim()).color(ui::color::TEXT_MUTED));
+            ui::markdown(ui, info.notes.trim());
         });
     }
 
@@ -1414,11 +1431,31 @@ fn available_card(
                         ui.set_min_width(left_w);
                         ui.horizontal_wrapped(|ui| {
                             ui.label(egui::RichText::new(&r.name).size(16.0).strong());
+                            if let Some(v) = &r.version {
+                                ui.label(
+                                    egui::RichText::new(format!("v{v}"))
+                                        .monospace()
+                                        .color(ui::color::TEXT_MUTED),
+                                );
+                            }
+                            for cap in &r.capabilities {
+                                badge(ui, cap);
+                            }
                             badge(ui, "not installed");
                         });
                         if let Some(desc) = &r.description {
                             ui.add_space(6.0);
                             ui.label(desc);
+                        }
+                        // What the module will be allowed to do — shown before
+                        // install so there are no surprises.
+                        if !r.permissions.is_empty() {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!("Requests: {}", r.permissions.join(", ")))
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
+                            );
                         }
                         ui.add_space(6.0);
                         ui.label(egui::RichText::new(&r.repo).small().color(ui::color::TEXT_MUTED));

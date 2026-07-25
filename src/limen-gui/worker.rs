@@ -13,8 +13,8 @@ use std::thread;
 use std::collections::HashMap;
 
 use limen_core::{
-    apply_update, check_update, install_runtime, is_newer, paths, restart_app, Config, Engine,
-    ModuleSpec, UpdateInfo,
+    apply_update, can_install, check_update, install_runtime, is_newer, paths, restart_app, Config,
+    Engine, ModuleSpec, UpdateInfo,
 };
 use limen_registry::{latest_release_version, list_org_modules, Lockfile, Registry, RemoteModule};
 use serde_json::Value;
@@ -88,6 +88,8 @@ pub enum Event {
     UpdateAvailable(UpdateInfo),
     /// Installed git modules that have a newer release: name → latest version.
     ModuleUpdates(HashMap<String, String>),
+    /// A portable interpreter is being installed (`Some(name)`), or done (`None`).
+    RuntimeInstalling(Option<String>),
     /// The engine could not start.
     Fatal(String),
 }
@@ -190,6 +192,38 @@ fn spawn_update_check(refs: Vec<(String, String, String)>, evt_tx: Sender<Event>
     });
 }
 
+/// In the background, install a portable interpreter for every runtime a loaded
+/// scripted module needs but that isn't bundled yet, then reload (via
+/// `FinishRuntimes`) so those modules run on the bundled interpreter. This makes
+/// the app self-contained — it stops depending on a system Python/Node/Lua.
+fn bundle_runtimes(engine: &Engine, evt_tx: &Sender<Event>, cmd_tx: &Sender<Command>) {
+    let todo: Vec<_> = engine
+        .unbundled_runtimes()
+        .into_iter()
+        .filter(|rt| can_install(*rt))
+        .collect();
+    if todo.is_empty() {
+        return;
+    }
+    let evt_tx = evt_tx.clone();
+    let cmd_tx = cmd_tx.clone();
+    thread::spawn(move || {
+        let mut done: Vec<String> = Vec::new();
+        for rt in todo {
+            let _ = evt_tx.send(Event::RuntimeInstalling(Some(rt.display().to_string())));
+            let _ = evt_tx.send(Event::Status(format!("installing {} runtime…", rt.display())));
+            match install_runtime(rt) {
+                Ok(()) => done.push(format!("bundled {} runtime", rt.display())),
+                Err(e) => {
+                    let _ = evt_tx.send(Event::Status(format!("{} setup failed: {e}", rt.display())));
+                }
+            }
+        }
+        let _ = evt_tx.send(Event::RuntimeInstalling(None));
+        let _ = cmd_tx.send(Command::FinishRuntimes { status: done.join("; ") });
+    });
+}
+
 fn org() -> String {
     Config::load()
         .ok()
@@ -231,6 +265,9 @@ fn run(
     let snap = snapshot(&engine);
     spawn_update_check(update_check_refs(&snap), evt_tx.clone());
     let _ = evt_tx.send(Event::Ready(snap));
+    // Bundle a portable interpreter for any already-installed scripted module
+    // that's running on a system one, so the app becomes self-contained.
+    bundle_runtimes(&engine, &evt_tx, &cmd_tx);
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -286,37 +323,13 @@ fn run(
                     let _ = evt_tx.send(Event::Modules(snapshot(&engine)));
                     continue;
                 }
-                // Start the newly-installed module(s); any whose interpreter is
-                // missing get recorded in missing_runtimes.
+                // Start the newly-installed module(s).
                 if !reload(&mut engine, &dirs, &evt_tx) {
                     return;
                 }
-                // Auto-install any interpreter a new module needs but that isn't
-                // available yet — off-thread too; reload again via FinishRuntimes.
-                let missing = engine.missing_runtimes().to_vec();
-                if !missing.is_empty() {
-                    let evt_tx = evt_tx.clone();
-                    let cmd_tx = cmd_tx.clone();
-                    thread::spawn(move || {
-                        let mut done: Vec<String> = Vec::new();
-                        for rt in missing {
-                            let _ = evt_tx.send(Event::Status(format!(
-                                "downloading {} interpreter…",
-                                rt.display()
-                            )));
-                            match install_runtime(rt) {
-                                Ok(()) => done.push(format!("installed {} runtime", rt.display())),
-                                Err(e) => {
-                                    let _ = evt_tx.send(Event::Status(format!(
-                                        "{} setup failed: {e}",
-                                        rt.display()
-                                    )));
-                                }
-                            }
-                        }
-                        let _ = cmd_tx.send(Command::FinishRuntimes { status: done.join("; ") });
-                    });
-                }
+                // Ensure a portable interpreter is bundled for any scripted module
+                // (even if the system has one) so the install stays self-contained.
+                bundle_runtimes(&engine, &evt_tx, &cmd_tx);
             }
             Command::FinishRuntimes { status } => {
                 if !status.is_empty() {

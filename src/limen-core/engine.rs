@@ -48,6 +48,12 @@ impl Engine {
         self.host.missing_runtimes()
     }
 
+    /// Runtimes needed by loaded scripted modules that aren't bundled yet.
+    /// Installing them makes the app portable (no system-interpreter dependency).
+    pub fn unbundled_runtimes(&self) -> Vec<limen_host::runtimes::Runtime> {
+        self.host.unbundled_runtimes()
+    }
+
     /// Modules that failed to start (name -> error). Isolated failures — the rest
     /// of the engine still runs; the GUI shows the error in the module's tab.
     pub fn failed_modules(&self) -> &std::collections::HashMap<String, String> {
