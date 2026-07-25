@@ -16,7 +16,8 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-/// A module available to install from the org.
+/// A module available to install from the org. Its metadata is read from the
+/// repo's `limen.toml` on GitHub, so the manager can show it **before** install.
 #[derive(Debug, Clone)]
 pub struct RemoteModule {
     /// Module name (repo name without the `limen-` prefix).
@@ -26,6 +27,12 @@ pub struct RemoteModule {
     pub description: Option<String>,
     /// Browsable repo URL.
     pub url: String,
+    /// Version declared in the manifest.
+    pub version: Option<String>,
+    /// Capabilities the module provides (from the manifest).
+    pub capabilities: Vec<String>,
+    /// Human-readable summary of the permissions the module declares.
+    pub permissions: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -33,10 +40,16 @@ struct GhRepo {
     name: String,
     description: Option<String>,
     html_url: String,
+    #[serde(default = "default_branch")]
+    default_branch: String,
     #[serde(default)]
     topics: Vec<String>,
     #[serde(default)]
     archived: bool,
+}
+
+fn default_branch() -> String {
+    "main".to_string()
 }
 
 /// Repos in the org that share the `limen-` prefix but are libraries, not modules.
@@ -79,16 +92,22 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
         }
     };
 
-    // Keep only repos that look like modules AND actually carry a limen.toml.
+    // Keep only repos that look like modules AND carry a parseable limen.toml —
+    // reading the manifest gives us the metadata to show before install.
     let mut modules: Vec<RemoteModule> = repos
         .into_iter()
         .filter(|r| !r.archived && is_module(r))
-        .filter(|r| repo_has_manifest(org, &r.name))
-        .map(|r| RemoteModule {
-            name: r.name.strip_prefix("limen-").unwrap_or(&r.name).to_string(),
-            repo: format!("{org}/{}", r.name),
-            description: r.description,
-            url: r.html_url,
+        .filter_map(|r| {
+            let m = fetch_manifest(org, &r.name, &r.default_branch)?;
+            Some(RemoteModule {
+                name: r.name.strip_prefix("limen-").unwrap_or(&r.name).to_string(),
+                repo: format!("{org}/{}", r.name),
+                description: m.module.description.clone().or(r.description),
+                url: r.html_url,
+                version: Some(m.module.version.clone()),
+                capabilities: m.provides.capabilities.clone(),
+                permissions: m.permissions.summary(),
+            })
         })
         .collect();
 
@@ -96,31 +115,20 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
     Ok(modules)
 }
 
-/// Does `org/repo` contain a `limen.toml` at its root? Queries the GitHub
-/// contents API (uses the default branch). Any error / 404 counts as "no".
-fn repo_has_manifest(org: &str, repo: &str) -> bool {
-    let url = format!("https://api.github.com/repos/{org}/{repo}/contents/limen.toml");
-    let output = Command::new("curl")
-        .args([
-            "-sSL",
-            "-H",
-            "User-Agent: limen",
-            "-H",
-            "Accept: application/vnd.github+json",
-            &url,
-        ])
-        .output();
-    let bytes = match output {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return false,
-    };
-    // On success the API returns a file object ("type":"file"); on 404 it
-    // returns {"message":"Not Found"} (no "type").
-    serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
-        .as_deref()
-        == Some("file")
+/// Fetch and parse `org/repo`'s root `limen.toml` from its default branch.
+/// `None` if the repo has no manifest, it doesn't parse, or the fetch fails —
+/// which also serves to exclude non-module repos.
+fn fetch_manifest(org: &str, repo: &str, branch: &str) -> Option<limen_proto::Manifest> {
+    let url = format!("https://raw.githubusercontent.com/{org}/{repo}/{branch}/limen.toml");
+    let out = Command::new("curl")
+        .args(["-fsSL", "-H", "User-Agent: limen", &url])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    toml::from_str::<limen_proto::Manifest>(&text).ok()
 }
 
 fn is_module(repo: &GhRepo) -> bool {
