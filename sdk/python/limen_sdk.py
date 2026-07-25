@@ -28,7 +28,7 @@ import sys
 
 __all__ = [
     "Module", "Host",
-    "Window", "Label", "Text", "Select", "Button", "Row", "Separator",
+    "Window", "Label", "Text", "Select", "Button", "Row", "Separator", "Table",
 ]
 
 
@@ -50,15 +50,16 @@ class Label(Widget):
 
 
 class Text(Widget):
-    def __init__(self, id, label="", placeholder="", multiline=False, default=""):
+    def __init__(self, id, label="", placeholder="", multiline=False, default="", password=False):
         self.id, self.label = id, label
         self.placeholder, self.multiline, self.default = placeholder, multiline, default
+        self.password = password
 
     def to_spec(self):
         return {
             "kind": "text", "id": self.id, "label": self.label,
             "placeholder": self.placeholder, "multiline": self.multiline,
-            "default": self.default,
+            "default": self.default, "password": self.password,
         }
 
 
@@ -77,12 +78,14 @@ class Button(Widget):
     """A button. `calls` names a method on THIS module; the SDK fills in the
     capability. Use `capability=`/`method=` to target another module instead."""
 
-    def __init__(self, text, calls=None, capability=None, method=None, primary=False):
+    def __init__(self, text, calls=None, capability=None, method=None, primary=False,
+                 enabled=True):
         self.text = text
         self.calls = calls
         self.capability = capability
         self.method = method
         self.primary = primary
+        self.enabled = enabled
 
     def _spec(self, own_capability):
         cap = self.capability or own_capability
@@ -90,6 +93,7 @@ class Button(Widget):
         return {
             "kind": "button", "text": self.text,
             "style": "primary" if self.primary else "default",
+            "enabled": self.enabled,
             "action": {"capability": cap, "method": meth},
         }
 
@@ -109,6 +113,20 @@ class Row(Widget):
 
     def to_spec(self):
         return {"kind": "row", "children": [c.to_spec() for c in self.children]}
+
+
+class Table(Widget):
+    """A table with a header row (`columns`) and string cells (`rows`)."""
+
+    def __init__(self, columns, rows):
+        self.columns, self.rows = columns, rows
+
+    def to_spec(self):
+        return {
+            "kind": "table",
+            "columns": [str(c) for c in self.columns],
+            "rows": [[str(c) for c in row] for row in self.rows],
+        }
 
 
 class Window:

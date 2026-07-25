@@ -26,6 +26,8 @@ pub struct ModuleSnapshot {
     pub git_installed: Vec<String>,
     /// name → (branch, short commit) for git-installed modules.
     pub git_meta: std::collections::HashMap<String, (String, String)>,
+    /// name → error, for modules that failed to start (shown in their tab).
+    pub failed: HashMap<String, String>,
 }
 
 /// A request from the UI to the worker.
@@ -154,6 +156,7 @@ fn snapshot(engine: &Engine) -> ModuleSnapshot {
         specs: engine.modules().to_vec(),
         git_installed,
         git_meta,
+        failed: engine.failed_modules().clone(),
     }
 }
 
