@@ -1,5 +1,6 @@
-//! Capture the git commit + branch at build time so the About page can show
-//! which revision this binary was built from.
+//! Build script: capture the git commit + branch so the About page can show
+//! which revision this binary was built from, and (on Windows) embed the app
+//! icon + version metadata into the .exe.
 
 use std::process::Command;
 
@@ -21,4 +22,26 @@ fn main() {
     // Rebuild when HEAD moves (branch switch / new commit).
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
+
+    embed_windows_icon();
 }
+
+/// On Windows, embed the app icon (and version metadata from Cargo) into the
+/// .exe so Explorer, the taskbar, and Alt-Tab show Limen's mark. No-op elsewhere.
+#[cfg(windows)]
+fn embed_windows_icon() {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let icon = std::path::Path::new(&manifest).join("../../resources/icon.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon(&icon.to_string_lossy());
+    if let Err(e) = res.compile() {
+        // Don't fail the build if the resource compiler is unavailable — the app
+        // still runs, just without an embedded file icon.
+        println!("cargo:warning=embedding Windows icon failed: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_icon() {}

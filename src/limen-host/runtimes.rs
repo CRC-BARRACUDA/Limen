@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use limen_proto::Language;
+use limen_proto::{Language, NoConsole};
 
 /// A scripted-language runtime Limen can launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +210,7 @@ pub fn install(base: &Path, rt: Runtime) -> Result<(), String> {
         .args(["-sSL", "-o"])
         .arg(&archive)
         .arg(src.url)
+        .no_console()
         .status()
         .map_err(|e| format!("running curl (is it installed?): {e}"))?;
     if !status.success() {
@@ -223,6 +224,7 @@ pub fn install(base: &Path, rt: Runtime) -> Result<(), String> {
         .arg(&archive)
         .arg("-C")
         .arg(&runtimes)
+        .no_console()
         .status()
         .map_err(|e| format!("running tar (is it installed?): {e}"))?;
     let _ = std::fs::remove_file(&archive);

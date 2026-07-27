@@ -14,9 +14,11 @@
 
 pub mod abi;
 pub mod manifest;
+pub mod proc;
 pub mod rpc;
 
 pub use abi::ABI_VERSION;
+pub use proc::NoConsole;
 pub use manifest::{
     Abi, DepSpec, DetailedDep, Language, Manifest, ModuleMeta, Permissions, Provides, Requires,
 };

@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use eframe::egui;
-use limen_core::ModuleSpec;
+use limen_core::{ModuleSpec, Runtime};
 use limen_registry::RemoteModule;
 
 use crate::ui;
@@ -757,7 +757,8 @@ impl eframe::App for LimenApp {
             let LimenApp {
                 modules, git_installed, git_meta, available_updates, pinned, view,
                 view_error, inputs, output, busy_action, fatal, search, filter, remote,
-                remote_error, remote_loading, installing, dev_tab, logs, log_autoscroll, ui_scale,
+                remote_error, remote_loading, installing, installing_runtime, dev_tab, logs,
+                log_autoscroll, ui_scale,
                 animations, dev_mode_on, dev_limen_path, dev_modules_path, removing,
                 modules_revealed_at, shown_filter, remote_revealed_at,
                 developer_revealed_at, shown_dev_tab,
@@ -785,7 +786,8 @@ impl eframe::App for LimenApp {
                     Some(Tab::License) => license_view(ui, license_reveal),
                     Some(Tab::Modules) => modules_page(
                         ui, modules, git_installed, git_meta, available_updates,
-                        pinned, remote, *remote_loading, remote_error, installing, filter, search,
+                        pinned, remote, *remote_loading, remote_error, installing, installing_runtime,
+                        filter, search,
                         &mut open_module, &mut remove_module, &mut add_module, &mut update_module,
                         &mut toggle_pin, &mut reload, modules_revealed_at, shown_filter,
                         *remote_revealed_at, removing,
@@ -1259,6 +1261,7 @@ fn modules_page(
     remote_loading: bool,
     remote_error: &Option<String>,
     installing: &Option<String>,
+    installing_runtime: &Option<String>,
     filter: &mut ModuleFilter,
     search: &mut String,
     open: &mut Option<String>,
@@ -1344,7 +1347,7 @@ fn modules_page(
                 module_card(
                     ui, m, git_installed.contains(&m.name), git_meta.get(&m.name),
                     available_updates.get(&m.name).map(String::as_str),
-                    is_pinned, installing, open, remove, update,
+                    is_pinned, installing, installing_runtime, open, remove, update,
                     toggle_pin,
                 );
             });
@@ -1482,6 +1485,7 @@ fn module_card(
     latest: Option<&str>,
     pinned: bool,
     installing: &Option<String>,
+    installing_runtime: &Option<String>,
     open: &mut Option<String>,
     remove: &mut Option<String>,
     update: &mut Option<String>,
@@ -1490,6 +1494,11 @@ fn module_card(
     // This card is mid-update; another install/update is running somewhere.
     let this_busy = installing.as_deref() == Some(m.name.as_str());
     let any_busy = installing.is_some();
+    // The scripted runtime this module needs is still downloading — every module
+    // sharing that runtime (e.g. all Python modules) is not launchable yet, so
+    // its Open button is disabled until the interpreter is bundled.
+    let runtime_busy = Runtime::for_language(m.language)
+        .is_some_and(|rt| installing_runtime.as_deref() == Some(rt.display()));
     egui::Frame::none()
         .fill(ui::color::BG_ELEVATED)
         .stroke(egui::Stroke::new(1.0_f32, ui::color::BORDER))
@@ -1594,8 +1603,23 @@ fn module_card(
                             );
                             return;
                         }
-                        if ui::outline_button(ui, "Open", bw).clicked() {
+                        // Open is disabled while this module's runtime downloads.
+                        let open_clicked = ui
+                            .add_enabled_ui(!runtime_busy, |ui| ui::outline_button(ui, "Open", bw))
+                            .inner
+                            .clicked();
+                        if open_clicked {
                             *open = Some(m.name.clone());
+                        }
+                        if runtime_busy {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(
+                                    egui::RichText::new("Preparing runtime…")
+                                        .small()
+                                        .color(ui::color::TEXT_MUTED),
+                                );
+                            });
                         }
                         if from_git && latest.is_some() {
                             // Update only shows when a newer release exists.
@@ -1895,50 +1919,136 @@ fn license_view(ui: &mut egui::Ui, reveal_at: f64) {
     });
 }
 
-/// Draw the Limen brand mark — a concentric indigo diamond (◈) on a dark rounded
-/// tile — reproducing `packaging/make_icon.py` from the old Limen.
+/// Draw the Limen brand mark — the same device as `resources/icon.png`: a
+/// cyan→blue diamond ring with a solid core, on a dark rounded tile.
+///
+/// Colors and proportions are sampled from that file (on its 256px grid) so the
+/// in-app mark matches the icon Explorer, the taskbar, and the window frame show.
 fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
-    use egui::{Color32, Mesh, Pos2, Rounding, Shape, Stroke};
+    use egui::{Color32, Mesh, Pos2, Shape};
 
-    let bg = Color32::from_rgb(0x0f, 0x14, 0x20);
-    let border = Color32::from_rgb(0x2a, 0x35, 0x50);
-    let top = Color32::from_rgb(0x7c, 0x6c, 0xff);
-    let bottom = Color32::from_rgb(0x63, 0x54, 0xeb);
-    let mid = Color32::from_rgb(0x6f, 0x60, 0xf5);
-    let center = Color32::from_rgb(0x96, 0x8a, 0xff);
+    // Tile: a vertical gradient, lighter at the top.
+    let tile_top = Color32::from_rgb(0x29, 0x2f, 0x3e);
+    let tile_bottom = Color32::from_rgb(0x14, 0x17, 0x1d);
+    // Diamond: one diagonal gradient across the whole device — light at the
+    // top-left, dark at the bottom-right — so the top *and left* vertices are
+    // light while the right and bottom ones are dark.
+    let light = Color32::from_rgb(0x6a, 0xd0, 0xeb);
+    let dark = Color32::from_rgb(0x49, 0xb0, 0xe1);
 
-    let scale = rect.width().min(rect.height()) / 256.0;
-    painter.rect_filled(rect, Rounding::same(56.0 * scale), bg);
-    painter.rect_stroke(
-        rect.shrink(3.0 * scale),
-        Rounding::same(53.0 * scale),
-        Stroke::new(3.0 * scale, border),
-    );
+    let s = rect.width().min(rect.height()) / 256.0;
+
+    // The tile is inset within the icon's box and has rounded corners, so it
+    // needs a colored mesh rather than `rect_filled` to carry the gradient.
+    let tile = egui::Rect::from_center_size(rect.center(), egui::vec2(224.0 * s, 224.0 * s));
+    painter.add(Shape::mesh(rounded_rect_mesh(
+        tile,
+        44.0 * s,
+        tile_top,
+        tile_bottom,
+    )));
 
     let c = rect.center();
     let diamond = |half: f32| {
-        vec![
+        [
             Pos2::new(c.x, c.y - half),
             Pos2::new(c.x + half, c.y),
             Pos2::new(c.x, c.y + half),
             Pos2::new(c.x - half, c.y),
         ]
     };
+    let outer = diamond(88.0 * s);
+    let inner = diamond(48.0 * s);
+    let core = diamond(20.0 * s);
 
-    // Outer diamond with a vertical indigo gradient (via a colored mesh).
-    let half = 94.0 * scale;
+    // Position along the top-left → bottom-right diagonal, normalized to 0..1.
+    let span = 2.0 * 88.0 * s;
+    let shade = |p: Pos2| lerp_color(light, dark, ((p.x - c.x) + (p.y - c.y)) / span + 0.5);
+
     let mut mesh = Mesh::default();
-    mesh.colored_vertex(Pos2::new(c.x, c.y - half), top);
-    mesh.colored_vertex(Pos2::new(c.x + half, c.y), mid);
-    mesh.colored_vertex(Pos2::new(c.x, c.y + half), bottom);
-    mesh.colored_vertex(Pos2::new(c.x - half, c.y), mid);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
+    let mut quad = |pts: [Pos2; 4]| {
+        let base = mesh.vertices.len() as u32;
+        for p in pts {
+            mesh.colored_vertex(p, shade(p));
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    };
+    // The ring as four convex trapezoids. Building it this way — rather than
+    // punching a hole with the background color — keeps the tile's own gradient
+    // visible through the middle.
+    for i in 0..4 {
+        let j = (i + 1) % 4;
+        quad([outer[i], outer[j], inner[j], inner[i]]);
+    }
+    // The core is not a lighter accent: it's the same gradient, continued.
+    quad(core);
     painter.add(Shape::mesh(mesh));
 
-    // Punch out the ring, then the solid core.
-    painter.add(Shape::convex_polygon(diamond(56.0 * scale), bg, Stroke::NONE));
-    painter.add(Shape::convex_polygon(diamond(26.0 * scale), center, Stroke::NONE));
+    // A flat highlight runs just inside the outer edge — the one part of the
+    // device that doesn't follow the gradient. It measures ~1.4px on the icon's
+    // 256px grid, so at the sizes drawn here it lands sub-pixel and reads as a
+    // faint sheen along the edge rather than a distinct line.
+    painter.add(Shape::closed_line(
+        outer.to_vec(),
+        egui::Stroke::new(1.4 * s, Color32::from_rgb(0xb4, 0xf6, 0xfc)),
+    ));
+}
+
+/// Linear blend between two colors, `t` clamped to `0..=1`.
+fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(
+        m(a.r(), b.r()),
+        m(a.g(), b.g()),
+        m(a.b(), b.b()),
+    )
+}
+
+/// A rounded rectangle as a colored mesh, filled with a vertical `top`→`bottom`
+/// gradient. `egui`'s `rect_filled` takes a single color, so a gradient fill has
+/// to be built by hand: walk the outline, then fan-triangulate from the center
+/// (the shape is convex, so a fan is exact).
+fn rounded_rect_mesh(
+    rect: egui::Rect,
+    radius: f32,
+    top: egui::Color32,
+    bottom: egui::Color32,
+) -> egui::Mesh {
+    /// Segments per corner arc — enough to look round at the sizes we draw.
+    const SEGMENTS: usize = 8;
+
+    let radius = radius.min(rect.width().min(rect.height()) / 2.0);
+    // Arc centers with their start/end angles, walked clockwise from top-left.
+    let corners = [
+        (egui::pos2(rect.left() + radius, rect.top() + radius), 180.0f32, 270.0f32),
+        (egui::pos2(rect.right() - radius, rect.top() + radius), 270.0, 360.0),
+        (egui::pos2(rect.right() - radius, rect.bottom() - radius), 0.0, 90.0),
+        (egui::pos2(rect.left() + radius, rect.bottom() - radius), 90.0, 180.0),
+    ];
+    let mut outline = Vec::with_capacity(4 * (SEGMENTS + 1));
+    for (center, from, to) in corners {
+        for i in 0..=SEGMENTS {
+            let a = (from + (to - from) * i as f32 / SEGMENTS as f32).to_radians();
+            outline.push(egui::pos2(
+                center.x + radius * a.cos(),
+                center.y + radius * a.sin(),
+            ));
+        }
+    }
+
+    let shade = |y: f32| lerp_color(top, bottom, (y - rect.top()) / rect.height());
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.center(), shade(rect.center().y));
+    for p in &outline {
+        mesh.colored_vertex(*p, shade(p.y));
+    }
+    let n = outline.len() as u32;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    mesh
 }
 
 #[allow(clippy::too_many_arguments)]

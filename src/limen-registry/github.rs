@@ -14,6 +14,7 @@
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use limen_proto::NoConsole;
 use serde::Deserialize;
 
 /// A module available to install from the org. Its metadata is read from the
@@ -72,6 +73,7 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
             "Accept: application/vnd.github+json",
             &url,
         ])
+        .no_console()
         .output()
         .context("running curl (is it installed and on PATH?)")?;
 
@@ -101,9 +103,19 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
         .filter(|r| !r.archived && is_module(r))
         .filter_map(|r| {
             let m = fetch_manifest(org, &r.name, &r.default_branch)?;
+            let repo = format!("{org}/{}", r.name);
+            // A native (compiled) module can only run where a prebuilt library
+            // for this exact OS/arch/bitness exists in its release — plus a
+            // checksum to verify it. If not, hide it from this platform's
+            // manager rather than offering an install that can't work.
+            let native = m.module.language == limen_proto::Language::Native
+                && m.module.abi == limen_proto::Abi::Native;
+            if native && !crate::registry::native_release_ready(&repo) {
+                return None;
+            }
             Some(RemoteModule {
                 name: r.name.strip_prefix("limen-").unwrap_or(&r.name).to_string(),
-                repo: format!("{org}/{}", r.name),
+                repo,
                 description: m.module.description.clone().or(r.description),
                 url: r.html_url,
                 version: Some(m.module.version.clone()),
@@ -131,6 +143,7 @@ fn fetch_latest_commit(org: &str, repo: &str, branch: &str) -> Option<String> {
             "Accept: application/vnd.github+json",
             &url,
         ])
+        .no_console()
         .output()
         .ok()?;
     if !out.status.success() {
@@ -148,6 +161,7 @@ fn fetch_manifest(org: &str, repo: &str, branch: &str) -> Option<limen_proto::Ma
     let url = format!("https://raw.githubusercontent.com/{org}/{repo}/{branch}/limen.toml");
     let out = Command::new("curl")
         .args(["-fsSL", "-H", "User-Agent: limen", &url])
+        .no_console()
         .output()
         .ok()?;
     if !out.status.success() {

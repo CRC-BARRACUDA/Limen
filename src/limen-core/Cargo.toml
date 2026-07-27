@@ -9,6 +9,7 @@ description = "Limen engine: config, state paths, and the run/inspect API over t
 path = "lib.rs"
 
 [dependencies]
+limen-proto = { workspace = true }
 limen-host = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
