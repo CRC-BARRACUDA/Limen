@@ -74,9 +74,84 @@ impl Widget {
         self.set("style", json!("primary"))
     }
 
+    // ---- table interactivity ---------------------------------------------- //
+    /// Per-row identity (parallel to the table's `rows`); the row's id is sent
+    /// as the `id` param when a row is activated or a menu item is chosen.
+    pub fn row_ids(self, ids: Vec<String>) -> Self {
+        self.set("row_ids", json!(ids))
+    }
+    /// Attach a right-click context menu to each row (see [`menu_item`]).
+    pub fn row_menu(self, items: Vec<MenuItem>) -> Self {
+        let arr: Vec<Value> = items.into_iter().map(MenuItem::into_value).collect();
+        self.set("menu", Value::Array(arr))
+    }
+    /// Invoke `capability`.`method` when a row is double-clicked, opening the
+    /// returned view in a new tab.
+    pub fn on_activate(self, capability: impl Into<String>, method: impl Into<String>) -> Self {
+        self.set(
+            "on_activate",
+            json!({
+                "action": { "capability": capability.into(), "method": method.into() },
+                "open_in_tab": true,
+            }),
+        )
+    }
+
     fn into_value(self) -> Value {
         Value::Object(self.0)
     }
+}
+
+/// One right-click menu entry on a table row. Build a leaf with [`menu_item`]
+/// (invokes a method) or a submenu with [`submenu`].
+#[derive(Debug, Clone)]
+pub struct MenuItem(Map<String, Value>);
+
+impl MenuItem {
+    fn new(label: impl Into<String>) -> Self {
+        let mut m = Map::new();
+        m.insert("label".into(), json!(label.into()));
+        MenuItem(m)
+    }
+    /// Extra params merged into the call (e.g. `json!({"via":"explorer"})`).
+    pub fn args(mut self, args: Value) -> Self {
+        self.0.insert("args".into(), args);
+        self
+    }
+    /// Open the result view in a new tab instead of replacing the current one.
+    pub fn open_in_tab(mut self) -> Self {
+        self.0.insert("open_in_tab".into(), json!(true));
+        self
+    }
+    /// Turn this into a submenu with the given children (its own action, if any,
+    /// is then ignored).
+    pub fn submenu(mut self, children: Vec<MenuItem>) -> Self {
+        let arr: Vec<Value> = children.into_iter().map(MenuItem::into_value).collect();
+        self.0.insert("children".into(), Value::Array(arr));
+        self
+    }
+    fn into_value(self) -> Value {
+        Value::Object(self.0)
+    }
+}
+
+/// A leaf menu item that invokes `capability`.`method` (with the row's `id`).
+pub fn menu_item(
+    label: impl Into<String>,
+    capability: impl Into<String>,
+    method: impl Into<String>,
+) -> MenuItem {
+    let mut m = MenuItem::new(label);
+    m.0.insert(
+        "action".into(),
+        json!({ "capability": capability.into(), "method": method.into() }),
+    );
+    m
+}
+
+/// A submenu entry containing `children` (e.g. Windows "Open path ▸").
+pub fn submenu(label: impl Into<String>, children: Vec<MenuItem>) -> MenuItem {
+    MenuItem::new(label).submenu(children)
 }
 
 /// A text label.
@@ -154,5 +229,32 @@ mod tests {
         assert_eq!(ws[3]["action"]["method"], "greet");
         assert_eq!(ws[4]["kind"], "table");
         assert_eq!(ws[4]["columns"][1], "B");
+    }
+
+    #[test]
+    fn builds_an_interactive_table() {
+        let t = table(vec!["Name".into()], vec![vec!["hub".into()]])
+            .row_ids(vec!["usb:0bda".into()])
+            .on_activate("devices.local", "about")
+            .row_menu(vec![
+                menu_item("About", "devices.local", "about").open_in_tab(),
+                submenu(
+                    "Open path",
+                    vec![menu_item("File Explorer", "devices.local", "open_path")
+                        .args(json!({ "via": "explorer" }))],
+                ),
+            ])
+            .into_value();
+
+        assert_eq!(t["row_ids"][0], "usb:0bda");
+        assert_eq!(t["on_activate"]["action"]["method"], "about");
+        assert_eq!(t["on_activate"]["open_in_tab"], true);
+        assert_eq!(t["menu"][0]["label"], "About");
+        assert_eq!(t["menu"][0]["action"]["method"], "about");
+        assert_eq!(t["menu"][0]["open_in_tab"], true);
+        // Submenu: no action, has children carrying per-item args.
+        assert_eq!(t["menu"][1]["label"], "Open path");
+        assert_eq!(t["menu"][1]["children"][0]["args"]["via"], "explorer");
+        assert_eq!(t["menu"][1]["children"][0]["action"]["method"], "open_path");
     }
 }

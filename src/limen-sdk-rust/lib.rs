@@ -74,6 +74,14 @@ impl Host {
         let _ = self.raw("host.log", Value::String(message.to_string()));
     }
 
+    /// Ask the host to open something in the OS on the user's behalf. `target`
+    /// is one of `"path"`, `"url"`, `"registry"`, or `"device_manager"`; `value`
+    /// is the path / URL / registry key (ignored for `device_manager`).
+    /// Best-effort — registry/device_manager are Windows-only.
+    pub fn open(&self, target: &str, value: &str) {
+        let _ = self.raw("host.open", json!({ "target": target, "value": value }));
+    }
+
     fn raw(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let params_bytes = serde_json::to_vec(&params).unwrap_or_default();
         let mut captured: Option<(i32, Vec<u8>)> = None;

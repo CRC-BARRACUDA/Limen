@@ -60,9 +60,33 @@ class Separator(Widget):
     """A horizontal divider."""
     ...
 
+class MenuItem:
+    """A row right-click menu entry (leaf action, or a submenu via `children`)."""
+    def __init__(
+        self,
+        label: Any,
+        capability: Optional[str] = ...,
+        method: Optional[str] = ...,
+        args: Optional[Dict[str, Any]] = ...,
+        open_in_tab: bool = ...,
+        children: Optional[List["MenuItem"]] = ...,
+    ) -> None: ...
+    def to_spec(self) -> Dict[str, Any]: ...
+
 class Table(Widget):
-    """A table with a header row (`columns`) and string cells (`rows`)."""
-    def __init__(self, columns: list[str], rows: list[list[str]]) -> None: ...
+    """A table with a header row (`columns`) and string cells (`rows`).
+
+    With `row_ids` plus `menu`/`on_activate`, rows become interactive
+    (right-click menu + double-click); the activated row's id is sent as `id`.
+    """
+    def __init__(
+        self,
+        columns: list[str],
+        rows: list[list[str]],
+        row_ids: Optional[List[str]] = ...,
+        menu: Optional[List[MenuItem]] = ...,
+        on_activate: Optional[tuple[str, str]] = ...,
+    ) -> None: ...
 
 class Row(Widget):
     """A horizontal group of widgets, laid out left to right."""
@@ -83,6 +107,7 @@ class Host:
     def emit(self, topic: str, payload: Any = ...) -> Any: ...
     def subscribe(self, topic: str) -> Any: ...
     def about(self) -> Dict[str, Any]: ...
+    def open(self, target: str, value: str = ...) -> None: ...
     def log(self, message: Any) -> None: ...
 
 # A method handler: (params, host) -> result
