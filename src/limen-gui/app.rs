@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use eframe::egui;
-use limen_core::ModuleSpec;
+use limen_core::{ModuleSpec, Runtime};
 use limen_registry::RemoteModule;
 
 use crate::ui;
@@ -757,7 +757,8 @@ impl eframe::App for LimenApp {
             let LimenApp {
                 modules, git_installed, git_meta, available_updates, pinned, view,
                 view_error, inputs, output, busy_action, fatal, search, filter, remote,
-                remote_error, remote_loading, installing, dev_tab, logs, log_autoscroll, ui_scale,
+                remote_error, remote_loading, installing, installing_runtime, dev_tab, logs,
+                log_autoscroll, ui_scale,
                 animations, dev_mode_on, dev_limen_path, dev_modules_path, removing,
                 modules_revealed_at, shown_filter, remote_revealed_at,
                 developer_revealed_at, shown_dev_tab,
@@ -785,7 +786,8 @@ impl eframe::App for LimenApp {
                     Some(Tab::License) => license_view(ui, license_reveal),
                     Some(Tab::Modules) => modules_page(
                         ui, modules, git_installed, git_meta, available_updates,
-                        pinned, remote, *remote_loading, remote_error, installing, filter, search,
+                        pinned, remote, *remote_loading, remote_error, installing, installing_runtime,
+                        filter, search,
                         &mut open_module, &mut remove_module, &mut add_module, &mut update_module,
                         &mut toggle_pin, &mut reload, modules_revealed_at, shown_filter,
                         *remote_revealed_at, removing,
@@ -1259,6 +1261,7 @@ fn modules_page(
     remote_loading: bool,
     remote_error: &Option<String>,
     installing: &Option<String>,
+    installing_runtime: &Option<String>,
     filter: &mut ModuleFilter,
     search: &mut String,
     open: &mut Option<String>,
@@ -1344,7 +1347,7 @@ fn modules_page(
                 module_card(
                     ui, m, git_installed.contains(&m.name), git_meta.get(&m.name),
                     available_updates.get(&m.name).map(String::as_str),
-                    is_pinned, installing, open, remove, update,
+                    is_pinned, installing, installing_runtime, open, remove, update,
                     toggle_pin,
                 );
             });
@@ -1482,6 +1485,7 @@ fn module_card(
     latest: Option<&str>,
     pinned: bool,
     installing: &Option<String>,
+    installing_runtime: &Option<String>,
     open: &mut Option<String>,
     remove: &mut Option<String>,
     update: &mut Option<String>,
@@ -1490,6 +1494,11 @@ fn module_card(
     // This card is mid-update; another install/update is running somewhere.
     let this_busy = installing.as_deref() == Some(m.name.as_str());
     let any_busy = installing.is_some();
+    // The scripted runtime this module needs is still downloading — every module
+    // sharing that runtime (e.g. all Python modules) is not launchable yet, so
+    // its Open button is disabled until the interpreter is bundled.
+    let runtime_busy = Runtime::for_language(m.language)
+        .is_some_and(|rt| installing_runtime.as_deref() == Some(rt.display()));
     egui::Frame::none()
         .fill(ui::color::BG_ELEVATED)
         .stroke(egui::Stroke::new(1.0_f32, ui::color::BORDER))
@@ -1594,8 +1603,23 @@ fn module_card(
                             );
                             return;
                         }
-                        if ui::outline_button(ui, "Open", bw).clicked() {
+                        // Open is disabled while this module's runtime downloads.
+                        let open_clicked = ui
+                            .add_enabled_ui(!runtime_busy, |ui| ui::outline_button(ui, "Open", bw))
+                            .inner
+                            .clicked();
+                        if open_clicked {
                             *open = Some(m.name.clone());
+                        }
+                        if runtime_busy {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(
+                                    egui::RichText::new("Preparing runtime…")
+                                        .small()
+                                        .color(ui::color::TEXT_MUTED),
+                                );
+                            });
                         }
                         if from_git && latest.is_some() {
                             // Update only shows when a newer release exists.
