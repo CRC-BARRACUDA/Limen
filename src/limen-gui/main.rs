@@ -1,3 +1,7 @@
+// Don't spawn a console window alongside the GUI on Windows release builds.
+// (Debug keeps the console so the stderr host/module logs stay visible.)
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! Limen desktop GUI entry point.
 //!
 //! Discovers modules the same way the CLI does (configured search paths plus a
@@ -16,11 +20,18 @@ use limen_core::Config;
 fn main() -> eframe::Result<()> {
     let dirs = resolve_search_dirs();
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([980.0, 640.0])
+        .with_min_inner_size([720.0, 460.0])
+        .with_title("Limen");
+    // The window/taskbar/Alt-Tab icon while the app is running (the embedded
+    // .exe icon only covers the file itself). Decoding is best-effort.
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../../resources/icon.png")) {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 640.0])
-            .with_min_inner_size([720.0, 460.0])
-            .with_title("Limen"),
+        viewport,
         ..Default::default()
     };
 
