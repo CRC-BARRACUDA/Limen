@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use limen_proto::NoConsole;
 use std::sync::Mutex;
 
 /// The GitHub repo the app updates from.
@@ -146,6 +148,7 @@ pub fn check_update(current: &str) -> Option<UpdateInfo> {
             "Accept: application/vnd.github+json",
             &url,
         ])
+        .no_console()
         .output()
         .ok()?;
     if !out.status.success() {
@@ -205,6 +208,7 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
             .args(["-fsSL", "-o"])
             .arg(&staged)
             .arg(asset)
+            .no_console()
             .status()
             .map_err(|e| format!("running curl: {e}"))?;
         if !status.success() {
@@ -253,7 +257,7 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
 /// Relaunch `exe` with the current arguments and exit. Never returns.
 fn relaunch(exe: &Path) -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let _ = Command::new(exe).args(&args).spawn();
+    let _ = Command::new(exe).args(&args).no_console().spawn();
     std::process::exit(0);
 }
 
@@ -297,6 +301,7 @@ pub fn notify(title: &str, body: &str) {
         );
         let _ = Command::new("powershell")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .no_console()
             .spawn();
     }
 }
@@ -333,7 +338,7 @@ fn extract_binary(
 
 /// Run a command, returning whether it exited successfully.
 fn run_ok(cmd: &mut Command) -> bool {
-    cmd.status().map(|s| s.success()).unwrap_or(false)
+    cmd.no_console().status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Recursively find a file named `wanted` under `dir`.

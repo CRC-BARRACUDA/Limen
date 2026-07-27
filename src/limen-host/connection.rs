@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+use limen_proto::NoConsole;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -58,9 +60,12 @@ impl ModuleConnection {
             cmd.env(k, v);
         }
         // Capture stderr so a module's logs (and tracebacks) reach the logger.
+        // `no_console` keeps a console-subsystem module (e.g. python.exe) from
+        // flashing a console window when the GUI spawns it on Windows.
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .no_console();
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawning module {name}: {argv:?}"))?;

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use limen_proto::DepSpec;
+use limen_proto::{DepSpec, NoConsole};
 
 use crate::util::copy_tree;
 
@@ -166,6 +166,7 @@ fn clone_git(repo: &str, version: Option<&str>, dest: &Path) -> Result<GitMeta> 
     cmd.arg(&url).arg(dest);
 
     let status = cmd
+        .no_console()
         .status()
         .context("running `git clone` (is git installed and on PATH?)")?;
     if !status.success() {
@@ -186,7 +187,7 @@ fn clone_git(repo: &str, version: Option<&str>, dest: &Path) -> Result<GitMeta> 
 
 /// Run `git -C dir <args>` and return its trimmed stdout, if it succeeds.
 fn git_out(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    let out = Command::new("git").arg("-C").arg(dir).args(args).no_console().output().ok()?;
     if !out.status.success() {
         return None;
     }

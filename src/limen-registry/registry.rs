@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
-use limen_proto::{Abi, Language, Manifest};
+use limen_proto::{Abi, Language, Manifest, NoConsole};
 
 use crate::lockfile::{LockEntry, Lockfile};
 use crate::source::SourceSpec;
@@ -333,6 +333,7 @@ pub fn latest_release_version(repo: &str) -> Option<String> {
             "Accept: application/vnd.github+json",
             &url,
         ])
+        .no_console()
         .output()
         .ok()?;
     if !out.status.success() {
@@ -377,6 +378,7 @@ fn release_assets(slug: &str, version: Option<&str>) -> Result<Vec<(String, Stri
             "Accept: application/vnd.github+json",
             &url,
         ])
+        .no_console()
         .output()
         .context("running curl")?;
     if !output.status.success() {
@@ -476,6 +478,7 @@ fn download(url: &str, dest: &Path) -> Result<()> {
         .args(["-fsSL", "-o"])
         .arg(dest)
         .arg(url)
+        .no_console()
         .status()
         .context("running curl")?;
     if !status.success() {
@@ -493,7 +496,7 @@ fn extract_lib(archive: &Path, name: &str, dest_dir: &Path) -> Result<std::path:
     std::fs::create_dir_all(&dir).context("creating extract dir")?;
 
     let lower = name.to_lowercase();
-    let run = |c: &mut std::process::Command| c.status().map(|s| s.success()).unwrap_or(false);
+    let run = |c: &mut std::process::Command| c.no_console().status().map(|s| s.success()).unwrap_or(false);
     let ok = if lower.ends_with(".zip") {
         run(std::process::Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(&dir))
             || run(std::process::Command::new("unzip").arg("-oq").arg(archive).arg("-d").arg(&dir))
