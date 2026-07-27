@@ -95,23 +95,30 @@ class Button(Widget):
     animate on hover/press on the host."""
 
     def __init__(self, text, calls=None, capability=None, method=None, primary=False,
-                 enabled=True):
+                 enabled=True, args=None, open_in_tab=False):
         self.text = text
         self.calls = calls
         self.capability = capability
         self.method = method
         self.primary = primary
         self.enabled = enabled
+        self.args = args
+        self.open_in_tab = open_in_tab
 
     def _spec(self, own_capability):
         cap = self.capability or own_capability
         meth = self.method or self.calls
-        return {
+        spec = {
             "kind": "button", "text": self.text,
             "style": "primary" if self.primary else "default",
             "enabled": self.enabled,
             "action": {"capability": cap, "method": meth},
         }
+        if self.args:
+            spec["args"] = self.args
+        if self.open_in_tab:
+            spec["open_in_tab"] = True
+        return spec
 
     # to_spec needs the owning capability; provided during serialization.
     def to_spec(self):
@@ -199,6 +206,21 @@ class Table(Widget):
         return spec
 
 
+class Chart(Widget):
+    """A horizontal bar chart: `data` is a list of (label, value) pairs, drawn
+    as bars scaled to the largest value, under an optional `title`."""
+
+    def __init__(self, title, data):
+        self.title, self.data = title, data
+
+    def to_spec(self):
+        return {
+            "kind": "chart",
+            "title": str(self.title),
+            "data": [{"label": str(label), "value": float(value)} for (label, value) in self.data],
+        }
+
+
 class Window:
     """Top-level view: a title and a list of widgets."""
 
@@ -243,6 +265,16 @@ class Host:
         """Info about the host environment: os, arch, family, hostname,
         limen_version, base_dir (where Limen runs from)."""
         return self._m._request("host.about", {})
+
+    def capabilities(self):
+        """Every capability currently provided by a loaded module. Use this to
+        discover OPTIONAL integrations — e.g. only show a feature when another
+        module (a `report.*` provider, say) is present."""
+        return self._m._request("host.capabilities", None) or []
+
+    def has_capability(self, capability):
+        """Whether some loaded module provides `capability` (exact match)."""
+        return capability in self.capabilities()
 
     def open(self, target, value=""):
         """Ask the host to open something in the OS on the user's behalf:

@@ -73,6 +73,15 @@ impl Widget {
     pub fn primary(self) -> Self {
         self.set("style", json!("primary"))
     }
+    /// Extra params merged into this button's call (e.g. a device id/path).
+    pub fn args(self, args: Value) -> Self {
+        self.set("args", args)
+    }
+    /// Open this button's result view in a new tab instead of replacing the
+    /// current one.
+    pub fn open_in_tab(self) -> Self {
+        self.set("open_in_tab", json!(true))
+    }
 
     // ---- table interactivity ---------------------------------------------- //
     /// Per-row identity (parallel to the table's `rows`); the row's id is sent
@@ -194,6 +203,17 @@ pub fn table(columns: Vec<String>, rows: Vec<Vec<String>>) -> Widget {
     Widget::of_kind("table")
         .set("columns", json!(columns))
         .set("rows", json!(rows))
+}
+
+/// A horizontal bar chart: `(label, value)` bars under an optional title.
+pub fn chart(title: impl Into<String>, data: Vec<(String, f64)>) -> Widget {
+    let bars: Vec<Value> = data
+        .into_iter()
+        .map(|(label, value)| json!({ "label": label, "value": value }))
+        .collect();
+    Widget::of_kind("chart")
+        .set("title", json!(title.into()))
+        .set("data", Value::Array(bars))
 }
 
 /// Build the final view value (a titled list of widgets) — return this from your
