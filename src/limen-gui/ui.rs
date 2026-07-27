@@ -34,7 +34,14 @@ pub(crate) mod color {
 }
 
 // --------------------------------------------------------------------------- //
-// Animation toggle + animated primary button
+// Animation toolkit — reusable primitives + widgets built on them.
+//
+// Every animated widget is assembled from a few pieces: the global on/off switch
+// ([`animations_enabled`]), the easing/colour helpers, and [`interact`] — which
+// turns a [`Response`](egui::Response) into eased hover/press factors. A new
+// animated widget just allocates a rect and paints from those factors; entrance
+// animations use [`reveal_t`]. Nothing here is Modules-specific, so it can be
+// reused anywhere.
 // --------------------------------------------------------------------------- //
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,8 +49,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Whether UI animations are enabled — toggled from Settings, on by default.
 static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 
-/// Enable/disable UI animations globally (set from the Settings checkbox and at
-/// startup from the saved config).
+/// Enable/disable UI animations globally (Settings checkbox + startup config).
 pub fn set_animations(on: bool) {
     ANIMATIONS.store(on, Ordering::Relaxed);
 }
@@ -53,45 +59,138 @@ pub fn animations_enabled() -> bool {
     ANIMATIONS.load(Ordering::Relaxed)
 }
 
-/// `c` with its alpha scaled by `t` (0 = transparent, 1 = opaque).
-fn with_alpha(c: egui::Color32, t: f32) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (255.0 * t.clamp(0.0, 1.0)) as u8)
+// ---- easing ---------------------------------------------------------------- //
+
+/// Ease-out cubic: fast start, gentle finish — for entrances.
+pub fn ease_out(t: f32) -> f32 {
+    let i = 1.0 - t;
+    1.0 - i * i * i
 }
 
-/// Channel-wise linear interpolation between two (opaque) colors.
+/// Smoothstep: gentle at both ends — for reversible motion / collapses.
+pub fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+// ---- colour ---------------------------------------------------------------- //
+
+/// Channel-wise linear interpolation between two opaque colours.
 pub fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let c = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
     egui::Color32::from_rgb(c(a.r(), b.r()), c(a.g(), b.g()), c(a.b(), b.b()))
 }
 
-/// An accent-filled primary button that, when animations are on, smoothly
-/// brightens on hover and dips while pressed. When off it's a plain accent
-/// button. Returns the click response like any button.
-pub fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+/// `c` with its alpha scaled by `t` (0 = transparent, 1 = opaque) — to fade a
+/// fill or stroke in.
+pub fn with_alpha(c: egui::Color32, t: f32) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (255.0 * t.clamp(0.0, 1.0)) as u8)
+}
+
+// ---- interaction ----------------------------------------------------------- //
+
+/// Eased 0→1 for a boolean (hover, selection, …) keyed by `id`. Snaps to the
+/// target when animations are off. The building block for the rest.
+pub fn anim_bool(ui: &egui::Ui, id: egui::Id, on: bool, time: f32) -> f32 {
+    if animations_enabled() {
+        ui.ctx().animate_bool_with_time(id, on, time)
+    } else {
+        on as u8 as f32
+    }
+}
+
+/// Animated hover + press factors (0..1) for an interactive response — the base
+/// for any custom animated widget: allocate a rect, then paint from these.
+pub struct Interact {
+    pub hover: f32,
+    pub press: f32,
+}
+
+/// Compute the [`Interact`] factors for `resp`.
+pub fn interact(ui: &egui::Ui, resp: &egui::Response) -> Interact {
+    Interact {
+        hover: anim_bool(ui, resp.id.with("hover"), resp.hovered(), 0.16),
+        press: anim_bool(ui, resp.id.with("press"), resp.is_pointer_button_down_on(), 0.06),
+    }
+}
+
+// ---- entrance -------------------------------------------------------------- //
+
+/// Staggered entrance factor (eased 0→1) for the `index`-th item revealed at
+/// `start_at`, evaluated at `now`, with `stagger`/`dur` seconds. Requests
+/// repaints until it settles; returns 1 instantly when animations are off. Apply
+/// it however you like (opacity, slide, …).
+pub fn reveal_t(ui: &egui::Ui, index: usize, start_at: f64, now: f64, stagger: f64, dur: f64) -> f32 {
+    if !animations_enabled() {
+        return 1.0;
+    }
+    let start = start_at + index as f64 * stagger;
+    let t = ease_out((((now - start) / dur).clamp(0.0, 1.0)) as f32);
+    if t < 1.0 {
+        ui.ctx().request_repaint();
+    }
+    t
+}
+
+// ---- widgets --------------------------------------------------------------- //
+
+/// A single-line text field whose border eases from grey (`BORDER`) to `ACCENT`
+/// on focus (and part-way on hover) — instead of snapping. It owns the border:
+/// egui's own frame stroke is suppressed so there's no double outline.
+pub fn text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> egui::Response {
+    // Draw the field with no frame stroke (the fill stays), so ours is the only
+    // border. `scope` keeps the visuals tweak local to this widget.
+    let resp = ui
+        .scope(|ui| {
+            let none = egui::Stroke::NONE;
+            let v = ui.visuals_mut();
+            v.widgets.inactive.bg_stroke = none;
+            v.widgets.hovered.bg_stroke = none;
+            v.widgets.active.bg_stroke = none;
+            // The TextEdit draws its *focus* border from `selection.stroke`, not
+            // the widget states — null it too (the cursor uses `text_cursor`).
+            v.selection.stroke = none;
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .hint_text(hint)
+                    // Taller box: more vertical padding so the caret sits inside
+                    // it with room, rather than looking taller than the field.
+                    .margin(egui::Margin::symmetric(8.0, 7.0))
+                    .desired_width(width),
+            )
+        })
+        .inner;
+
+    let focus = anim_bool(ui, resp.id.with("focus"), resp.has_focus(), 0.14);
+    let hover = anim_bool(ui, resp.id.with("ring-hover"), resp.hovered(), 0.14);
+    let t = focus.max(hover * 0.5);
+    // egui reports `resp.rect` as the *inner* rect (outer − margin) but draws the
+    // frame at the outer rect, so expand by the margin to hug the box edge.
+    let frame_rect = resp.rect.expand2(egui::vec2(8.0, 7.0));
+    ui.painter().rect_stroke(
+        frame_rect,
+        egui::Rounding::same(5.0),
+        egui::Stroke::new(1.0_f32, lerp_color(color::BORDER, color::ACCENT, t)),
+    );
+    resp
+}
+
+/// An accent-filled primary button: brightens + grows on hover, dips on press.
+/// `min` is a minimum size (`Vec2::ZERO` to size to the text; a fixed width for a
+/// button column).
+pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color::ON_ACCENT);
     let padding = egui::vec2(14.0, 7.0);
-    let (rect, resp) = ui.allocate_at_least(galley.size() + padding * 2.0, egui::Sense::click());
+    let size = (galley.size() + padding * 2.0).max(min);
+    let (rect, resp) = ui.allocate_at_least(size, egui::Sense::click());
 
-    let anim = animations_enabled();
-    // `animate_bool_with_time` eases 0→1 and keeps requesting repaints until it
-    // settles; a longer time makes the motion clearly visible. Off → snap.
-    let hover_t = if anim {
-        ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.18)
-    } else {
-        resp.hovered() as u8 as f32
-    };
-    let press_t = if anim {
-        ui.ctx()
-            .animate_bool_with_time(resp.id.with("press"), resp.is_pointer_button_down_on(), 0.07)
-    } else {
-        resp.is_pointer_button_down_on() as u8 as f32
-    };
-
-    // Visible motion: grow ~2px on hover, dip inward on press (springs back).
-    let draw = rect.expand(2.0 * hover_t - 3.0 * press_t);
-    let mut fill = lerp_color(color::ACCENT, color::ACCENT_BRIGHT, hover_t);
-    fill = lerp_color(fill, color::BG, 0.25 * press_t);
+    let a = interact(ui, &resp);
+    let draw = rect.expand(2.0 * a.hover - 3.0 * a.press);
+    let fill = lerp_color(
+        lerp_color(color::ACCENT, color::ACCENT_BRIGHT, a.hover),
+        color::BG,
+        0.25 * a.press,
+    );
 
     let painter = ui.painter();
     painter.rect_filled(draw, egui::Rounding::same(6.0), fill);
@@ -99,10 +198,8 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     resp
 }
 
-/// A secondary button that fades a blue outline in on hover (animated), rather
-/// than the outline snapping on. `min` is a minimum size (e.g. a fixed column
-/// width); the button grows to fit its text. With animations off the outline
-/// snaps.
+/// A secondary button: a blue outline fades in on hover, dips on press. `min` is
+/// a minimum size (e.g. a fixed column width); the button grows to fit its text.
 pub fn outline_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color::TEXT);
@@ -110,70 +207,87 @@ pub fn outline_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
     let size = (galley.size() + padding * 2.0).max(min);
     let (rect, resp) = ui.allocate_at_least(size, egui::Sense::click());
 
-    let anim = animations_enabled();
-    let t = if anim {
-        ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.16)
-    } else {
-        resp.hovered() as u8 as f32
-    };
-    // Press eases in fast while held and springs back on release.
-    let press_t = if anim {
-        ui.ctx()
-            .animate_bool_with_time(resp.id.with("press"), resp.is_pointer_button_down_on(), 0.06)
-    } else {
-        resp.is_pointer_button_down_on() as u8 as f32
-    };
-
-    // Dip inward while pressed, pop back out on release.
-    let draw = rect.shrink(2.0 * press_t);
+    let a = interact(ui, &resp);
+    let draw = rect.shrink(2.0 * a.press);
     let rounding = egui::Rounding::same(6.0);
     let painter = ui.painter();
-    let base = lerp_color(color::BG_WIDGET, color::BG_HOVER, t);
-    painter.rect_filled(draw, rounding, lerp_color(base, color::BG, 0.35 * press_t));
-    // Blue outline whose opacity eases in with hover.
-    let outline = egui::Color32::from_rgba_unmultiplied(
-        color::ACCENT.r(),
-        color::ACCENT.g(),
-        color::ACCENT.b(),
-        (255.0 * t) as u8,
-    );
-    painter.rect_stroke(draw, rounding, egui::Stroke::new(1.5_f32, outline));
+    let base = lerp_color(color::BG_WIDGET, color::BG_HOVER, a.hover);
+    painter.rect_filled(draw, rounding, lerp_color(base, color::BG, 0.35 * a.press));
+    painter.rect_stroke(draw, rounding, egui::Stroke::new(1.5_f32, with_alpha(color::ACCENT, a.hover)));
     painter.galley(draw.center() - galley.size() * 0.5, galley, color::TEXT);
     resp
 }
 
-/// A pill filter chip (All / Installed / …). Its hover fill fades in, and its
-/// accent outline + text tint ease in when it becomes selected — so switching
-/// filters slides the highlight from one chip to the next instead of snapping.
-pub fn filter_chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+/// A small filled pill (rounded, `small` text) that brightens on hover and dips
+/// on press — like `primary_button` but with a caller-chosen fill, for badges
+/// like "Update available".
+pub fn pill(ui: &mut egui::Ui, text: &str, fill: egui::Color32) -> egui::Response {
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color::ON_ACCENT);
+    let padding = egui::vec2(10.0, 4.0);
+    let (rect, resp) = ui.allocate_at_least(galley.size() + padding * 2.0, egui::Sense::click());
+
+    let a = interact(ui, &resp);
+    let hi = lerp_color(fill, egui::Color32::WHITE, 0.18);
+    let c = lerp_color(lerp_color(fill, hi, a.hover), color::BG, 0.2 * a.press);
+    let draw = rect.expand(1.5 * a.hover - 2.0 * a.press);
+
+    let painter = ui.painter();
+    painter.rect_filled(draw, egui::Rounding::same(draw.height() * 0.5), c);
+    painter.galley(draw.center() - galley.size() * 0.5, galley, color::ON_ACCENT);
+    resp
+}
+
+/// An animated on/off toggle: a knob that slides while the track eases
+/// grey → accent, with a trailing label. Flips `on` when clicked; the returned
+/// response reports `.changed()` on a flip.
+pub fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        let (w, h) = (34.0_f32, 18.0_f32);
+        let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+        if resp.clicked() {
+            *on = !*on;
+            resp.mark_changed();
+        }
+        let t = anim_bool(ui, resp.id, *on, 0.12);
+        let painter = ui.painter();
+        painter.rect_filled(
+            rect,
+            egui::Rounding::same(h * 0.5),
+            lerp_color(color::BG_WIDGET, color::ACCENT, t),
+        );
+        let r = h * 0.5 - 2.0;
+        let cx = egui::lerp((rect.left() + r + 2.0)..=(rect.right() - r - 2.0), t);
+        painter.circle_filled(egui::pos2(cx, rect.center().y), r, color::ON_ACCENT);
+        ui.add_space(6.0);
+        ui.label(label);
+        resp
+    })
+    .inner
+}
+
+/// A pill chip whose hover fill fades in and whose accent outline + text tint
+/// ease in when `selected` — e.g. the All / Installed / Available filter, where
+/// the highlight then slides from chip to chip instead of snapping.
+pub fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color::TEXT);
     let padding = egui::vec2(12.0, 5.0);
     let (rect, resp) = ui.allocate_at_least(galley.size() + padding * 2.0, egui::Sense::click());
 
-    let anim = animations_enabled();
-    let hover_t = if anim {
-        ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.14)
-    } else {
-        resp.hovered() as u8 as f32
-    };
-    let sel_t = if anim {
-        ui.ctx().animate_bool_with_time(resp.id.with("sel"), selected, 0.14)
-    } else {
-        selected as u8 as f32
-    };
+    let a = interact(ui, &resp);
+    let sel = anim_bool(ui, resp.id.with("sel"), selected, 0.14);
 
     let rounding = egui::Rounding::same(7.0);
     let painter = ui.painter();
-    // Background: hover fills; selected half-fills.
-    painter.rect_filled(rect, rounding, with_alpha(color::BG_ELEVATED, hover_t.max(sel_t * 0.6)));
-    // Accent outline eases in with selection.
-    painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0_f32, with_alpha(color::ACCENT, sel_t)));
-    // Text tints white → accent as it becomes selected.
+    // Use BG_WIDGET (not BG_ELEVATED, which matches the title-bar fill and would
+    // make the hover invisible there) so the chip lifts on any background.
+    painter.rect_filled(rect, rounding, with_alpha(color::BG_WIDGET, a.hover.max(sel * 0.6)));
+    painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0_f32, with_alpha(color::ACCENT, sel)));
     painter.galley(
         rect.center() - galley.size() * 0.5,
         galley,
-        lerp_color(color::TEXT, color::ACCENT, sel_t),
+        lerp_color(color::TEXT, color::ACCENT, sel),
     );
     resp
 }
@@ -381,18 +495,24 @@ fn render_widget(
                 ui.label(styled(label, LabelStyle::Weak));
             }
             let value = inputs.entry(id.clone()).or_insert_with(|| default.clone());
-            let editor = if *multiline {
-                egui::TextEdit::multiline(value)
-                    .desired_rows(4)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(placeholder.as_str())
+            if *multiline {
+                ui.add(
+                    egui::TextEdit::multiline(value)
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(placeholder.as_str()),
+                );
+            } else if *password {
+                ui.add(
+                    egui::TextEdit::singleline(value)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(placeholder.as_str())
+                        .password(true),
+                );
             } else {
-                egui::TextEdit::singleline(value)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(placeholder.as_str())
-                    .password(*password)
-            };
-            ui.add(editor);
+                // Single-line fields get the animated focus border.
+                text_field(ui, value, placeholder.as_str(), f32::INFINITY);
+            }
         }
         Widget::Select { id, label, options, default } => {
             if !label.is_empty() {
@@ -413,16 +533,17 @@ fn render_widget(
                 });
         }
         Widget::Button { text, action, style, enabled } => {
-            let button = match style {
-                ButtonStyle::Primary => egui::Button::new(
-                    egui::RichText::new(text).color(color::ON_ACCENT),
-                )
-                .fill(color::ACCENT),
-                ButtonStyle::Default => egui::Button::new(text),
-            };
             let running = busy == Some(action);
             ui.horizontal(|ui| {
-                if ui.add_enabled(*enabled, button).clicked() {
+                // Module buttons use the shared animated widgets, so a module's UI
+                // animates just like the host's chrome.
+                let resp = ui
+                    .add_enabled_ui(*enabled, |ui| match style {
+                        ButtonStyle::Primary => primary_button(ui, text, egui::Vec2::ZERO),
+                        ButtonStyle::Default => outline_button(ui, text, egui::Vec2::ZERO),
+                    })
+                    .inner;
+                if resp.clicked() {
                     *clicked = Some(action.clone());
                 }
                 if running {

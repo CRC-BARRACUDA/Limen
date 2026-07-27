@@ -135,6 +135,12 @@ pub struct LimenApp {
 
     /// When the About tab was last shown — drives its staggered content reveal.
     about_revealed_at: Option<f64>,
+    /// Reveal timers for the Settings/Developer/License tab entrance animations.
+    settings_revealed_at: Option<f64>,
+    developer_revealed_at: Option<f64>,
+    license_revealed_at: Option<f64>,
+    /// Developer sub-tab the reveal was started for; a change replays it.
+    shown_dev_tab: DevTab,
     /// When the Modules tab was last shown — drives the staggered list reveal.
     modules_revealed_at: Option<f64>,
     /// The filter the current reveal was started for; a change replays the reveal.
@@ -200,6 +206,10 @@ impl LimenApp {
             },
             animations,
             about_revealed_at: None,
+            settings_revealed_at: None,
+            developer_revealed_at: None,
+            license_revealed_at: None,
+            shown_dev_tab: DevTab::DevMode,
             modules_revealed_at: None,
             shown_filter: ModuleFilter::All,
             remote_revealed_at: None,
@@ -539,21 +549,20 @@ impl eframe::App for LimenApp {
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
                     draw_brand(ui.painter(), rect);
                     ui.add_space(12.0);
-                    if ui.button("About").clicked() {
+                    let active = self.active_tab();
+                    if ui::chip(ui, "About", active == Some(Tab::About)).clicked() {
                         open_tab = Some(Tab::About);
                     }
-                    if ui.button("Modules").clicked() {
+                    if ui::chip(ui, "Modules", active == Some(Tab::Modules)).clicked() {
                         open_tab = Some(Tab::Modules);
                     }
                     // "Update available" pill, next to Modules.
                     if self.update.is_some() {
                         ui.add_space(6.0);
-                        let pill = egui::Button::new(
-                            egui::RichText::new("Update available").small().color(ui::color::ON_ACCENT),
-                        )
-                        .fill(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c))
-                        .rounding(egui::Rounding::same(10.0_f32));
-                        if ui.add(pill).on_hover_text("A newer version is available").clicked() {
+                        if ui::pill(ui, "Update available", egui::Color32::from_rgb(0xe6, 0x9a, 0x5c))
+                            .on_hover_text("A newer version is available")
+                            .clicked()
+                        {
                             open_tab = Some(Tab::Update);
                         }
                     }
@@ -569,10 +578,16 @@ impl eframe::App for LimenApp {
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("🛠").on_hover_text("Developer").clicked() {
+                        if ui::chip(ui, "🛠", active == Some(Tab::Developer))
+                            .on_hover_text("Developer")
+                            .clicked()
+                        {
                             open_tab = Some(Tab::Developer);
                         }
-                        if ui.button("⚙").on_hover_text("Settings").clicked() {
+                        if ui::chip(ui, "⚙", active == Some(Tab::Settings))
+                            .on_hover_text("Settings")
+                            .clicked()
+                        {
                             open_tab = Some(Tab::Settings);
                         }
                     });
@@ -609,21 +624,9 @@ impl eframe::App for LimenApp {
 
                         // Smoothly fade the hover fill in, and grow the active
                         // underline out from the tab's centre toward its edges.
-                        let anim = ui::animations_enabled();
-                        let hover_t = if anim {
-                            ui.ctx().animate_bool_with_time(
-                                resp.id.with("hover"),
-                                hovered && !selected,
-                                0.14,
-                            )
-                        } else {
-                            (hovered && !selected) as u8 as f32
-                        };
-                        let active_t = if anim {
-                            ui.ctx().animate_bool_with_time(resp.id.with("active"), selected, 0.05)
-                        } else {
-                            selected as u8 as f32
-                        };
+                        let hover_t =
+                            ui::anim_bool(ui, resp.id.with("hover"), hovered && !selected, 0.14);
+                        let active_t = ui::anim_bool(ui, resp.id.with("active"), selected, 0.05);
 
                         // Active tab adopts the panel colour; hover fades in.
                         let fill = if selected {
@@ -696,8 +699,7 @@ impl eframe::App for LimenApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             for name in frequent.iter().rev() {
-                                if ui
-                                    .add(egui::Button::new(egui::RichText::new(format!("↗ {name}")).small()).frame(false))
+                                if ui::chip(ui, &format!("↗ {name}"), false)
                                     .on_hover_text("Frequently used — open")
                                     .clicked()
                                 {
@@ -733,7 +735,24 @@ impl eframe::App for LimenApp {
         } else {
             self.about_revealed_at = None;
         }
+        if active_tab == Some(Tab::Settings) {
+            self.settings_revealed_at.get_or_insert(now_t);
+        } else {
+            self.settings_revealed_at = None;
+        }
+        if active_tab == Some(Tab::Developer) {
+            self.developer_revealed_at.get_or_insert(now_t);
+        } else {
+            self.developer_revealed_at = None;
+        }
+        if active_tab == Some(Tab::License) {
+            self.license_revealed_at.get_or_insert(now_t);
+        } else {
+            self.license_revealed_at = None;
+        }
         let about_reveal = self.about_revealed_at.unwrap_or(now_t);
+        let settings_reveal = self.settings_revealed_at.unwrap_or(now_t);
+        let license_reveal = self.license_revealed_at.unwrap_or(now_t);
         {
             let LimenApp {
                 modules, git_installed, git_meta, available_updates, pinned, view,
@@ -741,6 +760,7 @@ impl eframe::App for LimenApp {
                 remote_error, remote_loading, installing, dev_tab, logs, log_autoscroll, ui_scale,
                 animations, dev_mode_on, dev_limen_path, dev_modules_path, removing,
                 modules_revealed_at, shown_filter, remote_revealed_at,
+                developer_revealed_at, shown_dev_tab,
                 ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -762,7 +782,7 @@ impl eframe::App for LimenApp {
                             open_tab = Some(Tab::License);
                         }
                     }
-                    Some(Tab::License) => license_view(ui),
+                    Some(Tab::License) => license_view(ui, license_reveal),
                     Some(Tab::Modules) => modules_page(
                         ui, modules, git_installed, git_meta, available_updates,
                         pinned, remote, *remote_loading, remote_error, installing, filter, search,
@@ -773,12 +793,14 @@ impl eframe::App for LimenApp {
                     Some(Tab::Module(name)) => {
                         module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
                     }
-                    Some(Tab::Settings) => {
-                        settings_view(ui, ui_scale, &mut scale_changed, animations, &mut anim_changed)
-                    }
+                    Some(Tab::Settings) => settings_view(
+                        ui, ui_scale, &mut scale_changed, animations, &mut anim_changed,
+                        settings_reveal,
+                    ),
                     Some(Tab::Developer) => developer_view(
                         ui, dev_tab, inputs, logs, log_autoscroll,
                         dev_mode_on, dev_limen_path, dev_modules_path, &mut dev_applied,
+                        developer_revealed_at, shown_dev_tab,
                     ),
                     Some(Tab::Update) => {
                         update_view(ui, update_info.as_ref(), updating, &mut do_update)
@@ -929,10 +951,10 @@ impl eframe::App for LimenApp {
                     }
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
-                        if ui::primary_button(ui, "Grant & Run").clicked() {
+                        if ui::primary_button(ui, "Grant & Run", egui::Vec2::ZERO).clicked() {
                             decision = Some(true);
                         }
-                        if ui.button("Deny").clicked() {
+                        if ui::outline_button(ui, "Deny", egui::Vec2::ZERO).clicked() {
                             decision = Some(false);
                         }
                         ui.label(
@@ -1005,9 +1027,11 @@ fn update_view(
 
     ui.add_space(14.0);
     ui.horizontal(|ui| {
-        let btn = egui::Button::new(egui::RichText::new("Update").color(ui::color::ON_ACCENT))
-            .fill(ui::color::ACCENT);
-        if ui.add_enabled(!updating, btn).clicked() {
+        let clicked = ui
+            .add_enabled_ui(!updating, |ui| ui::primary_button(ui, "Update", egui::Vec2::ZERO))
+            .inner
+            .clicked();
+        if clicked {
             *do_update = true;
         }
         if updating {
@@ -1024,48 +1048,58 @@ fn update_view(
     });
 }
 
-/// The Settings tab.
+/// The Settings tab. `reveal_at` staggers the sections in when the tab is shown.
 fn settings_view(
     ui: &mut egui::Ui,
     scale: &mut f32,
     changed: &mut bool,
     animations: &mut bool,
     anim_changed: &mut bool,
+    reveal_at: f64,
 ) {
+    let now = ui.input(|i| i.time);
+    let animate = ui::animations_enabled();
+
     ui.add_space(4.0);
-    ui.heading("Settings");
-    ui.separator();
+    reveal_item(ui, 0, reveal_at, now, animate, |ui| {
+        ui.heading("Settings");
+        ui.separator();
+    });
     ui.add_space(6.0);
-    ui.label(egui::RichText::new("UI scale").strong());
-    ui.label(
-        egui::RichText::new("Make the whole interface bigger or smaller.")
-            .small()
-            .color(ui::color::TEXT_MUTED),
-    );
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        for pct in [100.0_f32, 125.0, 150.0, 175.0, 200.0] {
-            let selected = (*scale - pct).abs() < 0.5;
-            if ui.selectable_label(selected, format!("{}%", pct as u32)).clicked() {
-                *scale = pct;
-                *changed = true;
+    reveal_item(ui, 1, reveal_at, now, animate, |ui| {
+        ui.label(egui::RichText::new("UI scale").strong());
+        ui.label(
+            egui::RichText::new("Make the whole interface bigger or smaller.")
+                .small()
+                .color(ui::color::TEXT_MUTED),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            for pct in [100.0_f32, 125.0, 150.0, 175.0, 200.0] {
+                let selected = (*scale - pct).abs() < 0.5;
+                if ui::chip(ui, &format!("{}%", pct as u32), selected).clicked() {
+                    *scale = pct;
+                    *changed = true;
+                }
             }
-        }
+        });
     });
 
     ui.add_space(16.0);
-    ui.separator();
-    ui.add_space(6.0);
-    ui.label(egui::RichText::new("Animations").strong());
-    ui.label(
-        egui::RichText::new("Smoothly animate buttons and transitions.")
-            .small()
-            .color(ui::color::TEXT_MUTED),
-    );
-    ui.add_space(6.0);
-    if ui.checkbox(animations, "Enable animations").changed() {
-        *anim_changed = true;
-    }
+    reveal_item(ui, 2, reveal_at, now, animate, |ui| {
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Animations").strong());
+        ui.label(
+            egui::RichText::new("Smoothly animate buttons and transitions.")
+                .small()
+                .color(ui::color::TEXT_MUTED),
+        );
+        ui.add_space(6.0);
+        if ui::toggle(ui, animations, "Enable animations").changed() {
+            *anim_changed = true;
+        }
+    });
 }
 
 /// The Developer tab's "Dev mode" sub-tab: source app/module updates from local
@@ -1095,24 +1129,16 @@ fn dev_mode_view(
         .spacing([10.0, 8.0])
         .show(ui, |ui| {
             ui.label("Limen update path");
-            ui.add(
-                egui::TextEdit::singleline(dev_limen_path)
-                    .hint_text("dir of Limen-<ver>-<platform>.tar.gz")
-                    .desired_width(320.0),
-            );
+            ui::text_field(ui, dev_limen_path, "dir of Limen-<ver>-<platform>.tar.gz", 320.0);
             ui.end_row();
             ui.label("Module update path");
-            ui.add(
-                egui::TextEdit::singleline(dev_modules_path)
-                    .hint_text("dir of <name>/ module folders")
-                    .desired_width(320.0),
-            );
+            ui::text_field(ui, dev_modules_path, "dir of <name>/ module folders", 320.0);
             ui.end_row();
         });
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         let label = if *dev_mode_on { "Update dev mode" } else { "Set dev mode" };
-        if ui::primary_button(ui, label).clicked() {
+        if ui::primary_button(ui, label, egui::Vec2::ZERO).clicked() {
             let as_dir = |s: &str| {
                 let t = s.trim();
                 (!t.is_empty()).then(|| std::path::PathBuf::from(t))
@@ -1122,7 +1148,7 @@ fn dev_mode_view(
             *dev_mode_on = true;
             *applied = true;
         }
-        if *dev_mode_on && ui.button("Turn off").clicked() {
+        if *dev_mode_on && ui::outline_button(ui, "Turn off", egui::Vec2::ZERO).clicked() {
             limen_core::set_update_dir(None);
             limen_registry::set_update_modules_dir(None);
             *dev_mode_on = false;
@@ -1139,7 +1165,9 @@ fn dev_mode_view(
     }
 }
 
-/// The Developer tab: sub-tabs for docs / UI kit / log console.
+/// The Developer tab: sub-tabs for docs / UI kit / log console. The content fades
+/// in when the tab is shown *and* whenever the sub-tab changes (`reveal_at` /
+/// `shown_dev_tab` track that, reset on the same frame as the click).
 #[allow(clippy::too_many_arguments)]
 fn developer_view(
     ui: &mut egui::Ui,
@@ -1151,20 +1179,38 @@ fn developer_view(
     dev_limen_path: &mut String,
     dev_modules_path: &mut String,
     dev_applied: &mut bool,
+    revealed_at: &mut Option<f64>,
+    shown_dev_tab: &mut DevTab,
 ) {
     ui.horizontal(|ui| {
-        ui.selectable_value(dev_tab, DevTab::DevMode, "Dev mode");
-        ui.selectable_value(dev_tab, DevTab::UiKit, "UI Kit");
-        ui.selectable_value(dev_tab, DevTab::Console, "Console");
+        if ui::chip(ui, "Dev mode", *dev_tab == DevTab::DevMode).clicked() {
+            *dev_tab = DevTab::DevMode;
+        }
+        if ui::chip(ui, "UI Kit", *dev_tab == DevTab::UiKit).clicked() {
+            *dev_tab = DevTab::UiKit;
+        }
+        if ui::chip(ui, "Console", *dev_tab == DevTab::Console).clicked() {
+            *dev_tab = DevTab::Console;
+        }
     });
     ui.separator();
-    match dev_tab {
+
+    // Replay the content reveal when the sub-tab changes (same frame as the click).
+    let now = ui.input(|i| i.time);
+    if *dev_tab != *shown_dev_tab {
+        *revealed_at = Some(now);
+        *shown_dev_tab = *dev_tab;
+    }
+    let reveal_at = revealed_at.unwrap_or(now);
+    let animate = ui::animations_enabled();
+
+    reveal_item(ui, 0, reveal_at, now, animate, |ui| match dev_tab {
         DevTab::DevMode => {
             dev_mode_view(ui, dev_mode_on, dev_limen_path, dev_modules_path, dev_applied)
         }
         DevTab::UiKit => ui::render_demo_ui(ui, inputs),
         DevTab::Console => dev_console(ui, logs, autoscroll),
-    }
+    });
 }
 
 /// The Developer window's "Console" tab — all host + module log lines.
@@ -1176,7 +1222,7 @@ fn dev_console(
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(format!("{} lines", logs.len())).color(ui::color::TEXT_MUTED));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.checkbox(autoscroll, "Autoscroll");
+            ui::toggle(ui, autoscroll, "Autoscroll");
         });
     });
     ui.separator();
@@ -1230,7 +1276,7 @@ fn modules_page(
     ui.horizontal(|ui| {
         ui.heading("Modules");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Reload").clicked() {
+            if ui::outline_button(ui, "Reload", egui::Vec2::ZERO).clicked() {
                 *reload = true;
             }
         });
@@ -1238,11 +1284,7 @@ fn modules_page(
     ui.add_space(10.0);
 
     // One universal search across installed (local) and org (remote) modules.
-    ui.add(
-        egui::TextEdit::singleline(search)
-            .hint_text("Search modules — local and in the org…")
-            .desired_width(f32::INFINITY),
-    );
+    ui::text_field(ui, search, "Search modules — local and in the org…", f32::INFINITY);
     ui.add_space(8.0);
 
     // Installed / Available filter.
@@ -1252,7 +1294,7 @@ fn modules_page(
             (ModuleFilter::Installed, "Installed"),
             (ModuleFilter::Available, "Available"),
         ] {
-            if ui::filter_chip(ui, label, *filter == value).clicked() {
+            if ui::chip(ui, label, *filter == value).clicked() {
                 *filter = value;
             }
         }
@@ -1384,20 +1426,15 @@ fn reveal_card(
         ui.add_space(GAP);
         return;
     }
-    // Time-based entrance, eased and staggered by index. Replays whenever the
-    // reveal timer resets (tab shown, or the filter changed).
-    let start = reveal_at + k as f64 * 0.05;
-    let raw = (((now - start) / 0.30).clamp(0.0, 1.0)) as f32;
-    let inv = 1.0 - raw;
-    let enter = 1.0 - inv * inv * inv; // ease-out cubic
-    // Exit uses smoothstep (ease in *and* out) so the fade, slide, and — most
-    // importantly — the height collapse all progress steadily; a cubic ease-in
-    // held the height near full and then snapped it shut at the end.
-    let exit = remove_t * remove_t * (3.0 - 2.0 * remove_t); // smoothstep
+    // Staggered entrance (replays when the reveal timer resets: tab shown or
+    // filter changed) and a smoothstep exit so the fade, slide, and — most
+    // importantly — the height collapse all progress steadily.
+    let enter = ui::reveal_t(ui, k, reveal_at, now, 0.05, 0.30);
+    let exit = ui::smoothstep(remove_t);
 
     let dx = (1.0 - enter) * 28.0 + exit * 28.0;
-    if enter < 1.0 || (remove_t > 0.0 && remove_t < 1.0) {
-        ui.ctx().request_repaint(); // keep animating until settled
+    if remove_t > 0.0 && remove_t < 1.0 {
+        ui.ctx().request_repaint(); // keep the exit animating until settled
     }
 
     if exit <= 0.0 {
@@ -1566,12 +1603,8 @@ fn module_card(
                                 Some(v) => format!("Update {v}"),
                                 None => "Update".into(),
                             };
-                            let btn = egui::Button::new(
-                                egui::RichText::new(label).color(ui::color::ON_ACCENT),
-                            )
-                            .fill(ui::color::ACCENT);
                             let clicked = ui
-                                .add_enabled_ui(!any_busy, |ui| ui.add_sized(bw, btn))
+                                .add_enabled_ui(!any_busy, |ui| ui::primary_button(ui, &label, bw))
                                 .inner
                                 .clicked();
                             if clicked {
@@ -1689,20 +1722,18 @@ fn available_card(
                                 },
                             );
                         } else {
-                            let install = egui::Button::new(
-                                egui::RichText::new("Install").color(ui::color::ON_ACCENT),
-                            )
-                            .fill(ui::color::ACCENT);
                             // Disable while another install is in flight.
                             let clicked = ui
-                                .add_enabled_ui(!any_installing, |ui| ui.add_sized(bw, install))
+                                .add_enabled_ui(!any_installing, |ui| {
+                                    ui::primary_button(ui, "Install", bw)
+                                })
                                 .inner
                                 .clicked();
                             if clicked {
                                 *add = Some(r.repo.clone());
                             }
                         }
-                        if ui.add_sized(bw, egui::Button::new("GitHub ↗")).clicked() {
+                        if ui::outline_button(ui, "GitHub ↗", bw).clicked() {
                             let url = r.url.clone();
                             ui.output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url)));
                         }
@@ -1750,13 +1781,7 @@ fn reveal_item(
         draw(ui);
         return;
     }
-    let start = reveal_at + k as f64 * 0.035;
-    let raw = (((now - start) / 0.18).clamp(0.0, 1.0)) as f32;
-    let inv = 1.0 - raw;
-    let t = 1.0 - inv * inv * inv; // ease-out cubic
-    if t < 1.0 {
-        ui.ctx().request_repaint();
-    }
+    let t = ui::reveal_t(ui, k, reveal_at, now, 0.035, 0.18);
     ui.scope(|ui| {
         ui.set_opacity(t);
         draw(ui);
@@ -1815,7 +1840,7 @@ fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
             reveal_item(ui, 4, reveal_at, now, animate, |ui| {
                 ui.separator();
                 ui.add_space(14.0);
-                if ui.button("View license").clicked() {
+                if ui::outline_button(ui, "View license", egui::Vec2::ZERO).clicked() {
                     license_clicked = true;
                 }
             });
@@ -1836,31 +1861,37 @@ fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
 }
 
 /// The License page — the embedded GPLv3 text, scrollable.
-fn license_view(ui: &mut egui::Ui) {
+fn license_view(ui: &mut egui::Ui, reveal_at: f64) {
+    let now = ui.input(|i| i.time);
+    let animate = ui::animations_enabled();
     // Center the license in a fixed-width column.
     ui.vertical_centered(|ui| {
         ui.set_max_width(720.0);
-        ui.heading("License");
-        ui.label(
-            egui::RichText::new(
-                "Limen is free software: you can redistribute it and/or modify it under \
-                 the terms of the GNU General Public License, version 3 or later.",
-            )
-            .color(ui::color::TEXT_MUTED),
-        );
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(6.0);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let mut text = LICENSE_TEXT;
-                ui.add(
-                    egui::TextEdit::multiline(&mut text)
-                        .desired_width(f32::INFINITY)
-                        .code_editor(),
-                );
-            });
+        reveal_item(ui, 0, reveal_at, now, animate, |ui| {
+            ui.heading("License");
+            ui.label(
+                egui::RichText::new(
+                    "Limen is free software: you can redistribute it and/or modify it under \
+                     the terms of the GNU General Public License, version 3 or later.",
+                )
+                .color(ui::color::TEXT_MUTED),
+            );
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(6.0);
+        });
+        reveal_item(ui, 1, reveal_at, now, animate, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut text = LICENSE_TEXT;
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text)
+                            .desired_width(f32::INFINITY)
+                            .code_editor(),
+                    );
+                });
+        });
     });
 }
 
