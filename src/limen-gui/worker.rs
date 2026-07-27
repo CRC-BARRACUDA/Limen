@@ -70,6 +70,8 @@ pub enum Command {
 pub enum RunTag {
     Ui { module: String },
     Action,
+    /// A row action whose result view opens in a detail tab (`id`).
+    Detail { id: u64 },
 }
 
 /// A message from the worker back to the UI.

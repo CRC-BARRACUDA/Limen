@@ -377,6 +377,50 @@ pub struct Action {
     pub method: String,
 }
 
+/// What double-clicking a table row does.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RowAction {
+    pub action: Action,
+    /// Open the returned view in a new tab rather than replacing the current one.
+    #[serde(default)]
+    pub open_in_tab: bool,
+}
+
+/// One right-click menu entry on a table row. A leaf carries an `action`; an
+/// entry with `children` is a submenu (e.g. the Windows "Open path ▸" submenu).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MenuItem {
+    pub label: String,
+    #[serde(default)]
+    pub action: Option<Action>,
+    /// Extra params merged into the call (e.g. `{"via":"explorer"}`).
+    #[serde(default)]
+    pub args: serde_json::Map<String, Value>,
+    /// Open the result in a new tab instead of replacing the current view.
+    #[serde(default)]
+    pub open_in_tab: bool,
+    /// Submenu entries; when present, `action` is ignored and this is a submenu.
+    #[serde(default)]
+    pub children: Vec<MenuItem>,
+}
+
+/// A dispatched interaction: an [`Action`] plus any extra params (e.g. the
+/// activated row's id) and whether its result view opens in a new tab. Produced
+/// by a clicked button, a row context-menu item, or a row double-click.
+#[derive(Debug, Clone)]
+pub struct Invoke {
+    pub action: Action,
+    pub args: serde_json::Map<String, Value>,
+    pub open_in_tab: bool,
+}
+
+impl Invoke {
+    /// A plain button click — no extra args, renders in place.
+    fn button(action: Action) -> Self {
+        Invoke { action, args: serde_json::Map::new(), open_in_tab: false }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LabelStyle {
@@ -445,12 +489,22 @@ pub enum Widget {
     Row {
         children: Vec<Widget>,
     },
-    /// A table with a header row and string cells.
+    /// A table with a header row and string cells. Rows become interactive
+    /// (right-click menu + double-click) when `menu` or `on_activate` is set.
     Table {
         #[serde(default)]
         columns: Vec<String>,
         #[serde(default)]
         rows: Vec<Vec<String>>,
+        /// Per-row identity (parallel to `rows`), sent as `id` on a row action.
+        #[serde(default)]
+        row_ids: Vec<String>,
+        /// Right-click context-menu items for a row.
+        #[serde(default)]
+        menu: Vec<MenuItem>,
+        /// What double-clicking a row does.
+        #[serde(default)]
+        on_activate: Option<RowAction>,
     },
 }
 
@@ -461,7 +515,7 @@ pub fn render_view(
     view: &View,
     inputs: &mut HashMap<String, String>,
     busy: Option<&Action>,
-) -> Option<Action> {
+) -> Option<Invoke> {
     let mut clicked = None;
     render_widgets(ui, &view.widgets, inputs, busy, &mut clicked);
     clicked
@@ -472,7 +526,7 @@ fn render_widgets(
     widgets: &[Widget],
     inputs: &mut HashMap<String, String>,
     busy: Option<&Action>,
-    clicked: &mut Option<Action>,
+    clicked: &mut Option<Invoke>,
 ) {
     for w in widgets {
         render_widget(ui, w, inputs, busy, clicked);
@@ -484,7 +538,7 @@ fn render_widget(
     widget: &Widget,
     inputs: &mut HashMap<String, String>,
     busy: Option<&Action>,
-    clicked: &mut Option<Action>,
+    clicked: &mut Option<Invoke>,
 ) {
     match widget {
         Widget::Label { text, style } => {
@@ -544,7 +598,7 @@ fn render_widget(
                     })
                     .inner;
                 if resp.clicked() {
-                    *clicked = Some(action.clone());
+                    *clicked = Some(Invoke::button(action.clone()));
                 }
                 if running {
                     ui.add_space(6.0);
@@ -558,16 +612,31 @@ fn render_widget(
         Widget::Row { children } => {
             ui.horizontal(|ui| render_widgets(ui, children, inputs, busy, clicked));
         }
-        Widget::Table { columns, rows } => render_table(ui, columns, rows),
+        Widget::Table { columns, rows, row_ids, menu, on_activate } => {
+            render_table(ui, columns, rows, row_ids, menu, on_activate.as_ref(), clicked)
+        }
     }
 }
 
-/// Render a [`Widget::Table`] as a striped grid inside a scroll area.
-fn render_table(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<String>]) {
+/// Render a [`Widget::Table`] as a striped grid inside a scroll area. Plain data
+/// tables draw as before; when the module attaches a `menu` or `on_activate`,
+/// each row becomes interactive (right-click menu + double-click) and emits an
+/// [`Invoke`] carrying that row's id.
+#[allow(clippy::too_many_arguments)]
+fn render_table(
+    ui: &mut egui::Ui,
+    columns: &[String],
+    rows: &[Vec<String>],
+    row_ids: &[String],
+    menu: &[MenuItem],
+    on_activate: Option<&RowAction>,
+    clicked: &mut Option<Invoke>,
+) {
     let ncols = columns.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
     if ncols == 0 {
         return;
     }
+    let interactive = !menu.is_empty() || on_activate.is_some();
     let id = ui.make_persistent_id(("limen_table", ncols, rows.len()));
     egui::ScrollArea::horizontal()
         .id_source(id)
@@ -581,14 +650,73 @@ fn render_table(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<String>]) {
                         ui.label(egui::RichText::new(c).strong());
                     }
                     ui.end_row();
-                    for row in rows {
+                    for (r, row) in rows.iter().enumerate() {
+                        if !interactive {
+                            for cell in row {
+                                ui.label(cell);
+                            }
+                            ui.end_row();
+                            continue;
+                        }
+                        // Interactive row: clickable cells unioned into one row
+                        // response that carries the context menu + double-click.
+                        let mut row_resp: Option<egui::Response> = None;
                         for cell in row {
-                            ui.label(cell);
+                            let r = ui.add(egui::Label::new(cell).sense(egui::Sense::click()));
+                            row_resp = Some(match row_resp {
+                                Some(prev) => prev.union(r),
+                                None => r,
+                            });
                         }
                         ui.end_row();
+                        let Some(row_resp) = row_resp else { continue };
+                        let row_resp = row_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let row_id = row_ids.get(r).cloned().unwrap_or_default();
+                        if !menu.is_empty() {
+                            let mut picked: Option<Invoke> = None;
+                            row_resp.context_menu(|ui| render_row_menu(ui, menu, &row_id, &mut picked));
+                            if picked.is_some() {
+                                *clicked = picked;
+                            }
+                        }
+                        if let Some(act) = on_activate
+                            && row_resp.double_clicked()
+                        {
+                            let mut args = serde_json::Map::new();
+                            args.insert("id".into(), Value::String(row_id.clone()));
+                            *clicked = Some(Invoke {
+                                action: act.action.clone(),
+                                args,
+                                open_in_tab: act.open_in_tab,
+                            });
+                        }
                     }
                 });
         });
+}
+
+/// Build a table row's right-click menu, recursing into submenus. Writes the
+/// chosen [`Invoke`] (with the row's `id` merged in) into `out`.
+fn render_row_menu(ui: &mut egui::Ui, items: &[MenuItem], row_id: &str, out: &mut Option<Invoke>) {
+    for item in items {
+        if !item.children.is_empty() {
+            let mut sub: Option<Invoke> = None;
+            ui.menu_button(&item.label, |ui| render_row_menu(ui, &item.children, row_id, &mut sub));
+            if sub.is_some() {
+                *out = sub;
+                ui.close_menu();
+            }
+        } else if let Some(action) = &item.action {
+            if ui.button(&item.label).clicked() {
+                let mut args = item.args.clone();
+                args.insert("id".into(), Value::String(row_id.to_string()));
+                *out = Some(Invoke { action: action.clone(), args, open_in_tab: item.open_in_tab });
+                ui.close_menu();
+            }
+        } else {
+            ui.label(&item.label);
+        }
+    }
 }
 
 fn styled(text: &str, style: LabelStyle) -> egui::RichText {

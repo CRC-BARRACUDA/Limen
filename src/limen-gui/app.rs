@@ -31,6 +31,8 @@ enum Tab {
     Settings,
     Developer,
     Update,
+    /// A device/detail view opened from a row action (keyed into `detail_tabs`).
+    Detail { id: u64 },
 }
 
 impl Tab {
@@ -43,8 +45,22 @@ impl Tab {
             Tab::Settings => "Settings".into(),
             Tab::Developer => "Developer".into(),
             Tab::Update => "Update".into(),
+            // The real label comes from the stored view's title (looked up in the
+            // tab bar); this is only a fallback.
+            Tab::Detail { .. } => "Details".into(),
         }
     }
+}
+
+/// A detail tab's content: a module-returned [`ui::View`] opened from a row
+/// action (e.g. "About device"), with its own inputs and load state.
+#[derive(Default)]
+struct DetailTab {
+    title: String,
+    view: Option<ui::View>,
+    error: Option<String>,
+    inputs: HashMap<String, String>,
+    busy: bool,
 }
 
 /// The full license text, embedded so it's always in sync with the repo.
@@ -86,7 +102,12 @@ pub struct LimenApp {
     /// (trusted at their current content digest).
     trusted: HashSet<String>,
     /// An elevated action awaiting the user's consent (shown as a dialog).
-    pending_action: Option<ui::Action>,
+    pending_action: Option<ui::Invoke>,
+
+    /// Open detail tabs (from row actions), keyed by the id in `Tab::Detail`.
+    detail_tabs: HashMap<u64, DetailTab>,
+    /// Monotonic id for the next detail tab.
+    next_detail_id: u64,
 
     /// Open tabs (in order) and the active index.
     tabs: Vec<Tab>,
@@ -177,6 +198,8 @@ impl LimenApp {
             failed: HashMap::new(),
             trusted: HashSet::new(),
             pending_action: None,
+            detail_tabs: HashMap::new(),
+            next_detail_id: 0,
             tabs: vec![Tab::About, Tab::Modules],
             active: 0,
             visits: HashMap::new(),
@@ -240,6 +263,10 @@ impl LimenApp {
     fn close_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
+        }
+        // Free a detail tab's stored view when its tab closes.
+        if let Tab::Detail { id } = self.tabs[index] {
+            self.detail_tabs.remove(&id);
         }
         self.tabs.remove(index);
         if self.active >= self.tabs.len() {
@@ -439,6 +466,25 @@ impl LimenApp {
                         }
                         self.status = "done".to_string();
                     }
+                    RunTag::Detail { id } => {
+                        // Fill the detail tab, if it's still open.
+                        if let Some(tab) = self.detail_tabs.get_mut(&id) {
+                            tab.busy = false;
+                            match result {
+                                Ok(v) => match serde_json::from_value::<ui::View>(v) {
+                                    Ok(view) => {
+                                        if !view.title.is_empty() {
+                                            tab.title = view.title.clone();
+                                        }
+                                        tab.view = Some(view);
+                                        tab.error = None;
+                                    }
+                                    Err(e) => tab.error = Some(format!("invalid view: {e}")),
+                                },
+                                Err(e) => tab.error = Some(format!("error: {e}")),
+                            }
+                        }
+                    }
                 },
                 Event::Status(msg) => {
                     self.busy = false;
@@ -491,20 +537,54 @@ impl LimenApp {
         }
     }
 
-    fn dispatch(&mut self, action: ui::Action) {
-        let params = self
-            .view
-            .as_ref()
-            .map(|v| ui::collect_params(v, &self.inputs))
-            .unwrap_or_else(|| serde_json::json!({}));
+    fn dispatch(&mut self, invoke: ui::Invoke) {
+        // Base params come from the active view's inputs (a module tab's search
+        // box etc.); a detail tab has no shared inputs. Row/menu args (the row
+        // `id`, `via`, …) are merged on top.
+        let mut params: serde_json::Map<String, serde_json::Value> = match self.active_tab() {
+            Some(Tab::Module(_)) => match self
+                .view
+                .as_ref()
+                .map(|v| ui::collect_params(v, &self.inputs))
+            {
+                Some(serde_json::Value::Object(m)) => m,
+                _ => serde_json::Map::new(),
+            },
+            _ => serde_json::Map::new(),
+        };
+        for (k, v) in &invoke.args {
+            params.insert(k.clone(), v.clone());
+        }
+        let params = serde_json::Value::Object(params);
+        let ui::Action { capability, method } = invoke.action.clone();
+
+        if invoke.open_in_tab {
+            // Open (or focus) a fresh detail tab and load it in the background.
+            let id = self.next_detail_id;
+            self.next_detail_id += 1;
+            self.detail_tabs.insert(
+                id,
+                DetailTab { title: method.clone(), busy: true, ..Default::default() },
+            );
+            self.open_tab(Tab::Detail { id });
+            self.status = format!("{capability}.{method}");
+            self.worker.send(Command::Run {
+                tag: RunTag::Detail { id },
+                capability,
+                method,
+                params,
+            });
+            return;
+        }
+
         self.busy = true;
-        self.busy_action = Some(action.clone());
+        self.busy_action = Some(invoke.action.clone());
         self.output.clear(); // the button spinner shows progress, not the Result pane
-        self.status = format!("{}.{}", action.capability, action.method);
+        self.status = format!("{capability}.{method}");
         self.worker.send(Command::Run {
             tag: RunTag::Action,
-            capability: action.capability,
-            method: action.method,
+            capability,
+            method,
             params,
         });
     }
@@ -605,7 +685,15 @@ impl eframe::App for LimenApp {
                     let font_id = egui::TextStyle::Button.resolve(ui.style());
                     for (i, tab) in self.tabs.iter().enumerate() {
                         let selected = i == self.active;
-                        let text = tab.title();
+                        let text = match tab {
+                            Tab::Detail { id } => self
+                                .detail_tabs
+                                .get(id)
+                                .map(|d| d.title.clone())
+                                .filter(|t| !t.is_empty())
+                                .unwrap_or_else(|| "Details".into()),
+                            _ => tab.title(),
+                        };
 
                         // Zed-style tab: stable width (the close slot is always
                         // reserved), the × only shows on hover or when active.
@@ -712,7 +800,7 @@ impl eframe::App for LimenApp {
             });
 
         // Central content for the active tab (split-borrow to mutate inputs etc).
-        let mut action: Option<ui::Action> = None;
+        let mut action: Option<ui::Invoke> = None;
         let mut open_module: Option<String> = None;
         let mut remove_module: Option<String> = None;
         let mut add_module: Option<String> = None;
@@ -761,7 +849,7 @@ impl eframe::App for LimenApp {
                 log_autoscroll, ui_scale,
                 animations, dev_mode_on, dev_limen_path, dev_modules_path, removing,
                 modules_revealed_at, shown_filter, remote_revealed_at,
-                developer_revealed_at, shown_dev_tab,
+                developer_revealed_at, shown_dev_tab, detail_tabs,
                 ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -794,6 +882,9 @@ impl eframe::App for LimenApp {
                     ),
                     Some(Tab::Module(name)) => {
                         module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
+                    }
+                    Some(Tab::Detail { id }) => {
+                        detail_view(ui, id, detail_tabs, &mut action)
                     }
                     Some(Tab::Settings) => settings_view(
                         ui, ui_scale, &mut scale_changed, animations, &mut anim_changed,
@@ -911,7 +1002,7 @@ impl eframe::App for LimenApp {
         }
         if let Some(a) = action {
             // Elevated methods prompt for consent (once) before running.
-            if self.action_needs_consent(&a) {
+            if self.action_needs_consent(&a.action) {
                 self.pending_action = Some(a);
             } else {
                 self.dispatch(a);
@@ -920,7 +1011,7 @@ impl eframe::App for LimenApp {
 
         // Consent dialog for a pending elevated action.
         if let Some(pending) = self.pending_action.clone() {
-            let module = self.module_of(&pending.capability).cloned();
+            let module = self.module_of(&pending.action.capability).cloned();
             let mut decision: Option<bool> = None; // Some(true)=grant, Some(false)=deny
             egui::Window::new("Permission required")
                 .collapsible(false)
@@ -932,7 +1023,7 @@ impl eframe::App for LimenApp {
                     ui.label(
                         egui::RichText::new(format!(
                             "“{name}” wants to run “{}”, which needs elevated permissions.",
-                            pending.method
+                            pending.action.method
                         ))
                         .size(15.0),
                     );
@@ -2052,6 +2143,48 @@ fn rounded_rect_mesh(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Render a detail tab opened from a table row action (e.g. "About device").
+/// Its view is interactive too, so buttons inside it (e.g. "Open path") dispatch.
+fn detail_view(
+    ui: &mut egui::Ui,
+    id: u64,
+    detail_tabs: &mut HashMap<u64, DetailTab>,
+    action: &mut Option<ui::Invoke>,
+) {
+    let Some(tab) = detail_tabs.get_mut(&id) else {
+        ui.label("This detail view is no longer available.");
+        return;
+    };
+    let heading = if tab.title.is_empty() { "Details" } else { tab.title.as_str() };
+    if let Some(err) = &tab.error {
+        ui.heading(heading);
+        ui.separator();
+        ui.colored_label(egui::Color32::LIGHT_RED, err);
+        return;
+    }
+    match &tab.view {
+        Some(v) => {
+            let heading = if v.title.is_empty() { heading } else { v.title.as_str() };
+            ui.heading(heading);
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if let Some(a) = ui::render_view(ui, v, &mut tab.inputs, None) {
+                        *action = Some(a);
+                    }
+                });
+        }
+        None => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading…");
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn module_view(
     ui: &mut egui::Ui,
     name: &str,
@@ -2060,7 +2193,7 @@ fn module_view(
     inputs: &mut HashMap<String, String>,
     output: &str,
     busy_action: Option<&ui::Action>,
-    action: &mut Option<ui::Action>,
+    action: &mut Option<ui::Invoke>,
 ) {
     match view {
         Some(v) => {
