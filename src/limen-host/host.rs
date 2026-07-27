@@ -493,16 +493,75 @@ fn open_target(target: &str, value: &str) {
     let _ = std::process::Command::new("open").arg(value).spawn();
 }
 
+/// Launch something through the shell, optionally asking for elevation.
+///
+/// `CreateProcess` (what `std::process::Command` uses) cannot elevate: launching
+/// a program whose manifest demands admin — `regedit` — fails outright with
+/// `ERROR_ELEVATION_REQUIRED` (740) and, because these launches are
+/// fire-and-forget, the user sees nothing happen at all. `ShellExecuteW` is the
+/// API that can raise the UAC prompt, so elevation is *requested* up front via
+/// the `runas` verb rather than the launch silently failing.
+#[cfg(target_os = "windows")]
+fn shell_exec(verb: Option<&str>, file: &str, params: Option<&str>) {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    const SW_SHOWNORMAL: i32 = 1;
+    let verb_w = verb.map(wide);
+    let file_w = wide(file);
+    let params_w = params.map(wide);
+    let ptr = |o: &Option<Vec<u16>>| o.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
+    // SAFETY: every pointer is either null or a NUL-terminated UTF-16 buffer
+    // that outlives the call; a null hwnd/directory means "no owner window" and
+    // "inherit the working directory", both valid here.
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            ptr(&verb_w),
+            file_w.as_ptr(),
+            ptr(&params_w),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn open_target(target: &str, value: &str) {
     use limen_proto::NoConsole;
     use std::process::Command;
     match target {
-        // Device Manager (no per-device deep link without extra tooling).
+        // A device instance id opens that device's own properties dialog; with
+        // no id, fall back to the Device Manager console.
         "device_manager" => {
-            let _ = Command::new("cmd").args(["/C", "start", "", "devmgmt.msc"]).no_console().spawn();
+            if value.is_empty() {
+                shell_exec(None, "devmgmt.msc", None);
+            } else {
+                // Empty /MachineName means the local machine.
+                let args = format!(
+                    "devmgr.dll,DeviceProperties_RunDLL /MachineName \"\" /DeviceID \"{value}\""
+                );
+                shell_exec(None, "rundll32.exe", Some(&args));
+            }
         }
         // regedit reopens at its stored LastKey — set it, then launch regedit.
+        // Writing LastKey is HKCU, so it needs no elevation; regedit itself does.
         "registry" => {
             if !value.is_empty() {
                 let _ = Command::new("reg")
@@ -515,7 +574,7 @@ fn open_target(target: &str, value: &str) {
                     .spawn()
                     .and_then(|mut c| c.wait());
             }
-            let _ = Command::new("regedit").spawn();
+            shell_exec(Some("runas"), "regedit.exe", None);
         }
         _ if value.is_empty() => {}
         "url" => {
