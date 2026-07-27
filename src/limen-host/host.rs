@@ -447,6 +447,7 @@ fn host_handler(
         "host.subscribe" => broker.subscribe(params),
         "host.emit" => broker.emit(params),
         "host.about" => Ok(host_about()),
+        "host.open" => host_open(params),
         "host.log" => {
             let msg = params.as_str().map(str::to_string).unwrap_or_else(|| params.to_string());
             logger(&format!("[module] {msg}"));
@@ -456,6 +457,70 @@ fn host_handler(
             METHOD_NOT_FOUND,
             format!("unknown host method {other}"),
         )),
+    }
+}
+
+/// Open something in the OS on a module's behalf (e.g. the devices module's
+/// "Open path" / "Registry" / "Device Manager"). `params`:
+/// `{ "target": "path"|"url"|"registry"|"device_manager", "value": "..." }`.
+/// Best-effort and fire-and-forget — a launch failure is not a module error.
+fn host_open(params: Value) -> std::result::Result<Value, RpcError> {
+    let target = params.get("target").and_then(Value::as_str).unwrap_or("path");
+    let value = params.get("value").and_then(Value::as_str).unwrap_or("");
+    open_target(target, value);
+    Ok(Value::Null)
+}
+
+#[cfg(target_os = "linux")]
+fn open_target(target: &str, value: &str) {
+    // Registry / Device Manager are Windows-only; a path or URL opens in the
+    // desktop's default handler (file manager for a directory).
+    if matches!(target, "registry" | "device_manager") || value.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("xdg-open").arg(value).spawn();
+}
+
+#[cfg(target_os = "macos")]
+fn open_target(target: &str, value: &str) {
+    if matches!(target, "registry" | "device_manager") || value.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("open").arg(value).spawn();
+}
+
+#[cfg(target_os = "windows")]
+fn open_target(target: &str, value: &str) {
+    use limen_proto::NoConsole;
+    use std::process::Command;
+    match target {
+        // Device Manager (no per-device deep link without extra tooling).
+        "device_manager" => {
+            let _ = Command::new("cmd").args(["/C", "start", "", "devmgmt.msc"]).no_console().spawn();
+        }
+        // regedit reopens at its stored LastKey — set it, then launch regedit.
+        "registry" => {
+            if !value.is_empty() {
+                let _ = Command::new("reg")
+                    .args([
+                        "add",
+                        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit",
+                        "/v", "LastKey", "/t", "REG_SZ", "/d", value, "/f",
+                    ])
+                    .no_console()
+                    .spawn()
+                    .and_then(|mut c| c.wait());
+            }
+            let _ = Command::new("regedit").spawn();
+        }
+        _ if value.is_empty() => {}
+        "url" => {
+            let _ = Command::new("cmd").args(["/C", "start", "", value]).no_console().spawn();
+        }
+        // A filesystem path → reveal in Explorer.
+        _ => {
+            let _ = Command::new("explorer").arg(value).spawn();
+        }
     }
 }
 
