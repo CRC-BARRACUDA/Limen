@@ -32,7 +32,9 @@ enum Tab {
     Developer,
     Update,
     /// A device/detail view opened from a row action (keyed into `detail_tabs`).
-    Detail { id: u64 },
+    Detail {
+        id: u64,
+    },
 }
 
 impl Tab {
@@ -185,7 +187,9 @@ pub struct LimenApp {
 impl LimenApp {
     pub fn new(cc: &eframe::CreationContext<'_>, dirs: Vec<std::path::PathBuf>) -> Self {
         ui::apply_theme(&cc.egui_ctx);
-        let animations = limen_core::Config::load().map(|c| c.animations).unwrap_or(true);
+        let animations = limen_core::Config::load()
+            .map(|c| c.animations)
+            .unwrap_or(true);
         ui::set_animations(animations);
         Self {
             worker: Worker::spawn(dirs),
@@ -222,9 +226,13 @@ impl LimenApp {
             dev_mode_on: false,
             dev_limen_path: String::new(),
             dev_modules_path: String::new(),
-            pinned: limen_core::Config::load().map(|c| c.pinned_modules).unwrap_or_default(),
+            pinned: limen_core::Config::load()
+                .map(|c| c.pinned_modules)
+                .unwrap_or_default(),
             ui_scale: {
-                let pct = limen_core::Config::load().map(|c| c.ui_scale_percent).unwrap_or(0);
+                let pct = limen_core::Config::load()
+                    .map(|c| c.ui_scale_percent)
+                    .unwrap_or(0);
                 if pct == 0 { 100.0 } else { pct as f32 }
             },
             animations,
@@ -289,7 +297,10 @@ impl LimenApp {
             .map(|(name, c)| (name, *c))
             .collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        v.into_iter().take(n).map(|(name, _)| name.clone()).collect()
+        v.into_iter()
+            .take(n)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// Persist the current UI scale to settings.json (without clobbering others).
@@ -325,17 +336,18 @@ impl LimenApp {
     /// Recompute which sensitive modules the user has granted (trusted at their
     /// current digest). Cheap enough to run on module load / after a grant.
     fn refresh_trust(&mut self) {
-        let trust = limen_registry::TrustStore::load(&limen_core::paths::home())
-            .unwrap_or_default();
+        let trust =
+            limen_registry::TrustStore::load(&limen_core::paths::home()).unwrap_or_default();
         self.trusted.clear();
         for m in &self.modules {
             if !m.permissions.sensitive() {
                 continue;
             }
             if let Ok(digest) = limen_registry::digest_dir(&m.cwd)
-                && trust.is_trusted(&m.name, &digest) {
-                    self.trusted.insert(m.name.clone());
-                }
+                && trust.is_trusted(&m.name, &digest)
+            {
+                self.trusted.insert(m.name.clone());
+            }
         }
     }
 
@@ -366,8 +378,8 @@ impl LimenApp {
         let Ok(digest) = limen_registry::digest_dir(&spec.cwd) else {
             return false;
         };
-        let mut trust = limen_registry::TrustStore::load(&limen_core::paths::home())
-            .unwrap_or_default();
+        let mut trust =
+            limen_registry::TrustStore::load(&limen_core::paths::home()).unwrap_or_default();
         trust.approve(name, &digest);
         if trust.save(&limen_core::paths::home()).is_ok() {
             self.trusted.insert(name.to_string());
@@ -458,9 +470,12 @@ impl LimenApp {
                                     Err(e) => self.output = format!("invalid view: {e}"),
                                 }
                             }
+                            // A null result is a fire-and-forget acknowledgement
+                            // (e.g. "open path") — nothing to show in the Result pane.
+                            Ok(v) if v.is_null() => self.output.clear(),
                             Ok(v) => {
-                                self.output =
-                                    serde_json::to_string_pretty(&v).unwrap_or_else(|e| e.to_string())
+                                self.output = serde_json::to_string_pretty(&v)
+                                    .unwrap_or_else(|e| e.to_string())
                             }
                             Err(e) => self.output = format!("error: {e}"),
                         }
@@ -550,6 +565,15 @@ impl LimenApp {
                 Some(serde_json::Value::Object(m)) => m,
                 _ => serde_json::Map::new(),
             },
+            // A detail tab has its own view + inputs (e.g. a config form).
+            Some(Tab::Detail { id }) => match self
+                .detail_tabs
+                .get(&id)
+                .and_then(|t| t.view.as_ref().map(|v| ui::collect_params(v, &t.inputs)))
+            {
+                Some(serde_json::Value::Object(m)) => m,
+                _ => serde_json::Map::new(),
+            },
             _ => serde_json::Map::new(),
         };
         for (k, v) in &invoke.args {
@@ -564,7 +588,11 @@ impl LimenApp {
             self.next_detail_id += 1;
             self.detail_tabs.insert(
                 id,
-                DetailTab { title: method.clone(), busy: true, ..Default::default() },
+                DetailTab {
+                    title: method.clone(),
+                    busy: true,
+                    ..Default::default()
+                },
             );
             self.open_tab(Tab::Detail { id });
             self.status = format!("{capability}.{method}");
@@ -626,7 +654,8 @@ impl eframe::App for LimenApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     // App icon (the ◈ brand mark) in place of the wordmark.
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
                     draw_brand(ui.painter(), rect);
                     ui.add_space(12.0);
                     let active = self.active_tab();
@@ -639,9 +668,13 @@ impl eframe::App for LimenApp {
                     // "Update available" pill, next to Modules.
                     if self.update.is_some() {
                         ui.add_space(6.0);
-                        if ui::pill(ui, "Update available", egui::Color32::from_rgb(0xe6, 0x9a, 0x5c))
-                            .on_hover_text("A newer version is available")
-                            .clicked()
+                        if ui::pill(
+                            ui,
+                            "Update available",
+                            egui::Color32::from_rgb(0xe6, 0x9a, 0x5c),
+                        )
+                        .on_hover_text("A newer version is available")
+                        .clicked()
                         {
                             open_tab = Some(Tab::Update);
                         }
@@ -678,7 +711,11 @@ impl eframe::App for LimenApp {
         // chips on the right.
         let frequent = self.frequent_modules(4);
         egui::TopBottomPanel::top("tabstrip")
-            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(0x18, 0x1a, 0x1f)).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(0x18, 0x1a, 0x1f))
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -701,7 +738,8 @@ impl eframe::App for LimenApp {
                         let close_w = 16.0;
                         let gap = 6.0;
                         let galley =
-                            ui.painter().layout_no_wrap(text, font_id.clone(), ui::color::TEXT);
+                            ui.painter()
+                                .layout_no_wrap(text, font_id.clone(), ui::color::TEXT);
                         let w = pad + galley.size().x + gap + close_w + pad;
                         let (rect, resp) =
                             ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
@@ -730,7 +768,12 @@ impl eframe::App for LimenApp {
                         };
                         ui.painter().rect_filled(
                             rect,
-                            egui::Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 },
+                            egui::Rounding {
+                                nw: 5.0,
+                                ne: 5.0,
+                                sw: 0.0,
+                                se: 0.0,
+                            },
                             fill,
                         );
                         if active_t > 0.0 {
@@ -752,11 +795,10 @@ impl eframe::App for LimenApp {
                         // Close affordance — only when active or hovered.
                         let mut close_clicked = false;
                         if selected || hovered {
-                            let cc = egui::pos2(rect.right() - pad - close_w / 2.0, rect.center().y);
-                            let crect = egui::Rect::from_center_size(
-                                cc,
-                                egui::vec2(close_w, close_w),
-                            );
+                            let cc =
+                                egui::pos2(rect.right() - pad - close_w / 2.0, rect.center().y);
+                            let crect =
+                                egui::Rect::from_center_size(cc, egui::vec2(close_w, close_w));
                             let cresp =
                                 ui.interact(crect, resp.id.with("close"), egui::Sense::click());
                             if cresp.hovered() {
@@ -771,7 +813,11 @@ impl eframe::App for LimenApp {
                                 egui::Align2::CENTER_CENTER,
                                 "×",
                                 egui::FontId::proportional(15.0),
-                                if cresp.hovered() { ui::color::TEXT } else { ui::color::TEXT_MUTED },
+                                if cresp.hovered() {
+                                    ui::color::TEXT
+                                } else {
+                                    ui::color::TEXT_MUTED
+                                },
                             );
                             if cresp.clicked() {
                                 close_idx = Some(i);
@@ -843,13 +889,39 @@ impl eframe::App for LimenApp {
         let license_reveal = self.license_revealed_at.unwrap_or(now_t);
         {
             let LimenApp {
-                modules, git_installed, git_meta, available_updates, pinned, view,
-                view_error, inputs, output, busy_action, fatal, search, filter, remote,
-                remote_error, remote_loading, installing, installing_runtime, dev_tab, logs,
-                log_autoscroll, ui_scale,
-                animations, dev_mode_on, dev_limen_path, dev_modules_path, removing,
-                modules_revealed_at, shown_filter, remote_revealed_at,
-                developer_revealed_at, shown_dev_tab, detail_tabs,
+                modules,
+                git_installed,
+                git_meta,
+                available_updates,
+                pinned,
+                view,
+                view_error,
+                inputs,
+                output,
+                busy_action,
+                fatal,
+                search,
+                filter,
+                remote,
+                remote_error,
+                remote_loading,
+                installing,
+                installing_runtime,
+                dev_tab,
+                logs,
+                log_autoscroll,
+                ui_scale,
+                animations,
+                dev_mode_on,
+                dev_limen_path,
+                dev_modules_path,
+                removing,
+                modules_revealed_at,
+                shown_filter,
+                remote_revealed_at,
+                developer_revealed_at,
+                shown_dev_tab,
+                detail_tabs,
                 ..
             } = self;
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -863,7 +935,9 @@ impl eframe::App for LimenApp {
                     None => {
                         ui.add_space(24.0);
                         ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new("No open tabs — use the buttons above.").weak());
+                            ui.label(
+                                egui::RichText::new("No open tabs — use the buttons above.").weak(),
+                            );
                         });
                     }
                     Some(Tab::About) => {
@@ -873,27 +947,61 @@ impl eframe::App for LimenApp {
                     }
                     Some(Tab::License) => license_view(ui, license_reveal),
                     Some(Tab::Modules) => modules_page(
-                        ui, modules, git_installed, git_meta, available_updates,
-                        pinned, remote, *remote_loading, remote_error, installing, installing_runtime,
-                        filter, search,
-                        &mut open_module, &mut remove_module, &mut add_module, &mut update_module,
-                        &mut toggle_pin, &mut reload, modules_revealed_at, shown_filter,
-                        *remote_revealed_at, removing,
+                        ui,
+                        modules,
+                        git_installed,
+                        git_meta,
+                        available_updates,
+                        pinned,
+                        remote,
+                        *remote_loading,
+                        remote_error,
+                        installing,
+                        installing_runtime,
+                        filter,
+                        search,
+                        &mut open_module,
+                        &mut remove_module,
+                        &mut add_module,
+                        &mut update_module,
+                        &mut toggle_pin,
+                        &mut reload,
+                        modules_revealed_at,
+                        shown_filter,
+                        *remote_revealed_at,
+                        removing,
                     ),
-                    Some(Tab::Module(name)) => {
-                        module_view(ui, &name, view, view_error, inputs, output, busy_action.as_ref(), &mut action)
-                    }
-                    Some(Tab::Detail { id }) => {
-                        detail_view(ui, id, detail_tabs, &mut action)
-                    }
+                    Some(Tab::Module(name)) => module_view(
+                        ui,
+                        &name,
+                        view,
+                        view_error,
+                        inputs,
+                        output,
+                        busy_action.as_ref(),
+                        &mut action,
+                    ),
+                    Some(Tab::Detail { id }) => detail_view(ui, id, detail_tabs, &mut action),
                     Some(Tab::Settings) => settings_view(
-                        ui, ui_scale, &mut scale_changed, animations, &mut anim_changed,
+                        ui,
+                        ui_scale,
+                        &mut scale_changed,
+                        animations,
+                        &mut anim_changed,
                         settings_reveal,
                     ),
                     Some(Tab::Developer) => developer_view(
-                        ui, dev_tab, inputs, logs, log_autoscroll,
-                        dev_mode_on, dev_limen_path, dev_modules_path, &mut dev_applied,
-                        developer_revealed_at, shown_dev_tab,
+                        ui,
+                        dev_tab,
+                        inputs,
+                        logs,
+                        log_autoscroll,
+                        dev_mode_on,
+                        dev_limen_path,
+                        dev_modules_path,
+                        &mut dev_applied,
+                        developer_revealed_at,
+                        shown_dev_tab,
                     ),
                     Some(Tab::Update) => {
                         update_view(ui, update_info.as_ref(), updating, &mut do_update)
@@ -902,11 +1010,10 @@ impl eframe::App for LimenApp {
             });
         }
 
-        if do_update
-            && let Some(info) = self.update.clone() {
-                self.updating = true;
-                self.worker.send(Command::ApplyUpdate(info));
-            }
+        if do_update && let Some(info) = self.update.clone() {
+            self.updating = true;
+            self.worker.send(Command::ApplyUpdate(info));
+        }
 
         // Apply tab intents.
         if let Some(i) = switch_to {
@@ -982,7 +1089,11 @@ impl eframe::App for LimenApp {
         }
         if let Some(name) = update_module {
             // Close its tab first — its loaded UI is about to be replaced.
-            if let Some(i) = self.tabs.iter().position(|t| *t == Tab::Module(name.clone())) {
+            if let Some(i) = self
+                .tabs
+                .iter()
+                .position(|t| *t == Tab::Module(name.clone()))
+            {
                 self.close_tab(i);
             }
             self.busy = true;
@@ -1019,7 +1130,10 @@ impl eframe::App for LimenApp {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.set_max_width(420.0);
-                    let name = module.as_ref().map(|m| m.name.as_str()).unwrap_or("This module");
+                    let name = module
+                        .as_ref()
+                        .map(|m| m.name.as_str())
+                        .unwrap_or("This module");
                     ui.label(
                         egui::RichText::new(format!(
                             "“{name}” wants to run “{}”, which needs elevated permissions.",
@@ -1104,8 +1218,11 @@ fn update_view(
     };
 
     ui.label(
-        egui::RichText::new(format!("A new version is available: v{} -> v{}", info.current, info.latest))
-            .size(15.0),
+        egui::RichText::new(format!(
+            "A new version is available: v{} -> v{}",
+            info.current, info.latest
+        ))
+        .size(15.0),
     );
     if !info.url.is_empty() {
         ui.add_space(2.0);
@@ -1113,15 +1230,19 @@ fn update_view(
     }
     if !info.notes.trim().is_empty() {
         ui.add_space(8.0);
-        egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-            ui::markdown(ui, info.notes.trim());
-        });
+        egui::ScrollArea::vertical()
+            .max_height(240.0)
+            .show(ui, |ui| {
+                ui::markdown(ui, info.notes.trim());
+            });
     }
 
     ui.add_space(14.0);
     ui.horizontal(|ui| {
         let clicked = ui
-            .add_enabled_ui(!updating, |ui| ui::primary_button(ui, "Update", egui::Vec2::ZERO))
+            .add_enabled_ui(!updating, |ui| {
+                ui::primary_button(ui, "Update", egui::Vec2::ZERO)
+            })
             .inner
             .clicked();
         if clicked {
@@ -1222,7 +1343,12 @@ fn dev_mode_view(
         .spacing([10.0, 8.0])
         .show(ui, |ui| {
             ui.label("Limen update path");
-            ui::text_field(ui, dev_limen_path, "dir of Limen-<ver>-<platform>.tar.gz", 320.0);
+            ui::text_field(
+                ui,
+                dev_limen_path,
+                "dir of Limen-<ver>-<platform>.tar.gz",
+                320.0,
+            );
             ui.end_row();
             ui.label("Module update path");
             ui::text_field(ui, dev_modules_path, "dir of <name>/ module folders", 320.0);
@@ -1230,7 +1356,11 @@ fn dev_mode_view(
         });
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        let label = if *dev_mode_on { "Update dev mode" } else { "Set dev mode" };
+        let label = if *dev_mode_on {
+            "Update dev mode"
+        } else {
+            "Set dev mode"
+        };
         if ui::primary_button(ui, label, egui::Vec2::ZERO).clicked() {
             let as_dir = |s: &str| {
                 let t = s.trim();
@@ -1298,9 +1428,13 @@ fn developer_view(
     let animate = ui::animations_enabled();
 
     reveal_item(ui, 0, reveal_at, now, animate, |ui| match dev_tab {
-        DevTab::DevMode => {
-            dev_mode_view(ui, dev_mode_on, dev_limen_path, dev_modules_path, dev_applied)
-        }
+        DevTab::DevMode => dev_mode_view(
+            ui,
+            dev_mode_on,
+            dev_limen_path,
+            dev_modules_path,
+            dev_applied,
+        ),
         DevTab::UiKit => ui::render_demo_ui(ui, inputs),
         DevTab::Console => dev_console(ui, logs, autoscroll),
     });
@@ -1378,7 +1512,12 @@ fn modules_page(
     ui.add_space(10.0);
 
     // One universal search across installed (local) and org (remote) modules.
-    ui::text_field(ui, search, "Search modules — local and in the org…", f32::INFINITY);
+    ui::text_field(
+        ui,
+        search,
+        "Search modules — local and in the org…",
+        f32::INFINITY,
+    );
     ui.add_space(8.0);
 
     // Installed / Available filter.
@@ -1422,7 +1561,12 @@ fn modules_page(
         // Installed modules — pinned first (in pin order), then the rest in their
         // existing order (stable sort keeps non-pinned relative order).
         let mut ordered: Vec<&ModuleSpec> = modules.iter().collect();
-        ordered.sort_by_key(|m| pinned.iter().position(|n| n == &m.name).unwrap_or(usize::MAX));
+        ordered.sort_by_key(|m| {
+            pinned
+                .iter()
+                .position(|n| n == &m.name)
+                .unwrap_or(usize::MAX)
+        });
         for m in ordered {
             if *filter == ModuleFilter::Available || !module_matches(m, &query) {
                 continue;
@@ -1436,9 +1580,17 @@ fn modules_page(
             let id = egui::Id::new(("modcard", m.name.as_str()));
             reveal_card(ui, id, shown, reveal_at, now, animate, rt, |ui| {
                 module_card(
-                    ui, m, git_installed.contains(&m.name), git_meta.get(&m.name),
+                    ui,
+                    m,
+                    git_installed.contains(&m.name),
+                    git_meta.get(&m.name),
                     available_updates.get(&m.name).map(String::as_str),
-                    is_pinned, installing, installing_runtime, open, remove, update,
+                    is_pinned,
+                    installing,
+                    installing_runtime,
+                    open,
+                    remove,
+                    update,
                     toggle_pin,
                 );
             });
@@ -1485,14 +1637,24 @@ fn modules_page(
 fn module_matches(m: &ModuleSpec, query: &str) -> bool {
     query.is_empty()
         || m.name.to_lowercase().contains(query)
-        || m.description.as_deref().unwrap_or("").to_lowercase().contains(query)
-        || m.capabilities.iter().any(|c| c.to_lowercase().contains(query))
+        || m.description
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(query)
+        || m.capabilities
+            .iter()
+            .any(|c| c.to_lowercase().contains(query))
 }
 
 fn remote_matches(r: &RemoteModule, query: &str) -> bool {
     query.is_empty()
         || r.name.to_lowercase().contains(query)
-        || r.description.as_deref().unwrap_or("").to_lowercase().contains(query)
+        || r.description
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(query)
 }
 
 /// A single installed-module card, in its own rounded box. `from_git` shows the
@@ -1632,9 +1794,11 @@ fn module_card(
                         if m.permissions.may_require_admin {
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new("Some methods may require elevated permissions.")
-                                    .small()
-                                    .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
+                                egui::RichText::new(
+                                    "Some methods may require elevated permissions.",
+                                )
+                                .small()
+                                .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
                             );
                         }
                         if !m.authors.is_empty() {
@@ -1666,6 +1830,30 @@ fn module_card(
                                     );
                                 }
                             }
+                        }
+                        // Hard dependencies (capabilities it needs) and optional
+                        // integrations (extra features when a provider is loaded).
+                        if !m.requires.is_empty() {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Requires: {}",
+                                    m.requires.keys().cloned().collect::<Vec<_>>().join(", ")
+                                ))
+                                .small()
+                                .color(ui::color::TEXT_MUTED),
+                            );
+                        }
+                        if !m.optional.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Optional: {}",
+                                    m.optional.keys().cloned().collect::<Vec<_>>().join(", ")
+                                ))
+                                .small()
+                                .color(ui::color::ACCENT),
+                            );
                         }
                     },
                 );
@@ -1736,11 +1924,12 @@ fn module_card(
                         // GitHub only for git-installed modules.
                         if from_git
                             && let Some(repo) = &m.repo
-                                && ui::outline_button(ui, "GitHub ↗", bw).clicked() {
-                                    ui.output_mut(|o| {
-                                        o.open_url = Some(egui::OpenUrl::new_tab(repo_url(repo)));
-                                    });
-                                }
+                            && ui::outline_button(ui, "GitHub ↗", bw).clicked()
+                        {
+                            ui.output_mut(|o| {
+                                o.open_url = Some(egui::OpenUrl::new_tab(repo_url(repo)));
+                            });
+                        }
                     },
                 );
             });
@@ -1813,7 +2002,11 @@ fn available_card(
                             );
                         }
                         ui.add_space(6.0);
-                        ui.label(egui::RichText::new(&r.repo).small().color(ui::color::TEXT_MUTED));
+                        ui.label(
+                            egui::RichText::new(&r.repo)
+                                .small()
+                                .color(ui::color::TEXT_MUTED),
+                        );
                     },
                 );
 
@@ -1874,7 +2067,11 @@ fn badge(ui: &mut egui::Ui, text: &str) {
         .rounding(egui::Rounding::same(4.0))
         .inner_margin(egui::Margin::symmetric(6.0, 2.0))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(11.0).color(ui::color::TEXT_MUTED));
+            ui.label(
+                egui::RichText::new(text)
+                    .size(11.0)
+                    .color(ui::color::TEXT_MUTED),
+            );
         });
 }
 
@@ -1910,67 +2107,69 @@ fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
     let animate = ui::animations_enabled();
 
     // Scroll so nothing (footer, button) is clipped on short windows / high scale.
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        // Push the block toward the vertical middle.
-        let top = (ui.available_height() * 0.10).clamp(20.0, 120.0);
-        ui.add_space(top);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Push the block toward the vertical middle.
+            let top = (ui.available_height() * 0.10).clamp(20.0, 120.0);
+            ui.add_space(top);
 
-        ui.vertical_centered(|ui| {
-            ui.set_max_width(480.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(480.0);
 
-            reveal_item(ui, 0, reveal_at, now, animate, |ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(92.0, 92.0), egui::Sense::hover());
-                draw_brand(ui.painter(), rect);
-            });
+                reveal_item(ui, 0, reveal_at, now, animate, |ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(92.0, 92.0), egui::Sense::hover());
+                    draw_brand(ui.painter(), rect);
+                });
 
-            ui.add_space(14.0);
-            reveal_item(ui, 1, reveal_at, now, animate, |ui| {
-                ui.label(egui::RichText::new("LIMEN").size(30.0).strong());
-            });
-            reveal_item(ui, 2, reveal_at, now, animate, |ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "v{} · {} branch",
-                        env!("CARGO_PKG_VERSION"),
-                        env!("LIMEN_GIT_BRANCH"),
-                    ))
-                    .monospace()
-                    .color(muted),
-                );
-                ui.label(
-                    egui::RichText::new(format!("commit {}", env!("LIMEN_GIT_COMMIT")))
-                        .monospace()
-                        .small()
-                        .color(muted),
-                );
-            });
-
-            ui.add_space(18.0);
-            reveal_item(ui, 3, reveal_at, now, animate, |ui| {
-                ui.label(egui::RichText::new(TAGLINE).size(15.0));
-            });
-
-            ui.add_space(18.0);
-            reveal_item(ui, 4, reveal_at, now, animate, |ui| {
-                ui.separator();
                 ui.add_space(14.0);
-                if ui::outline_button(ui, "View license", egui::Vec2::ZERO).clicked() {
-                    license_clicked = true;
-                }
-            });
-
-            ui.add_space(16.0);
-            reveal_item(ui, 5, reveal_at, now, animate, |ui| {
-                ui.label(
-                    egui::RichText::new("Powered by CRC BARRACUDA")
-                        .small()
+                reveal_item(ui, 1, reveal_at, now, animate, |ui| {
+                    ui.label(egui::RichText::new("LIMEN").size(30.0).strong());
+                });
+                reveal_item(ui, 2, reveal_at, now, animate, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "v{} · {} branch",
+                            env!("CARGO_PKG_VERSION"),
+                            env!("LIMEN_GIT_BRANCH"),
+                        ))
+                        .monospace()
                         .color(muted),
-                );
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("commit {}", env!("LIMEN_GIT_COMMIT")))
+                            .monospace()
+                            .small()
+                            .color(muted),
+                    );
+                });
+
+                ui.add_space(18.0);
+                reveal_item(ui, 3, reveal_at, now, animate, |ui| {
+                    ui.label(egui::RichText::new(TAGLINE).size(15.0));
+                });
+
+                ui.add_space(18.0);
+                reveal_item(ui, 4, reveal_at, now, animate, |ui| {
+                    ui.separator();
+                    ui.add_space(14.0);
+                    if ui::outline_button(ui, "View license", egui::Vec2::ZERO).clicked() {
+                        license_clicked = true;
+                    }
+                });
+
+                ui.add_space(16.0);
+                reveal_item(ui, 5, reveal_at, now, animate, |ui| {
+                    ui.label(
+                        egui::RichText::new("Powered by CRC BARRACUDA")
+                            .small()
+                            .color(muted),
+                    );
+                });
+                ui.add_space(12.0);
             });
-            ui.add_space(12.0);
         });
-    });
 
     license_clicked
 }
@@ -2090,11 +2289,7 @@ fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
 fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    egui::Color32::from_rgb(
-        m(a.r(), b.r()),
-        m(a.g(), b.g()),
-        m(a.b(), b.b()),
-    )
+    egui::Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
 }
 
 /// A rounded rectangle as a colored mesh, filled with a vertical `top`→`bottom`
@@ -2113,10 +2308,26 @@ fn rounded_rect_mesh(
     let radius = radius.min(rect.width().min(rect.height()) / 2.0);
     // Arc centers with their start/end angles, walked clockwise from top-left.
     let corners = [
-        (egui::pos2(rect.left() + radius, rect.top() + radius), 180.0f32, 270.0f32),
-        (egui::pos2(rect.right() - radius, rect.top() + radius), 270.0, 360.0),
-        (egui::pos2(rect.right() - radius, rect.bottom() - radius), 0.0, 90.0),
-        (egui::pos2(rect.left() + radius, rect.bottom() - radius), 90.0, 180.0),
+        (
+            egui::pos2(rect.left() + radius, rect.top() + radius),
+            180.0f32,
+            270.0f32,
+        ),
+        (
+            egui::pos2(rect.right() - radius, rect.top() + radius),
+            270.0,
+            360.0,
+        ),
+        (
+            egui::pos2(rect.right() - radius, rect.bottom() - radius),
+            0.0,
+            90.0,
+        ),
+        (
+            egui::pos2(rect.left() + radius, rect.bottom() - radius),
+            90.0,
+            180.0,
+        ),
     ];
     let mut outline = Vec::with_capacity(4 * (SEGMENTS + 1));
     for (center, from, to) in corners {
@@ -2155,7 +2366,11 @@ fn detail_view(
         ui.label("This detail view is no longer available.");
         return;
     };
-    let heading = if tab.title.is_empty() { "Details" } else { tab.title.as_str() };
+    let heading = if tab.title.is_empty() {
+        "Details"
+    } else {
+        tab.title.as_str()
+    };
     if let Some(err) = &tab.error {
         ui.heading(heading);
         ui.separator();
@@ -2164,7 +2379,11 @@ fn detail_view(
     }
     match &tab.view {
         Some(v) => {
-            let heading = if v.title.is_empty() { heading } else { v.title.as_str() };
+            let heading = if v.title.is_empty() {
+                heading
+            } else {
+                v.title.as_str()
+            };
             ui.heading(heading);
             ui.separator();
             egui::ScrollArea::vertical()

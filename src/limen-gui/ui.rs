@@ -76,7 +76,11 @@ pub fn smoothstep(t: f32) -> f32 {
 
 /// Channel-wise linear interpolation between two opaque colours.
 pub fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
-    let c = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    let c = |x: u8, y: u8| {
+        (x as f32 + (y as f32 - x as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     egui::Color32::from_rgb(c(a.r(), b.r()), c(a.g(), b.g()), c(a.b(), b.b()))
 }
 
@@ -109,7 +113,12 @@ pub struct Interact {
 pub fn interact(ui: &egui::Ui, resp: &egui::Response) -> Interact {
     Interact {
         hover: anim_bool(ui, resp.id.with("hover"), resp.hovered(), 0.16),
-        press: anim_bool(ui, resp.id.with("press"), resp.is_pointer_button_down_on(), 0.06),
+        press: anim_bool(
+            ui,
+            resp.id.with("press"),
+            resp.is_pointer_button_down_on(),
+            0.06,
+        ),
     }
 }
 
@@ -119,7 +128,14 @@ pub fn interact(ui: &egui::Ui, resp: &egui::Response) -> Interact {
 /// `start_at`, evaluated at `now`, with `stagger`/`dur` seconds. Requests
 /// repaints until it settles; returns 1 instantly when animations are off. Apply
 /// it however you like (opacity, slide, …).
-pub fn reveal_t(ui: &egui::Ui, index: usize, start_at: f64, now: f64, stagger: f64, dur: f64) -> f32 {
+pub fn reveal_t(
+    ui: &egui::Ui,
+    index: usize,
+    start_at: f64,
+    now: f64,
+    stagger: f64,
+    dur: f64,
+) -> f32 {
     if !animations_enabled() {
         return 1.0;
     }
@@ -174,12 +190,146 @@ pub fn text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) 
     resp
 }
 
+/// An animated dropdown — the module `select` widget. A framed field whose
+/// border eases grey→`ACCENT` on hover/open, with a chevron that flips as it
+/// opens, over a popup whose options highlight on hover and accent the current
+/// value. Replaces egui's default `ComboBox` so selects animate like the rest.
+pub fn dropdown(
+    ui: &mut egui::Ui,
+    id_source: impl std::hash::Hash,
+    value: &mut String,
+    options: &[String],
+) -> egui::Response {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let measure = |s: &str| {
+        ui.fonts(|f| {
+            f.layout_no_wrap(s.to_owned(), font.clone(), color::TEXT)
+                .size()
+                .x
+        })
+    };
+    let text_w = options
+        .iter()
+        .map(|o| measure(o))
+        .fold(measure(value), f32::max);
+    let pad = egui::vec2(10.0, 7.0);
+    let chevron = 16.0;
+    let size = egui::vec2(text_w + pad.x * 2.0 + chevron, font.size + pad.y * 2.0);
+    let (rect, resp) = ui.allocate_at_least(size, egui::Sense::click());
+
+    let popup_id = ui.make_persistent_id(id_source).with("dd_popup");
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+    }
+    let open = ui.memory(|m| m.is_popup_open(popup_id));
+    let a = interact(ui, &resp);
+    let open_t = anim_bool(ui, resp.id.with("open"), open, 0.14);
+    let border_t = open_t.max(a.hover * 0.6);
+
+    {
+        let rounding = egui::Rounding::same(5.0);
+        let painter = ui.painter();
+        painter.rect_filled(
+            rect,
+            rounding,
+            lerp_color(color::BG_ELEVATED, color::BG_WIDGET, a.hover * 0.4),
+        );
+        painter.rect_stroke(
+            rect,
+            rounding,
+            egui::Stroke::new(1.5_f32, lerp_color(color::BORDER, color::ACCENT, border_t)),
+        );
+        let galley = painter.layout_no_wrap(value.clone(), font.clone(), color::TEXT);
+        painter.galley(
+            egui::pos2(rect.left() + pad.x, rect.center().y - galley.size().y * 0.5),
+            galley,
+            color::TEXT,
+        );
+        // Chevron: points down when closed, eases to point up as it opens.
+        let cx = rect.right() - pad.x - chevron * 0.5;
+        let cy = rect.center().y;
+        let half = 4.0;
+        let dir = 1.0 - 2.0 * open_t; // +1 down → -1 up
+        let stroke = egui::Stroke::new(
+            1.6_f32,
+            lerp_color(color::TEXT_MUTED, color::ACCENT, border_t),
+        );
+        let l = egui::pos2(cx - half, cy - half * 0.5 * dir);
+        let m = egui::pos2(cx, cy + half * 0.5 * dir);
+        let r = egui::pos2(cx + half, cy - half * 0.5 * dir);
+        painter.line_segment([l, m], stroke);
+        painter.line_segment([m, r], stroke);
+    }
+
+    egui::popup_below_widget(
+        ui,
+        popup_id,
+        &resp,
+        egui::PopupCloseBehavior::CloseOnClickOutside,
+        |ui: &mut egui::Ui| {
+            ui.set_min_width(rect.width());
+            // The menu animates in as it opens: each option fades in, staggered,
+            // driven by the same eased open factor.
+            let ot = smoothstep(open_t);
+            let n = options.len().max(1) as f32;
+            for (i, opt) in options.iter().enumerate() {
+                let t = ((ot * 1.5) - i as f32 * (0.6 / n)).clamp(0.0, 1.0);
+                let selected = value.as_str() == opt.as_str();
+                let picked = ui
+                    .scope(|ui| {
+                        ui.set_opacity(t);
+                        dropdown_option(ui, opt, selected)
+                    })
+                    .inner;
+                if picked.clicked() {
+                    *value = opt.clone();
+                    ui.memory_mut(|m| m.close_popup());
+                }
+            }
+        },
+    );
+    resp
+}
+
+/// One option row inside a [`dropdown`] popup: highlights on hover, accents the
+/// current value.
+fn dropdown_option(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, color::TEXT);
+    let gs = galley.size();
+    let pad = egui::vec2(8.0, 5.0);
+    let w = ui.available_width().max(gs.x + pad.x * 2.0);
+    let (rect, resp) =
+        ui.allocate_at_least(egui::vec2(w, gs.y + pad.y * 2.0), egui::Sense::click());
+    let a = interact(ui, &resp);
+    let painter = ui.painter();
+    let rounding = egui::Rounding::same(4.0);
+    // The current value is marked with a steady blue fill and does not react to
+    // hover; every other option highlights on hover.
+    if selected {
+        painter.rect_filled(rect, rounding, with_alpha(color::ACCENT, 0.30));
+    } else if a.hover > 0.0 {
+        painter.rect_filled(rect, rounding, with_alpha(color::BG_HOVER, a.hover));
+    }
+    let col = color::TEXT;
+    painter.galley(
+        egui::pos2(rect.left() + pad.x, rect.center().y - gs.y * 0.5),
+        galley,
+        col,
+    );
+    resp
+}
+
 /// An accent-filled primary button: brightens + grows on hover, dips on press.
 /// `min` is a minimum size (`Vec2::ZERO` to size to the text; a fixed width for a
 /// button column).
 pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color::ON_ACCENT);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, color::ON_ACCENT);
     let padding = egui::vec2(14.0, 7.0);
     let size = (galley.size() + padding * 2.0).max(min);
     let (rect, resp) = ui.allocate_at_least(size, egui::Sense::click());
@@ -194,7 +344,11 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
 
     let painter = ui.painter();
     painter.rect_filled(draw, egui::Rounding::same(6.0), fill);
-    painter.galley(draw.center() - galley.size() * 0.5, galley, color::ON_ACCENT);
+    painter.galley(
+        draw.center() - galley.size() * 0.5,
+        galley,
+        color::ON_ACCENT,
+    );
     resp
 }
 
@@ -202,8 +356,12 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
 /// a minimum size (e.g. a fixed column width); the button grows to fit its text.
 pub fn outline_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color::TEXT);
-    let padding = egui::vec2(12.0, 6.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, color::TEXT);
+    // Vertical padding matches `primary_button` so the two never differ in height
+    // when placed side by side.
+    let padding = egui::vec2(12.0, 7.0);
     let size = (galley.size() + padding * 2.0).max(min);
     let (rect, resp) = ui.allocate_at_least(size, egui::Sense::click());
 
@@ -213,7 +371,11 @@ pub fn outline_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
     let painter = ui.painter();
     let base = lerp_color(color::BG_WIDGET, color::BG_HOVER, a.hover);
     painter.rect_filled(draw, rounding, lerp_color(base, color::BG, 0.35 * a.press));
-    painter.rect_stroke(draw, rounding, egui::Stroke::new(1.5_f32, with_alpha(color::ACCENT, a.hover)));
+    painter.rect_stroke(
+        draw,
+        rounding,
+        egui::Stroke::new(1.5_f32, with_alpha(color::ACCENT, a.hover)),
+    );
     painter.galley(draw.center() - galley.size() * 0.5, galley, color::TEXT);
     resp
 }
@@ -223,7 +385,9 @@ pub fn outline_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
 /// like "Update available".
 pub fn pill(ui: &mut egui::Ui, text: &str, fill: egui::Color32) -> egui::Response {
     let font = egui::TextStyle::Small.resolve(ui.style());
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color::ON_ACCENT);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, color::ON_ACCENT);
     let padding = egui::vec2(10.0, 4.0);
     let (rect, resp) = ui.allocate_at_least(galley.size() + padding * 2.0, egui::Sense::click());
 
@@ -234,7 +398,11 @@ pub fn pill(ui: &mut egui::Ui, text: &str, fill: egui::Color32) -> egui::Respons
 
     let painter = ui.painter();
     painter.rect_filled(draw, egui::Rounding::same(draw.height() * 0.5), c);
-    painter.galley(draw.center() - galley.size() * 0.5, galley, color::ON_ACCENT);
+    painter.galley(
+        draw.center() - galley.size() * 0.5,
+        galley,
+        color::ON_ACCENT,
+    );
     resp
 }
 
@@ -271,7 +439,9 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
 /// the highlight then slides from chip to chip instead of snapping.
 pub fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color::TEXT);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, color::TEXT);
     let padding = egui::vec2(12.0, 5.0);
     let (rect, resp) = ui.allocate_at_least(galley.size() + padding * 2.0, egui::Sense::click());
 
@@ -282,8 +452,16 @@ pub fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     let painter = ui.painter();
     // Use BG_WIDGET (not BG_ELEVATED, which matches the title-bar fill and would
     // make the hover invisible there) so the chip lifts on any background.
-    painter.rect_filled(rect, rounding, with_alpha(color::BG_WIDGET, a.hover.max(sel * 0.6)));
-    painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0_f32, with_alpha(color::ACCENT, sel)));
+    painter.rect_filled(
+        rect,
+        rounding,
+        with_alpha(color::BG_WIDGET, a.hover.max(sel * 0.6)),
+    );
+    painter.rect_stroke(
+        rect,
+        rounding,
+        egui::Stroke::new(1.0_f32, with_alpha(color::ACCENT, sel)),
+    );
     painter.galley(
         rect.center() - galley.size() * 0.5,
         galley,
@@ -299,11 +477,23 @@ pub fn apply_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
 
     style.text_styles = [
-        (TextStyle::Heading, FontId::new(18.0, FontFamily::Proportional)),
+        (
+            TextStyle::Heading,
+            FontId::new(18.0, FontFamily::Proportional),
+        ),
         (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
-        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+        (
+            TextStyle::Button,
+            FontId::new(14.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Monospace,
+            FontId::new(13.0, FontFamily::Monospace),
+        ),
+        (
+            TextStyle::Small,
+            FontId::new(11.0, FontFamily::Proportional),
+        ),
     ]
     .into();
 
@@ -414,11 +604,13 @@ pub struct Invoke {
     pub open_in_tab: bool,
 }
 
-impl Invoke {
-    /// A plain button click — no extra args, renders in place.
-    fn button(action: Action) -> Self {
-        Invoke { action, args: serde_json::Map::new(), open_in_tab: false }
-    }
+/// One bar in a [`Widget::Chart`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChartBar {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub value: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -484,6 +676,12 @@ pub enum Widget {
         /// Whether the button is clickable (default true).
         #[serde(default = "default_true")]
         enabled: bool,
+        /// Extra params merged into the call (e.g. a device id/path).
+        #[serde(default)]
+        args: serde_json::Map<String, Value>,
+        /// Open the result view in a new tab instead of replacing this one.
+        #[serde(default)]
+        open_in_tab: bool,
     },
     Separator,
     Row {
@@ -505,6 +703,13 @@ pub enum Widget {
         /// What double-clicking a row does.
         #[serde(default)]
         on_activate: Option<RowAction>,
+    },
+    /// A horizontal bar chart (a value per labelled bar).
+    Chart {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        data: Vec<ChartBar>,
     },
 }
 
@@ -544,7 +749,14 @@ fn render_widget(
         Widget::Label { text, style } => {
             ui.label(styled(text, *style));
         }
-        Widget::Text { id, label, placeholder, multiline, default, password } => {
+        Widget::Text {
+            id,
+            label,
+            placeholder,
+            multiline,
+            default,
+            password,
+        } => {
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
@@ -568,7 +780,12 @@ fn render_widget(
                 text_field(ui, value, placeholder.as_str(), f32::INFINITY);
             }
         }
-        Widget::Select { id, label, options, default } => {
+        Widget::Select {
+            id,
+            label,
+            options,
+            default,
+        } => {
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
@@ -578,15 +795,16 @@ fn render_widget(
                 default.clone()
             };
             let value = inputs.entry(id.clone()).or_insert(initial);
-            egui::ComboBox::from_id_source(id)
-                .selected_text(value.clone())
-                .show_ui(ui, |ui| {
-                    for opt in options {
-                        ui.selectable_value(value, opt.clone(), opt);
-                    }
-                });
+            dropdown(ui, id.clone(), value, options);
         }
-        Widget::Button { text, action, style, enabled } => {
+        Widget::Button {
+            text,
+            action,
+            style,
+            enabled,
+            args,
+            open_in_tab,
+        } => {
             let running = busy == Some(action);
             ui.horizontal(|ui| {
                 // Module buttons use the shared animated widgets, so a module's UI
@@ -598,7 +816,11 @@ fn render_widget(
                     })
                     .inner;
                 if resp.clicked() {
-                    *clicked = Some(Invoke::button(action.clone()));
+                    *clicked = Some(Invoke {
+                        action: action.clone(),
+                        args: args.clone(),
+                        open_in_tab: *open_in_tab,
+                    });
                 }
                 if running {
                     ui.add_space(6.0);
@@ -610,18 +832,115 @@ fn render_widget(
             ui.separator();
         }
         Widget::Row { children } => {
-            ui.horizontal(|ui| render_widgets(ui, children, inputs, busy, clicked));
+            // Top-align so a row of mixed-height widgets (e.g. buttons) lines up
+            // by their tops instead of being vertically centered.
+            ui.horizontal_top(|ui| render_widgets(ui, children, inputs, busy, clicked));
         }
-        Widget::Table { columns, rows, row_ids, menu, on_activate } => {
-            render_table(ui, columns, rows, row_ids, menu, on_activate.as_ref(), clicked)
-        }
+        Widget::Table {
+            columns,
+            rows,
+            row_ids,
+            menu,
+            on_activate,
+        } => render_table(
+            ui,
+            columns,
+            rows,
+            row_ids,
+            menu,
+            on_activate.as_ref(),
+            clicked,
+        ),
+        Widget::Chart { title, data } => render_chart(ui, title, data),
     }
 }
 
-/// Render a [`Widget::Table`] as a striped grid inside a scroll area. Plain data
-/// tables draw as before; when the module attaches a `menu` or `on_activate`,
-/// each row becomes interactive (right-click menu + double-click) and emits an
-/// [`Invoke`] carrying that row's id.
+/// Render a [`Widget::Chart`] as labelled horizontal bars scaled to the largest
+/// value, with the value shown at the end of each row.
+fn render_chart(ui: &mut egui::Ui, title: &str, data: &[ChartBar]) {
+    if !title.is_empty() {
+        ui.label(egui::RichText::new(title).strong());
+        ui.add_space(2.0);
+    }
+    if data.is_empty() {
+        return;
+    }
+    let max = data
+        .iter()
+        .map(|b| b.value)
+        .fold(0.0_f64, f64::max)
+        .max(f64::MIN_POSITIVE);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let measure = |s: &str| {
+        ui.fonts(|f| {
+            f.layout_no_wrap(s.to_owned(), font.clone(), color::TEXT)
+                .size()
+                .x
+        })
+    };
+    let label_w = data
+        .iter()
+        .map(|b| measure(&b.label))
+        .fold(0.0_f32, f32::max)
+        .clamp(24.0, 200.0);
+    let gap = 8.0;
+    let val_w = 52.0;
+    let row_h = font.size + 8.0;
+
+    for b in data {
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), row_h),
+            egui::Sense::hover(),
+        );
+        // Label.
+        ui.painter().text(
+            egui::pos2(rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &b.label,
+            font.clone(),
+            color::TEXT,
+        );
+        // Bar track + filled portion.
+        let bx = rect.left() + label_w + gap;
+        let bar_area = (rect.right() - val_w - gap - bx).max(24.0);
+        let bh = row_h * 0.58;
+        let track = egui::Rect::from_min_size(
+            egui::pos2(bx, rect.center().y - bh / 2.0),
+            egui::vec2(bar_area, bh),
+        );
+        ui.painter().rect_filled(
+            track,
+            egui::Rounding::same(3.0),
+            with_alpha(color::BG_WIDGET, 0.55),
+        );
+        let frac = (b.value / max).clamp(0.0, 1.0) as f32;
+        let fill = egui::Rect::from_min_size(track.min, egui::vec2(bar_area * frac, bh));
+        ui.painter()
+            .rect_filled(fill, egui::Rounding::same(3.0), color::ACCENT);
+        // Value.
+        ui.painter().text(
+            egui::pos2(rect.right(), rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            fmt_num(b.value),
+            font.clone(),
+            color::TEXT_MUTED,
+        );
+    }
+}
+
+/// Format a chart value: integers without a decimal, otherwise two places.
+fn fmt_num(v: f64) -> String {
+    if v.fract().abs() < 1e-9 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+/// Render a [`Widget::Table`]. A plain data table is a striped grid; when the
+/// module attaches a `menu` or `on_activate`, rows become interactive — the
+/// whole row (full width, not just its text) is clickable, highlights on hover,
+/// and emits an [`Invoke`] carrying that row's id on right-click / double-click.
 #[allow(clippy::too_many_arguments)]
 fn render_table(
     ui: &mut egui::Ui,
@@ -632,67 +951,178 @@ fn render_table(
     on_activate: Option<&RowAction>,
     clicked: &mut Option<Invoke>,
 ) {
-    let ncols = columns.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    let ncols = columns
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
     if ncols == 0 {
         return;
     }
-    let interactive = !menu.is_empty() || on_activate.is_some();
+    if menu.is_empty() && on_activate.is_none() {
+        render_plain_table(ui, columns, rows, ncols);
+    } else {
+        render_interactive_table(
+            ui,
+            columns,
+            rows,
+            row_ids,
+            menu,
+            on_activate,
+            clicked,
+            ncols,
+        );
+    }
+}
+
+/// A non-interactive table: a striped grid of labels inside a scroll area.
+fn render_plain_table(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<String>], ncols: usize) {
     let id = ui.make_persistent_id(("limen_table", ncols, rows.len()));
-    egui::ScrollArea::horizontal()
-        .id_source(id)
-        .show(ui, |ui| {
-            egui::Grid::new(id)
-                .striped(true)
-                .num_columns(ncols)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    for c in columns {
-                        ui.label(egui::RichText::new(c).strong());
+    egui::ScrollArea::horizontal().id_source(id).show(ui, |ui| {
+        egui::Grid::new(id)
+            .striped(true)
+            .num_columns(ncols)
+            .spacing([16.0, 4.0])
+            .show(ui, |ui| {
+                for c in columns {
+                    ui.label(egui::RichText::new(c).strong());
+                }
+                ui.end_row();
+                for row in rows {
+                    for cell in row {
+                        ui.label(cell);
                     }
                     ui.end_row();
-                    for (r, row) in rows.iter().enumerate() {
-                        if !interactive {
-                            for cell in row {
-                                ui.label(cell);
-                            }
-                            ui.end_row();
-                            continue;
-                        }
-                        // Interactive row: clickable cells unioned into one row
-                        // response that carries the context menu + double-click.
-                        let mut row_resp: Option<egui::Response> = None;
-                        for cell in row {
-                            let r = ui.add(egui::Label::new(cell).sense(egui::Sense::click()));
-                            row_resp = Some(match row_resp {
-                                Some(prev) => prev.union(r),
-                                None => r,
-                            });
-                        }
-                        ui.end_row();
-                        let Some(row_resp) = row_resp else { continue };
-                        let row_resp = row_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                        let row_id = row_ids.get(r).cloned().unwrap_or_default();
-                        if !menu.is_empty() {
-                            let mut picked: Option<Invoke> = None;
-                            row_resp.context_menu(|ui| render_row_menu(ui, menu, &row_id, &mut picked));
-                            if picked.is_some() {
-                                *clicked = picked;
-                            }
-                        }
-                        if let Some(act) = on_activate
-                            && row_resp.double_clicked()
-                        {
-                            let mut args = serde_json::Map::new();
-                            args.insert("id".into(), Value::String(row_id.clone()));
-                            *clicked = Some(Invoke {
-                                action: act.action.clone(),
-                                args,
-                                open_in_tab: act.open_in_tab,
-                            });
-                        }
-                    }
+                }
+            });
+    });
+}
+
+/// An interactive table: each row is one full-width clickable band that zebra-
+/// stripes, highlights (with an accent edge) on hover, and dims slightly on
+/// press — so it reads as clickable — carrying the row context menu + double
+/// click. Laid out manually (not a `Grid`) so a row spans the whole width.
+#[allow(clippy::too_many_arguments)]
+fn render_interactive_table(
+    ui: &mut egui::Ui,
+    columns: &[String],
+    rows: &[Vec<String>],
+    row_ids: &[String],
+    menu: &[MenuItem],
+    on_activate: Option<&RowAction>,
+    clicked: &mut Option<Invoke>,
+    ncols: usize,
+) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let col_gap = 18.0;
+    let pad_x = 8.0;
+    let pad_y = 5.0;
+
+    // Column widths = the widest of the header and every cell in that column.
+    let measure = |ui: &egui::Ui, s: &str| -> f32 {
+        ui.fonts(|f| {
+            f.layout_no_wrap(s.to_owned(), font.clone(), color::TEXT)
+                .size()
+                .x
+        })
+    };
+    let mut widths = vec![0f32; ncols];
+    for (c, col) in columns.iter().enumerate() {
+        widths[c] = widths[c].max(measure(ui, col));
+    }
+    for row in rows {
+        for (c, cell) in row.iter().enumerate() {
+            widths[c] = widths[c].max(measure(ui, cell));
+        }
+    }
+    let content_w =
+        widths.iter().sum::<f32>() + col_gap * ncols.saturating_sub(1) as f32 + pad_x * 2.0;
+    let row_h = font.size + pad_y * 2.0;
+    let rounding = egui::Rounding::same(4.0);
+
+    let id = ui.make_persistent_id(("limen_itable", ncols, rows.len()));
+    egui::ScrollArea::horizontal().id_source(id).show(ui, |ui| {
+        // Stretch to the viewport so a row's highlight spans the full width.
+        let table_w = content_w.max(ui.available_width());
+
+        // Header.
+        let (hrect, _) = ui.allocate_exact_size(egui::vec2(table_w, row_h), egui::Sense::hover());
+        let mut hx = hrect.left() + pad_x;
+        for (c, col) in columns.iter().enumerate() {
+            ui.painter().text(
+                egui::pos2(hx, hrect.center().y),
+                egui::Align2::LEFT_CENTER,
+                col,
+                font.clone(),
+                color::TEXT_MUTED,
+            );
+            hx += widths.get(c).copied().unwrap_or(0.0) + col_gap;
+        }
+        ui.painter().hline(
+            hrect.x_range(),
+            hrect.bottom(),
+            egui::Stroke::new(1.0_f32, color::BORDER),
+        );
+
+        // Rows.
+        for (r, row) in rows.iter().enumerate() {
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(table_w, row_h), egui::Sense::click());
+            let it = interact(ui, &resp);
+
+            // Zebra base, then a hover highlight faded in by the eased factor,
+            // with a small accent bar on the leading edge and a press tint.
+            if r % 2 == 1 {
+                ui.painter()
+                    .rect_filled(rect, rounding, with_alpha(color::BG_WIDGET, 0.30));
+            }
+            if it.hover > 0.0 {
+                let tint = lerp_color(color::BG_HOVER, color::ACCENT, it.press * 0.18);
+                ui.painter()
+                    .rect_filled(rect, rounding, with_alpha(tint, it.hover));
+                let bar = egui::Rect::from_min_size(rect.min, egui::vec2(2.5, rect.height()));
+                ui.painter().rect_filled(
+                    bar,
+                    egui::Rounding::ZERO,
+                    with_alpha(color::ACCENT, it.hover),
+                );
+            }
+
+            // Cells.
+            let mut x = rect.left() + pad_x;
+            for (c, cell) in row.iter().enumerate() {
+                ui.painter().text(
+                    egui::pos2(x, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    cell,
+                    font.clone(),
+                    color::TEXT,
+                );
+                x += widths.get(c).copied().unwrap_or(0.0) + col_gap;
+            }
+
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let row_id = row_ids.get(r).cloned().unwrap_or_default();
+            if !menu.is_empty() {
+                let mut picked: Option<Invoke> = None;
+                resp.context_menu(|ui| render_row_menu(ui, menu, &row_id, &mut picked));
+                if picked.is_some() {
+                    *clicked = picked;
+                }
+            }
+            if let Some(act) = on_activate
+                && resp.double_clicked()
+            {
+                let mut args = serde_json::Map::new();
+                args.insert("id".into(), Value::String(row_id.clone()));
+                *clicked = Some(Invoke {
+                    action: act.action.clone(),
+                    args,
+                    open_in_tab: act.open_in_tab,
                 });
-        });
+            }
+        }
+    });
 }
 
 /// Build a table row's right-click menu, recursing into submenus. Writes the
@@ -701,7 +1131,9 @@ fn render_row_menu(ui: &mut egui::Ui, items: &[MenuItem], row_id: &str, out: &mu
     for item in items {
         if !item.children.is_empty() {
             let mut sub: Option<Invoke> = None;
-            ui.menu_button(&item.label, |ui| render_row_menu(ui, &item.children, row_id, &mut sub));
+            ui.menu_button(&item.label, |ui| {
+                render_row_menu(ui, &item.children, row_id, &mut sub)
+            });
             if sub.is_some() {
                 *out = sub;
                 ui.close_menu();
@@ -710,7 +1142,11 @@ fn render_row_menu(ui: &mut egui::Ui, items: &[MenuItem], row_id: &str, out: &mu
             if ui.button(&item.label).clicked() {
                 let mut args = item.args.clone();
                 args.insert("id".into(), Value::String(row_id.to_string()));
-                *out = Some(Invoke { action: action.clone(), args, open_in_tab: item.open_in_tab });
+                *out = Some(Invoke {
+                    action: action.clone(),
+                    args,
+                    open_in_tab: item.open_in_tab,
+                });
                 ui.close_menu();
             }
         } else {
@@ -816,7 +1252,11 @@ fn parse_link(s: &str) -> Option<(String, String, usize)> {
         return None;
     }
     let end = tail.find(')')?;
-    Some((s[1..close].to_string(), tail[1..end].to_string(), close + 1 + end + 1))
+    Some((
+        s[1..close].to_string(),
+        tail[1..end].to_string(),
+        close + 1 + end + 1,
+    ))
 }
 
 /// Render a line's inline spans into the current (wrapped) row.
@@ -849,10 +1289,20 @@ pub fn markdown(ui: &mut egui::Ui, md: &str) {
             ui.add_space(6.0);
         } else if let Some(rest) = trimmed.strip_prefix("### ") {
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(rest).strong().size(15.0).color(color::TEXT));
+            ui.label(
+                egui::RichText::new(rest)
+                    .strong()
+                    .size(15.0)
+                    .color(color::TEXT),
+            );
         } else if let Some(rest) = trimmed.strip_prefix("## ") {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(rest).strong().size(17.0).color(color::TEXT));
+            ui.label(
+                egui::RichText::new(rest)
+                    .strong()
+                    .size(17.0)
+                    .color(color::TEXT),
+            );
         } else if let Some(rest) = trimmed.strip_prefix("# ") {
             ui.add_space(6.0);
             ui.label(egui::RichText::new(rest).heading().color(color::TEXT));
@@ -903,64 +1353,79 @@ fn collect_ids(
 /// The component gallery — the UI Kit shown in the Developer window, and the
 /// standardized source of truth for module widget styling.
 pub fn render_demo_ui(ui: &mut egui::Ui, inputs: &mut HashMap<String, String>) {
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-    ui.heading("UI Kit");
-    ui.label(styled(
-        "Standardized Limen widgets — the single source of truth for module styling.",
-        LabelStyle::Weak,
-    ));
-    ui.separator();
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.heading("UI Kit");
+            ui.label(styled(
+                "Standardized Limen widgets — the single source of truth for module styling.",
+                LabelStyle::Weak,
+            ));
+            ui.separator();
 
-    ui.add_space(4.0);
-    ui.label(styled("Typography", LabelStyle::Strong));
-    ui.label(styled("Heading", LabelStyle::Heading));
-    ui.label(styled("Body text — the default", LabelStyle::Normal));
-    ui.label(styled("Strong emphasis", LabelStyle::Strong));
-    ui.label(styled("Muted / secondary", LabelStyle::Weak));
-    ui.label(styled("monospace / code", LabelStyle::Mono));
+            ui.add_space(4.0);
+            ui.label(styled("Typography", LabelStyle::Strong));
+            ui.label(styled("Heading", LabelStyle::Heading));
+            ui.label(styled("Body text — the default", LabelStyle::Normal));
+            ui.label(styled("Strong emphasis", LabelStyle::Strong));
+            ui.label(styled("Muted / secondary", LabelStyle::Weak));
+            ui.label(styled("monospace / code", LabelStyle::Mono));
 
-    ui.add_space(10.0);
-    ui.label(styled("Buttons", LabelStyle::Strong));
-    ui.horizontal(|ui| {
-        let _ = ui.add(egui::Button::new(egui::RichText::new("Primary").color(color::ON_ACCENT)).fill(color::ACCENT));
-        let _ = ui.button("Default");
-    });
+            ui.add_space(10.0);
+            ui.label(styled("Buttons", LabelStyle::Strong));
+            ui.horizontal(|ui| {
+                let _ = ui.add(
+                    egui::Button::new(egui::RichText::new("Primary").color(color::ON_ACCENT))
+                        .fill(color::ACCENT),
+                );
+                let _ = ui.button("Default");
+            });
 
-    ui.add_space(10.0);
-    ui.label(styled("Inputs", LabelStyle::Strong));
-    let text = inputs.entry("demo.text".into()).or_insert_with(|| "editable".into());
-    ui.add(egui::TextEdit::singleline(text).desired_width(240.0).hint_text("single line"));
-    let sel = inputs.entry("demo.select".into()).or_insert_with(|| "one".into());
-    egui::ComboBox::from_id_source("demo.select")
-        .selected_text(sel.clone())
-        .show_ui(ui, |ui| {
-            for o in ["one", "two", "three"] {
-                ui.selectable_value(sel, o.to_string(), o);
-            }
-        });
-
-    ui.add_space(10.0);
-    ui.label(styled("Palette", LabelStyle::Strong));
-    ui.horizontal(|ui| {
-        for (name, c) in [
-            ("bg", color::BG),
-            ("elevated", color::BG_ELEVATED),
-            ("widget", color::BG_WIDGET),
-            ("border", color::BORDER),
-            ("accent", color::ACCENT),
-        ] {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(56.0, 34.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, egui::Rounding::same(5.0_f32), c);
-            ui.painter().text(
-                rect.center_bottom() + egui::vec2(0.0, -2.0),
-                egui::Align2::CENTER_BOTTOM,
-                name,
-                egui::FontId::proportional(10.0),
-                color::TEXT,
+            ui.add_space(10.0);
+            ui.label(styled("Inputs", LabelStyle::Strong));
+            let text = inputs
+                .entry("demo.text".into())
+                .or_insert_with(|| "editable".into());
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .desired_width(240.0)
+                    .hint_text("single line"),
             );
-        }
-    });
-    }); // end ScrollArea
+            let sel = inputs
+                .entry("demo.select".into())
+                .or_insert_with(|| "one".into());
+            egui::ComboBox::from_id_source("demo.select")
+                .selected_text(sel.clone())
+                .show_ui(ui, |ui| {
+                    for o in ["one", "two", "three"] {
+                        ui.selectable_value(sel, o.to_string(), o);
+                    }
+                });
+
+            ui.add_space(10.0);
+            ui.label(styled("Palette", LabelStyle::Strong));
+            ui.horizontal(|ui| {
+                for (name, c) in [
+                    ("bg", color::BG),
+                    ("elevated", color::BG_ELEVATED),
+                    ("widget", color::BG_WIDGET),
+                    ("border", color::BORDER),
+                    ("accent", color::ACCENT),
+                ] {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(56.0, 34.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, egui::Rounding::same(5.0_f32), c);
+                    ui.painter().text(
+                        rect.center_bottom() + egui::vec2(0.0, -2.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        name,
+                        egui::FontId::proportional(10.0),
+                        color::TEXT,
+                    );
+                }
+            });
+        }); // end ScrollArea
 }
 
 #[cfg(test)]
@@ -977,7 +1442,10 @@ mod tests {
                 Md::Text(" — a ".into()),
                 Md::Code("table".into()),
                 Md::Text(" and a ".into()),
-                Md::Link { label: "link".into(), url: "http://x".into() },
+                Md::Link {
+                    label: "link".into(),
+                    url: "http://x".into()
+                },
             ]
         );
         // Unmatched markers stay literal.
@@ -986,7 +1454,10 @@ mod tests {
             vec![Md::Text("a ** b `c".into())]
         );
         // Plain text is a single span.
-        assert_eq!(inline_segments("just text"), vec![Md::Text("just text".into())]);
+        assert_eq!(
+            inline_segments("just text"),
+            vec![Md::Text("just text".into())]
+        );
     }
 
     #[test]

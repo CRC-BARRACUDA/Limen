@@ -26,7 +26,8 @@ fn main() -> eframe::Result<()> {
         .with_title("Limen");
     // The window/taskbar/Alt-Tab icon while the app is running (the embedded
     // .exe icon only covers the file itself). Decoding is best-effort.
-    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../../resources/icon.png")) {
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../../resources/icon.png"))
+    {
         viewport = viewport.with_icon(icon);
     }
 
@@ -80,7 +81,7 @@ fn report_startup_failure(err: &eframe::Error) {
 /// Show a native modal error box.
 #[cfg(windows)]
 fn alert(title: &str, body: &str) {
-    use std::ffi::{c_void, OsStr};
+    use std::ffi::{OsStr, c_void};
     use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "user32")]
@@ -89,7 +90,10 @@ fn alert(title: &str, body: &str) {
     }
 
     fn wide(s: &str) -> Vec<u16> {
-        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     const MB_ICONERROR: u32 = 0x0000_0010;
