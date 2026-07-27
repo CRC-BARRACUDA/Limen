@@ -95,23 +95,30 @@ class Button(Widget):
     animate on hover/press on the host."""
 
     def __init__(self, text, calls=None, capability=None, method=None, primary=False,
-                 enabled=True):
+                 enabled=True, args=None, open_in_tab=False):
         self.text = text
         self.calls = calls
         self.capability = capability
         self.method = method
         self.primary = primary
         self.enabled = enabled
+        self.args = args
+        self.open_in_tab = open_in_tab
 
     def _spec(self, own_capability):
         cap = self.capability or own_capability
         meth = self.method or self.calls
-        return {
+        spec = {
             "kind": "button", "text": self.text,
             "style": "primary" if self.primary else "default",
             "enabled": self.enabled,
             "action": {"capability": cap, "method": meth},
         }
+        if self.args:
+            spec["args"] = self.args
+        if self.open_in_tab:
+            spec["open_in_tab"] = True
+        return spec
 
     # to_spec needs the owning capability; provided during serialization.
     def to_spec(self):
@@ -135,17 +142,82 @@ class Row(Widget):
         return {"kind": "row", "children": [c.to_spec() for c in self.children]}
 
 
-class Table(Widget):
-    """A table with a header row (`columns`) and string cells (`rows`)."""
+class MenuItem:
+    """A row right-click menu entry.
 
-    def __init__(self, columns, rows):
-        self.columns, self.rows = columns, rows
+    Leaf: pass `capability` + `method` — chosen, it invokes that method with the
+    activated row's id as the `id` param (plus any `args`). Submenu: pass
+    `children` (a list of MenuItems); its own action is then ignored.
+    """
+
+    def __init__(self, label, capability=None, method=None, args=None,
+                 open_in_tab=False, children=None):
+        self.label = label
+        self.capability = capability
+        self.method = method
+        self.args = args
+        self.open_in_tab = open_in_tab
+        self.children = children
 
     def to_spec(self):
-        return {
+        spec = {"label": str(self.label)}
+        if self.children:
+            spec["children"] = [c.to_spec() for c in self.children]
+        elif self.capability is not None and self.method is not None:
+            spec["action"] = {"capability": self.capability, "method": self.method}
+        if self.args:
+            spec["args"] = self.args
+        if self.open_in_tab:
+            spec["open_in_tab"] = True
+        return spec
+
+
+class Table(Widget):
+    """A table with a header row (`columns`) and string cells (`rows`).
+
+    Rows become interactive when `row_ids` is given together with `menu` and/or
+    `on_activate`: right-click shows the `menu` (a list of `MenuItem`), and
+    double-click runs `on_activate` — a `(capability, method)` tuple whose
+    returned view opens in a new tab. The activated row's id is sent as `id`.
+    """
+
+    def __init__(self, columns, rows, row_ids=None, menu=None, on_activate=None):
+        self.columns, self.rows = columns, rows
+        self.row_ids = row_ids
+        self.menu = menu
+        self.on_activate = on_activate
+
+    def to_spec(self):
+        spec = {
             "kind": "table",
             "columns": [str(c) for c in self.columns],
             "rows": [[str(c) for c in row] for row in self.rows],
+        }
+        if self.row_ids is not None:
+            spec["row_ids"] = [str(i) for i in self.row_ids]
+        if self.menu:
+            spec["menu"] = [mi.to_spec() for mi in self.menu]
+        if self.on_activate is not None:
+            cap, method = self.on_activate
+            spec["on_activate"] = {
+                "action": {"capability": cap, "method": method},
+                "open_in_tab": True,
+            }
+        return spec
+
+
+class Chart(Widget):
+    """A horizontal bar chart: `data` is a list of (label, value) pairs, drawn
+    as bars scaled to the largest value, under an optional `title`."""
+
+    def __init__(self, title, data):
+        self.title, self.data = title, data
+
+    def to_spec(self):
+        return {
+            "kind": "chart",
+            "title": str(self.title),
+            "data": [{"label": str(label), "value": float(value)} for (label, value) in self.data],
         }
 
 
@@ -193,6 +265,23 @@ class Host:
         """Info about the host environment: os, arch, family, hostname,
         limen_version, base_dir (where Limen runs from)."""
         return self._m._request("host.about", {})
+
+    def capabilities(self):
+        """Every capability currently provided by a loaded module. Use this to
+        discover OPTIONAL integrations — e.g. only show a feature when another
+        module (a `report.*` provider, say) is present."""
+        return self._m._request("host.capabilities", None) or []
+
+    def has_capability(self, capability):
+        """Whether some loaded module provides `capability` (exact match)."""
+        return capability in self.capabilities()
+
+    def open(self, target, value=""):
+        """Ask the host to open something in the OS on the user's behalf:
+        `target` is "path" | "url" | "registry" | "device_manager"; `value` is
+        the path / URL / registry key (ignored for device_manager). Best-effort;
+        registry and device_manager are Windows-only."""
+        self._m._request("host.open", {"target": target, "value": value})
 
     def log(self, message):
         self._m._request("host.log", str(message))

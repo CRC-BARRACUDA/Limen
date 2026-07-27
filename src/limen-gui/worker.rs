@@ -6,17 +6,17 @@
 //! frame.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 use std::collections::HashMap;
 
 use limen_core::{
-    apply_update, can_install, check_update, install_runtime, is_newer, paths, Config,
-    Engine, ModuleSpec, UpdateInfo,
+    Config, Engine, ModuleSpec, UpdateInfo, apply_update, can_install, check_update,
+    install_runtime, is_newer, paths,
 };
-use limen_registry::{latest_release_version, list_org_modules, Lockfile, Registry, RemoteModule};
+use limen_registry::{Lockfile, Registry, RemoteModule, latest_release_version, list_org_modules};
 use serde_json::Value;
 
 /// A snapshot of installed modules plus which ones came from a git install
@@ -68,8 +68,14 @@ pub enum Command {
 /// What a run was for, so its result routes back correctly.
 #[derive(Clone, PartialEq, Eq)]
 pub enum RunTag {
-    Ui { module: String },
+    Ui {
+        module: String,
+    },
     Action,
+    /// A row action whose result view opens in a detail tab (`id`).
+    Detail {
+        id: u64,
+    },
 }
 
 /// A message from the worker back to the UI.
@@ -81,7 +87,10 @@ pub enum Event {
     /// Modules available in the org (or an error string).
     RemoteModules(Result<Vec<RemoteModule>, String>),
     /// A run finished.
-    RunDone { tag: RunTag, result: Result<Value, String> },
+    RunDone {
+        tag: RunTag,
+        result: Result<Value, String>,
+    },
     /// A registry operation finished (human-readable outcome).
     Status(String),
     /// A host/module log line (for the debug console).
@@ -135,7 +144,10 @@ impl Worker {
         // work (reloads) back to it.
         let self_tx = cmd_tx.clone();
         thread::spawn(move || run(dirs, cmd_rx, evt_tx, self_tx));
-        Worker { tx: cmd_tx, rx: evt_rx }
+        Worker {
+            tx: cmd_tx,
+            rx: evt_rx,
+        }
     }
 
     pub fn send(&self, cmd: Command) {
@@ -188,7 +200,11 @@ fn update_check_refs(snap: &ModuleSnapshot) -> Vec<(String, String, String)> {
     snap.specs
         .iter()
         .filter(|m| git.contains(&m.name))
-        .filter_map(|m| m.repo.clone().map(|r| (m.name.clone(), r, m.version.clone())))
+        .filter_map(|m| {
+            m.repo
+                .clone()
+                .map(|r| (m.name.clone(), r, m.version.clone()))
+        })
         .collect()
 }
 
@@ -230,16 +246,22 @@ fn bundle_runtimes(engine: &Engine, evt_tx: &Sender<Event>, cmd_tx: &Sender<Comm
         let mut done: Vec<String> = Vec::new();
         for rt in todo {
             let _ = evt_tx.send(Event::RuntimeInstalling(Some(rt.display().to_string())));
-            let _ = evt_tx.send(Event::Status(format!("installing {} runtime…", rt.display())));
+            let _ = evt_tx.send(Event::Status(format!(
+                "installing {} runtime…",
+                rt.display()
+            )));
             match install_runtime(rt) {
                 Ok(()) => done.push(format!("bundled {} runtime", rt.display())),
                 Err(e) => {
-                    let _ = evt_tx.send(Event::Status(format!("{} setup failed: {e}", rt.display())));
+                    let _ =
+                        evt_tx.send(Event::Status(format!("{} setup failed: {e}", rt.display())));
                 }
             }
         }
         let _ = evt_tx.send(Event::RuntimeInstalling(None));
-        let _ = cmd_tx.send(Command::FinishRuntimes { status: done.join("; ") });
+        let _ = cmd_tx.send(Command::FinishRuntimes {
+            status: done.join("; "),
+        });
     });
 }
 
@@ -303,7 +325,12 @@ fn run(
                 let result = list_org_modules(&org()).map_err(|e| format!("{e:#}"));
                 let _ = evt_tx.send(Event::RemoteModules(result));
             }
-            Command::Run { tag, capability, method, params } => {
+            Command::Run {
+                tag,
+                capability,
+                method,
+                params,
+            } => {
                 let result = engine
                     .run(&capability, &method, params)
                     .map_err(|e| format!("{e:#}"));
@@ -316,9 +343,10 @@ fn run(
                 let cmd_tx = cmd_tx.clone();
                 thread::spawn(move || {
                     let (status, ok) = match Registry::new(paths::home()).add(&reference) {
-                        Ok(report) => {
-                            (format!("installed {} module(s)", report.installed.len()), true)
-                        }
+                        Ok(report) => (
+                            format!("installed {} module(s)", report.installed.len()),
+                            true,
+                        ),
                         Err(e) => (format!("install failed: {e:#}"), false),
                     };
                     let _ = cmd_tx.send(Command::FinishAdd { status, ok });
@@ -330,9 +358,10 @@ fn run(
                 let cmd_tx = cmd_tx.clone();
                 thread::spawn(move || {
                     let (status, ok) = match Registry::new(paths::home()).update(Some(&name)) {
-                        Ok(report) => {
-                            (format!("updated {} module(s)", report.installed.len()), true)
-                        }
+                        Ok(report) => (
+                            format!("updated {} module(s)", report.installed.len()),
+                            true,
+                        ),
                         Err(e) => (format!("module update failed: {e:#}"), false),
                     };
                     let _ = cmd_tx.send(Command::FinishAdd { status, ok });

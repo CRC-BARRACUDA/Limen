@@ -69,9 +69,32 @@ impl Host {
         self.raw("host.call", payload)
     }
 
+    /// Every capability currently provided by a loaded module. Use this to
+    /// discover **optional** integrations — e.g. only show a "Make Report" button
+    /// when a `report.*` provider is present.
+    pub fn capabilities(&self) -> Vec<String> {
+        self.raw("host.capabilities", Value::Null)
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    }
+
+    /// Whether some loaded module provides `capability` (exact match).
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities().iter().any(|c| c == capability)
+    }
+
     /// Emit a log line to the host console.
     pub fn log(&self, message: &str) {
         let _ = self.raw("host.log", Value::String(message.to_string()));
+    }
+
+    /// Ask the host to open something in the OS on the user's behalf. `target`
+    /// is one of `"path"`, `"url"`, `"registry"`, or `"device_manager"`; `value`
+    /// is the path / URL / registry key (ignored for `device_manager`).
+    /// Best-effort — registry/device_manager are Windows-only.
+    pub fn open(&self, target: &str, value: &str) {
+        let _ = self.raw("host.open", json!({ "target": target, "value": value }));
     }
 
     fn raw(&self, method: &str, params: Value) -> Result<Value, RpcError> {

@@ -52,6 +52,14 @@ impl Broker {
         self.by_capability.lock().unwrap().get(capability).cloned()
     }
 
+    /// Every capability currently provided by a loaded module, sorted. Lets a
+    /// module discover optional integrations (e.g. "is a report provider here?").
+    pub fn capabilities(&self) -> Vec<String> {
+        let mut caps: Vec<String> = self.by_capability.lock().unwrap().keys().cloned().collect();
+        caps.sort();
+        caps
+    }
+
     /// Route a `host.call`. `params` is `{ capability, method, params }`; the
     /// whole object is forwarded to the provider's `invoke` (it reads `method`
     /// and `params` from it, and ignores `capability`).
