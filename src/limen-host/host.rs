@@ -44,8 +44,10 @@ pub struct ModuleSpec {
     /// GitHub repo (`owner/repo` or full URL), if the module has one.
     pub repo: Option<String>,
     pub capabilities: Vec<String>,
-    /// capability -> semver requirement.
+    /// capability -> semver requirement (hard dependencies).
     pub requires: BTreeMap<String, String>,
+    /// Optional capabilities: used if a provider is loaded, never required.
+    pub optional: BTreeMap<String, String>,
     /// What the module declares it needs to do.
     pub permissions: Permissions,
     /// Implementation language (selects the SDK search-path env on spawn).
@@ -69,6 +71,7 @@ impl ModuleSpec {
             repo: manifest.module.repo,
             capabilities: manifest.provides.capabilities,
             requires: manifest.requires.capabilities,
+            optional: manifest.optional.capabilities,
             permissions: manifest.permissions,
             language: manifest.module.language,
             launch,
@@ -447,6 +450,7 @@ fn host_handler(
         "host.subscribe" => broker.subscribe(params),
         "host.emit" => broker.emit(params),
         "host.about" => Ok(host_about()),
+        "host.capabilities" => Ok(json!(broker.capabilities())),
         "host.open" => host_open(params),
         "host.log" => {
             let msg = params.as_str().map(str::to_string).unwrap_or_else(|| params.to_string());
@@ -755,6 +759,7 @@ mod spec_tests {
             repo: None,
             capabilities: vec![],
             requires: BTreeMap::new(),
+            optional: BTreeMap::new(),
             permissions: Permissions::default(),
             language: Language::Native,
             launch,

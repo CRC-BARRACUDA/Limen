@@ -198,6 +198,12 @@ pub struct Manifest {
     pub provides: Provides,
     #[serde(default)]
     pub requires: Requires,
+    /// Capabilities this module can *optionally* use if a provider is present —
+    /// soft dependencies. Absent providers never block the module; it simply
+    /// lights up the extra feature when one is loaded. Same shape as `requires`
+    /// (`[optional.capabilities]`).
+    #[serde(default)]
+    pub optional: Requires,
     /// Packages to install (the manager's download graph). Keyed by module name.
     #[serde(default)]
     pub dependencies: BTreeMap<String, DepSpec>,
