@@ -13,12 +13,18 @@ __all__ = [
 # ---- UI builder ----------------------------------------------------------- #
 
 class Widget:
+    """Base class for view widgets. The host renders them with its shared animated
+    styling, so a module's UI animates like the host's chrome."""
     def to_spec(self) -> Dict[str, Any]: ...
 
 class Label(Widget):
+    """A text label. `style`: "normal" | "heading" | "strong" | "weak" | "mono"."""
     def __init__(self, text: str, style: str = ...) -> None: ...
 
 class Text(Widget):
+    """A text input keyed by `id` (value returned in the method params). `multiline`
+    makes it a box, `password` masks it; single-line fields get an animated focus
+    border on the host."""
     def __init__(
         self,
         id: str,
@@ -30,11 +36,16 @@ class Text(Widget):
     ) -> None: ...
 
 class Select(Widget):
+    """A dropdown keyed by `id`; `options` are the choices, selection returned in
+    the method params."""
     def __init__(
         self, id: str, options: List[str], label: str = ..., default: str = ...
     ) -> None: ...
 
 class Button(Widget):
+    """A button. `calls` names a method on THIS module (SDK fills the capability);
+    use `capability`/`method` to target another. `primary=True` is the filled
+    accent button, else an outline button; both animate on hover/press."""
     def __init__(
         self,
         text: str,
@@ -45,15 +56,21 @@ class Button(Widget):
         enabled: bool = ...,
     ) -> None: ...
 
-class Separator(Widget): ...
+class Separator(Widget):
+    """A horizontal divider."""
+    ...
 
 class Table(Widget):
+    """A table with a header row (`columns`) and string cells (`rows`)."""
     def __init__(self, columns: list[str], rows: list[list[str]]) -> None: ...
 
 class Row(Widget):
+    """A horizontal group of widgets, laid out left to right."""
     def __init__(self, children: List[Widget]) -> None: ...
 
 class Window:
+    """Top-level view: a title and a list of widgets — return from a module's `ui`
+    method (or via `@m.ui`)."""
     def __init__(self, title: str, widgets: List[Widget]) -> None: ...
     def to_spec(self) -> Dict[str, Any]: ...
 

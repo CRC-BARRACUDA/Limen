@@ -37,11 +37,18 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 
 class Widget:
+    """Base class for view widgets. Subclasses build the JSON `to_spec()` the host
+    renders — with its shared animated styling, so a module's UI animates like the
+    host's chrome."""
+
     def to_spec(self):
         raise NotImplementedError
 
 
 class Label(Widget):
+    """A text label. `style` is one of "normal", "heading", "strong", "weak",
+    "mono"."""
+
     def __init__(self, text, style="normal"):
         self.text, self.style = text, style
 
@@ -50,6 +57,10 @@ class Label(Widget):
 
 
 class Text(Widget):
+    """A text input keyed by `id` (its value comes back in the method params).
+    `multiline` makes it a box, `password` masks it. Single-line fields get an
+    animated focus border on the host."""
+
     def __init__(self, id, label="", placeholder="", multiline=False, default="", password=False):
         self.id, self.label = id, label
         self.placeholder, self.multiline, self.default = placeholder, multiline, default
@@ -64,6 +75,9 @@ class Text(Widget):
 
 
 class Select(Widget):
+    """A dropdown keyed by `id`; `options` are the choices and the selection comes
+    back in the method params."""
+
     def __init__(self, id, options, label="", default=""):
         self.id, self.options, self.label, self.default = id, options, label, default
 
@@ -76,7 +90,9 @@ class Select(Widget):
 
 class Button(Widget):
     """A button. `calls` names a method on THIS module; the SDK fills in the
-    capability. Use `capability=`/`method=` to target another module instead."""
+    capability. Use `capability=`/`method=` to target another module instead.
+    `primary=True` is the filled accent button, otherwise an outline button; both
+    animate on hover/press on the host."""
 
     def __init__(self, text, calls=None, capability=None, method=None, primary=False,
                  enabled=True):
@@ -103,11 +119,15 @@ class Button(Widget):
 
 
 class Separator(Widget):
+    """A horizontal divider."""
+
     def to_spec(self):
         return {"kind": "separator"}
 
 
 class Row(Widget):
+    """A horizontal group of widgets, laid out left to right."""
+
     def __init__(self, children):
         self.children = children
 
