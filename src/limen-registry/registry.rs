@@ -429,6 +429,87 @@ fn match_platform_asset(assets: &[(String, String)]) -> Option<&(String, String)
         .or_else(|| assets.iter().find(|(n, _)| is_archive(n)))
 }
 
+/// Filename-token aliases for the **running** CPU architecture, so a release
+/// asset named for this arch is recognized regardless of the convention used
+/// (`x86_64` / `amd64` / `x64`, `aarch64` / `arm64`, …). Distinct bitnesses are
+/// kept separate so a 32-bit build is never accepted on a 64-bit host and vice
+/// versa.
+fn running_arch_aliases() -> Vec<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => vec!["x86_64", "x86-64", "amd64", "x64"],
+        "x86" => vec!["x86", "i386", "i486", "i586", "i686", "win32", "x32"],
+        "aarch64" => vec!["aarch64", "arm64"],
+        "arm" => vec!["arm", "armv6", "armv7", "armv7l", "armhf", "armel"],
+        "riscv64" => vec!["riscv64"],
+        "powerpc64" => vec!["powerpc64", "ppc64", "ppc64le"],
+        "s390x" => vec!["s390x"],
+        other => vec![other],
+    }
+}
+
+/// Every architecture token we know how to recognize — used to tell "this asset
+/// names a *different* arch" (reject) apart from "this asset names no arch at
+/// all" (can't tell — don't reject on that basis).
+const KNOWN_ARCH_TOKENS: &[&str] = &[
+    "x86_64", "x86-64", "amd64", "x64", "x86", "i386", "i486", "i586", "i686", "win32", "x32",
+    "aarch64", "arm64", "armv6", "armv7", "armv7l", "armhf", "armel", "arm", "riscv64",
+    "powerpc64", "ppc64", "ppc64le", "s390x", "mips64", "loongarch64",
+];
+
+/// Whether an asset filename is compatible with the running CPU architecture
+/// (and bit depth). True if it names our arch; false if it names a *different*
+/// known arch; true if it carries no recognizable arch token (undecidable).
+/// Tokenized on `-`/`.`/`/`/space (not `_`, so `x86_64` stays one token).
+fn arch_compatible(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let tokens: Vec<&str> = lower.split(['-', '.', '/', '\\', ' ']).collect();
+    let ours = running_arch_aliases();
+    if tokens.iter().any(|t| ours.contains(t)) {
+        return true;
+    }
+    if tokens.iter().any(|t| KNOWN_ARCH_TOKENS.contains(t)) {
+        return false; // names some other arch — not for us
+    }
+    true // no arch token → can't tell; don't over-hide
+}
+
+/// Whether `name` is a loadable library for the running **OS** (the library
+/// extension `.so`/`.dll`/`.dylib` is OS-specific) *and* CPU arch/bitness.
+fn is_platform_lib(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(std::env::consts::DLL_SUFFIX) && arch_compatible(&lower)
+}
+
+/// Whether the asset set contains a checksum file paired with `lib` (e.g.
+/// `foo.so` → `foo.so.sha256`, or the extension-stripped `foo.sha256`).
+fn has_checksum(lib: &str, assets: &[(String, String)]) -> bool {
+    let lib = lib.to_lowercase();
+    let stem = lib.strip_suffix(std::env::consts::DLL_SUFFIX).unwrap_or(&lib);
+    let wanted = [
+        format!("{lib}.sha256"),
+        format!("{lib}.sha256sum"),
+        format!("{stem}.sha256"),
+    ];
+    assets
+        .iter()
+        .any(|(n, _)| wanted.iter().any(|w| w == &n.to_lowercase()))
+}
+
+/// Whether `repo`'s latest release carries a prebuilt library **and** a matching
+/// checksum for the running OS/arch/bitness — i.e. a native module that can be
+/// installed and verified here. Used to hide incompatible native modules from
+/// the manager. Any error (no release, network) → `false`: don't advertise what
+/// we can't confirm will run.
+pub(crate) fn native_release_ready(repo: &str) -> bool {
+    let slug = github_slug(repo);
+    match release_assets(slug, None) {
+        Ok(assets) => assets
+            .iter()
+            .any(|(n, _)| is_platform_lib(n) && has_checksum(n, &assets)),
+        Err(_) => false,
+    }
+}
+
 /// List `repo`'s release files, pick the one for this platform, and download it
 /// into `dest_dir` named as the host expects. Returns the filename on success.
 fn fetch_native_asset(
@@ -601,6 +682,63 @@ mod tests {
             ("m-linux-x86_64.tar.gz".to_string(), "arc".to_string()),
         ];
         assert_eq!(match_platform_asset(&mixed).unwrap().1, "lib");
+    }
+
+    #[test]
+    fn platform_lib_respects_os_arch_and_bitness() {
+        let ext = std::env::consts::DLL_SUFFIX;
+        let arch = std::env::consts::ARCH;
+        let os = std::env::consts::OS;
+
+        // A lib named for THIS os (via extension) and arch is accepted.
+        assert!(is_platform_lib(&format!("mod-{os}-{arch}{ext}")));
+
+        // A different OS is rejected purely by the extension mismatch.
+        let foreign_ext = if ext == ".so" { ".dll" } else { ".so" };
+        assert!(!is_platform_lib(&format!("mod-{os}-{arch}{foreign_ext}")));
+
+        // A clearly different architecture / bitness is rejected even with the
+        // right extension. Pick an arch token that isn't an alias of ours.
+        let foreign_arch = if running_arch_aliases().contains(&"x86_64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        assert!(!is_platform_lib(&format!("mod-linux-{foreign_arch}{ext}")));
+
+        // 32-bit must never satisfy a 64-bit host (x86 ⊄ x86_64) and vice versa.
+        if arch == "x86_64" {
+            assert!(!is_platform_lib(&format!("mod-linux-i686{ext}")));
+            assert!(!is_platform_lib(&format!("mod-linux-x86{ext}")));
+        }
+
+        // No arch token at all → undecidable, so not rejected on that basis.
+        assert!(is_platform_lib(&format!("mod{ext}")));
+    }
+
+    #[test]
+    fn checksum_sibling_required() {
+        let ext = std::env::consts::DLL_SUFFIX;
+        let lib = format!("mod-linux-{}{ext}", std::env::consts::ARCH);
+        let with_sha = vec![
+            (lib.clone(), "u1".to_string()),
+            (format!("{lib}.sha256"), "u2".to_string()),
+        ];
+        assert!(has_checksum(&lib, &with_sha));
+
+        // Binary present but no checksum → not verifiable.
+        let no_sha = vec![(lib.clone(), "u1".to_string())];
+        assert!(!has_checksum(&lib, &no_sha));
+
+        // The extension-stripped form (`mod-….sha256`) is also accepted.
+        let stem_sha = vec![
+            (lib.clone(), "u1".to_string()),
+            (
+                format!("mod-linux-{}.sha256", std::env::consts::ARCH),
+                "u2".to_string(),
+            ),
+        ];
+        assert!(has_checksum(&lib, &stem_sha));
     }
 
     #[test]
