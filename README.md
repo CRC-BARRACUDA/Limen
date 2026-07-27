@@ -74,6 +74,32 @@ cargo run -p limen-gui
 cargo run -p limen-cli -- <command>
 ```
 
+### Running without a 3D accelerator
+
+The GUI draws its window with OpenGL and needs **version 2.0 or newer**. On a virtual machine,
+a remote session, or a PC with no 3D driver, Windows only offers a software OpenGL 1.1 — so
+`Limen` reports that it cannot start and exits.
+
+To render in software instead, download `mesa3d-<version>-release-msvc.7z` from
+[pal1000/mesa-dist-win](https://github.com/pal1000/mesa-dist-win/releases) and copy these three
+files out of its `x64/` folder into the same folder as `Limen.exe`:
+
+| File | Why |
+|---|---|
+| `opengl32.dll` | the driver entry point Windows looks up |
+| `libgallium_wgl.dll` | the renderer itself (this one is ~59 MB) |
+| `dxil.dll` | shader compilation for Mesa's default Windows driver |
+
+Limen then starts normally and everything works — rendering just runs on the CPU, so it is
+slower than a real GPU. All three files are needed; with `dxil.dll` missing the app fails
+silently.
+
+> ⚠️ **Only do this on a machine that has no 3D acceleration.** These files *replace* the system
+> OpenGL driver for whatever sits next to them, so putting them beside `Limen.exe` on a PC with a
+> working GPU will **disable** hardware acceleration and make it slower.
+
+`limen-cli` does all the same work with no GPU at all, and is unaffected.
+
 ### Release + packaging (Linux)
 
 ```bash
