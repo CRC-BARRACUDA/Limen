@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "limen-cli"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "limen-core"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "limen-host",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "limen-gui"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -1979,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "limen-host"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "libloading 0.8.9",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "limen-proto"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -2001,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "limen-registry"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "limen-proto",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "limen-sdk-rust"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "limen-proto",
  "serde_json",
