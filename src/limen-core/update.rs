@@ -266,6 +266,41 @@ pub fn restart_app() -> ! {
     }
 }
 
+/// Show a best-effort native desktop notification using the OS's own notifier
+/// (`notify-send` / `osascript` / PowerShell toast) — no extra dependency, and a
+/// silent no-op if the notifier isn't present.
+pub fn notify(title: &str, body: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("notify-send")
+            .args(["--app-name", "Limen", title, body])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+        let script = format!("display notification {} with title {}", q(body), q(title));
+        let _ = Command::new("osascript").args(["-e", &script]).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let q = |s: &str| s.replace('\'', "''");
+        let ps = format!(
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null; \
+             $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+             $t = $x.GetElementsByTagName('text'); \
+             $t[0].AppendChild($x.CreateTextNode('{}')) > $null; \
+             $t[1].AppendChild($x.CreateTextNode('{}')) > $null; \
+             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Limen').Show([Windows.UI.Notifications.ToastNotification]::new($x));",
+            q(title),
+            q(body),
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .spawn();
+    }
+}
+
 /// Extract `archive` into a scratch dir next to the exe and return the path to
 /// the executable inside it (matched by file name, e.g. `Limen`/`Limen.exe`).
 fn extract_binary(

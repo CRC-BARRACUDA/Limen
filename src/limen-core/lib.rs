@@ -19,4 +19,6 @@ pub use config::Config;
 pub use engine::Engine;
 pub use limen_host::{runtimes::Runtime, Logger, ModuleSpec};
 pub use setup::{can_install, install_runtime, runtime_report, RuntimeInfo, RuntimeState};
-pub use update::{apply_update, check_update, is_newer, restart_app, set_update_dir, UpdateInfo};
+pub use update::{
+    apply_update, check_update, is_newer, notify, restart_app, set_update_dir, UpdateInfo,
+};

@@ -105,12 +105,29 @@ impl Worker {
     pub fn spawn(dirs: Vec<PathBuf>) -> Self {
         let (cmd_tx, cmd_rx) = channel::<Command>();
         let (evt_tx, evt_rx) = channel::<Event>();
-        // Background update check (own thread so it never blocks module loading).
+        // Background update check: at startup, then every 10 minutes (own thread
+        // so it never blocks module loading). A newly-seen version fires a native
+        // OS notification once and surfaces the in-app pill.
         {
             let evt_tx = evt_tx.clone();
             thread::spawn(move || {
-                if let Some(info) = check_update(env!("CARGO_PKG_VERSION")) {
-                    let _ = evt_tx.send(Event::UpdateAvailable(info));
+                let current = env!("CARGO_PKG_VERSION");
+                let mut last_notified: Option<String> = None;
+                loop {
+                    if let Some(info) = check_update(current)
+                        && last_notified.as_deref() != Some(info.latest.as_str())
+                    {
+                        last_notified = Some(info.latest.clone());
+                        limen_core::notify(
+                            "Limen update available",
+                            &format!(
+                                "Version {} is available (you have {}).",
+                                info.latest, info.current
+                            ),
+                        );
+                        let _ = evt_tx.send(Event::UpdateAvailable(info));
+                    }
+                    thread::sleep(std::time::Duration::from_secs(600));
                 }
             });
         }
