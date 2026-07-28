@@ -295,6 +295,60 @@ fn icon_file() -> Option<PathBuf> {
     Some(path)
 }
 
+/// Register Limen's identity with the Windows notification platform, so toasts
+/// carry the app name **and icon** in their header rather than a bare name.
+///
+/// Windows takes that identity from an AppUserModelID registration; there is no
+/// way to supply it on the toast itself. The only alternative source is a Start
+/// Menu shortcut carrying `System.AppUserModel.ID`, which would mean writing into
+/// the user's profile — this single `HKCU` key is the smaller footprint. It is
+/// still the one thing Limen leaves outside its base dir, so it is written only
+/// when absent or stale (a portable install changes path when the stick moves).
+///
+/// Note the icon does **not** appear on the run that registers: `WpnUserService`
+/// caches an app's display data when it starts, so the header icon shows from the
+/// next sign-in onwards. Best-effort throughout — failure just means a plainer
+/// notification. A no-op on other platforms.
+pub fn register_notifier() {
+    #[cfg(target_os = "windows")]
+    {
+        const KEY: &str = r"HKCU\Software\Classes\AppUserModelId\Limen";
+        let Some(icon) = icon_file() else { return };
+        let icon = icon.to_string_lossy().to_string();
+
+        // Skip the write when it already says the right thing — this runs at
+        // every startup, and the registry is not ours to churn.
+        let current = Command::new("reg")
+            .args(["query", KEY, "/v", "IconUri"])
+            .no_console()
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        // `reg query` prints "    IconUri    REG_SZ    <value>".
+        if current.lines().any(|l| l.trim_end().ends_with(&icon)) {
+            return;
+        }
+
+        // A `.png` is what the platform actually renders here; an `.ico` is not
+        // picked up. IconBackgroundColor is only used by older shells.
+        for (name, value) in [
+            ("DisplayName", "Limen"),
+            ("IconUri", icon.as_str()),
+            ("IconBackgroundColor", "00000000"),
+        ] {
+            // `.output()` rather than `run_ok`: it captures reg's chatty "The
+            // operation completed successfully." instead of letting it land in
+            // the debug build's console.
+            let _ = Command::new("reg")
+                .args(["add", KEY, "/v", name, "/t", "REG_SZ", "/d", value, "/f"])
+                .no_console()
+                .output();
+        }
+    }
+}
+
 /// Show a best-effort native desktop notification using the OS's own notifier
 /// (`notify-send` / `osascript` / PowerShell toast) — no extra dependency, and a
 /// silent no-op if the notifier isn't present.
@@ -325,22 +379,30 @@ pub fn notify(title: &str, body: &str) {
             s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
         };
         let ps = |s: String| s.replace('\'', "''");
-        // An `appLogoOverride` image needs a URI, and the toast XML only accepts
-        // forward slashes in a file:// path.
-        let logo = icon_file()
-            .map(|p| {
-                format!(
-                    "<image placement='appLogoOverride' src='file:///{}'/>",
-                    xml(&p.to_string_lossy().replace('\\', "/"))
-                )
-            })
-            .unwrap_or_default();
-        // The stock ToastText02 template has no image slot, so build the document
-        // by hand with the generic binding instead.
+        // The modern `ToastGeneric` binding is NOT usable here: Limen has no
+        // registered AppUserModelID (registering one means writing outside the
+        // portable dir), and for an unregistered id Windows accepts only the
+        // legacy templates. A ToastGeneric document is dropped *silently* —
+        // `Show()` returns without error and nothing is displayed. The legacy
+        // `ToastImageAndText02` is accepted and has an image slot, so use it,
+        // falling back to the image-less `ToastText02` when the icon is missing.
+        let image = icon_file().map(|p| {
+            // The image needs a URI, and the path must use forward slashes.
+            format!(
+                "<image id='1' src='file:///{}'/>",
+                xml(&p.to_string_lossy().replace('\\', "/"))
+            )
+        });
+        let template = if image.is_some() {
+            "ToastImageAndText02"
+        } else {
+            "ToastText02"
+        };
         let doc = format!(
-            "<toast><visual><binding template='ToastGeneric'>\
-             <text>{}</text><text>{}</text>{logo}\
+            "<toast><visual><binding template='{template}'>{}\
+             <text id='1'>{}</text><text id='2'>{}</text>\
              </binding></visual></toast>",
+            image.unwrap_or_default(),
             xml(title),
             xml(body),
         );

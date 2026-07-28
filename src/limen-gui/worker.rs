@@ -120,6 +120,10 @@ impl Worker {
         {
             let evt_tx = evt_tx.clone();
             thread::spawn(move || {
+                // Give the OS the app's identity first, so its notifications are
+                // labelled with Limen's own icon rather than a bare name. Does a
+                // little process work, hence off the UI thread with the check.
+                limen_core::register_notifier();
                 let current = env!("CARGO_PKG_VERSION");
                 let mut last_notified: Option<String> = None;
                 loop {
