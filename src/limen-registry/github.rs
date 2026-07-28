@@ -61,8 +61,23 @@ const LIBRARY_REPOS: &[&str] = &["limen-proto", "limen-sdk-rust"];
 /// The `module` topic that authoritatively marks a repo as a Limen module.
 const MODULE_TOPIC: &str = "limen-module";
 
-/// List the modules published under `org` on GitHub.
-pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
+/// A repo that passed the module filter, before its manifest is fetched. The
+/// GUI lists these first, then fetches each one's metadata in parallel (see
+/// [`fetch_remote_module`]) so cards can appear as they arrive.
+#[derive(Debug, Clone)]
+pub struct RepoCandidate {
+    pub org: String,
+    /// Repo name (e.g. `limen-devices`).
+    pub name: String,
+    pub default_branch: String,
+    pub description: Option<String>,
+    pub html_url: String,
+}
+
+/// List the org's repos that *look* like modules (module topic or `limen-`
+/// prefix, not archived) — **without** fetching their manifests. Cheap: one
+/// request. The caller resolves each candidate via [`fetch_remote_module`].
+pub fn list_org_module_repos(org: &str) -> Result<Vec<RepoCandidate>> {
     let url = format!("https://api.github.com/orgs/{org}/repos?per_page=100&type=public");
     let output = Command::new("curl")
         .args([
@@ -96,36 +111,54 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
         }
     };
 
-    // Keep only repos that look like modules AND carry a parseable limen.toml —
-    // reading the manifest gives us the metadata to show before install.
-    let mut modules: Vec<RemoteModule> = repos
+    Ok(repos
         .into_iter()
         .filter(|r| !r.archived && is_module(r))
-        .filter_map(|r| {
-            let m = fetch_manifest(org, &r.name, &r.default_branch)?;
-            let repo = format!("{org}/{}", r.name);
-            // A native (compiled) module can only run where a prebuilt library
-            // for this exact OS/arch/bitness exists in its release — plus a
-            // checksum to verify it. If not, hide it from this platform's
-            // manager rather than offering an install that can't work.
-            let native = m.module.language == limen_proto::Language::Native
-                && m.module.abi == limen_proto::Abi::Native;
-            if native && !crate::registry::native_release_ready(&repo) {
-                return None;
-            }
-            Some(RemoteModule {
-                name: r.name.strip_prefix("limen-").unwrap_or(&r.name).to_string(),
-                repo,
-                description: m.module.description.clone().or(r.description),
-                url: r.html_url,
-                version: Some(m.module.version.clone()),
-                capabilities: m.provides.capabilities.clone(),
-                commit: fetch_latest_commit(org, &r.name, &r.default_branch),
-                branch: Some(r.default_branch),
-            })
+        .map(|r| RepoCandidate {
+            org: org.to_string(),
+            name: r.name,
+            default_branch: r.default_branch,
+            description: r.description,
+            html_url: r.html_url,
         })
-        .collect();
+        .collect())
+}
 
+/// Resolve one candidate into a [`RemoteModule`] by reading its `limen.toml`
+/// (plus its tip commit). `None` if it has no parseable manifest, or it's a
+/// native module with no prebuilt binary for this platform — those are hidden.
+/// Two-to-three HTTP requests; the GUI runs many of these concurrently.
+pub fn fetch_remote_module(c: &RepoCandidate) -> Option<RemoteModule> {
+    let m = fetch_manifest(&c.org, &c.name, &c.default_branch)?;
+    let repo = format!("{}/{}", c.org, c.name);
+    // A native (compiled) module can only run where a prebuilt library for this
+    // exact OS/arch/bitness exists in its release — plus a checksum. If not,
+    // hide it from this platform's manager rather than offering a broken install.
+    let native = m.module.language == limen_proto::Language::Native
+        && m.module.abi == limen_proto::Abi::Native;
+    if native && !crate::registry::native_release_ready(&repo) {
+        return None;
+    }
+    Some(RemoteModule {
+        name: c.name.strip_prefix("limen-").unwrap_or(&c.name).to_string(),
+        repo,
+        description: m.module.description.clone().or_else(|| c.description.clone()),
+        url: c.html_url.clone(),
+        version: Some(m.module.version.clone()),
+        capabilities: m.provides.capabilities.clone(),
+        commit: fetch_latest_commit(&c.org, &c.name, &c.default_branch),
+        branch: Some(c.default_branch.clone()),
+    })
+}
+
+/// List the modules published under `org`, metadata included — sequential. The
+/// GUI streams these in parallel instead (via the two functions above); this
+/// stays for the CLI and tests.
+pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
+    let mut modules: Vec<RemoteModule> = list_org_module_repos(org)?
+        .iter()
+        .filter_map(fetch_remote_module)
+        .collect();
     modules.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(modules)
 }

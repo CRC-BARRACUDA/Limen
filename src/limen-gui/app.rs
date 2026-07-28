@@ -168,9 +168,9 @@ pub struct LimenApp {
     modules_revealed_at: Option<f64>,
     /// The filter the current reveal was started for; a change replays the reveal.
     shown_filter: ModuleFilter,
-    /// When the async GitHub list arrived — the reveal base for the available
-    /// cards, so they animate in when they load (not from tab-open).
-    remote_revealed_at: Option<f64>,
+    /// Arrival time per available module — the cards stream in from GitHub in
+    /// parallel (out of order), so each animates in from when *it* arrived.
+    remote_arrivals: HashMap<String, f64>,
 
     /// Modules mid-removal: name → animation start time (or a negative sentinel
     /// once the actual removal has been sent). Drives the exit animation.
@@ -243,7 +243,7 @@ impl LimenApp {
             shown_dev_tab: DevTab::DevMode,
             modules_revealed_at: None,
             shown_filter: ModuleFilter::All,
-            remote_revealed_at: None,
+            remote_arrivals: HashMap::new(),
             removing: HashMap::new(),
             update: None,
             updating: false,
@@ -415,17 +415,20 @@ impl LimenApp {
                 Event::RuntimeInstalling(rt) => {
                     self.installing_runtime = rt;
                 }
-                Event::RemoteModules(result) => {
+                Event::RemoteFound(m) => {
+                    // Streamed in as fetched (parallel, out of order). Append,
+                    // keep alphabetical, and stamp arrival for the entrance anim.
+                    if !self.remote.iter().any(|r| r.name == m.name) {
+                        self.remote_arrivals.insert(m.name.clone(), now);
+                        self.remote.push(m);
+                        self.remote.sort_by(|a, b| a.name.cmp(&b.name));
+                    }
+                    self.remote_error = None;
+                }
+                Event::RemoteDone(result) => {
                     self.remote_loading = false;
-                    match result {
-                        Ok(list) => {
-                            self.remote = list;
-                            self.remote_error = None;
-                            // Timestamp the load so the available cards animate in
-                            // when they actually arrive (async), not from tab-open.
-                            self.remote_revealed_at = Some(now);
-                        }
-                        Err(e) => self.remote_error = Some(e),
+                    if let Err(e) = result {
+                        self.remote_error = Some(e);
                     }
                 }
                 Event::RunDone { tag, result } => match tag {
@@ -918,7 +921,7 @@ impl eframe::App for LimenApp {
                 removing,
                 modules_revealed_at,
                 shown_filter,
-                remote_revealed_at,
+                remote_arrivals,
                 developer_revealed_at,
                 shown_dev_tab,
                 detail_tabs,
@@ -968,7 +971,7 @@ impl eframe::App for LimenApp {
                         &mut reload,
                         modules_revealed_at,
                         shown_filter,
-                        *remote_revealed_at,
+                        remote_arrivals,
                         removing,
                     ),
                     Some(Tab::Module(name)) => module_view(
@@ -1191,6 +1194,9 @@ impl eframe::App for LimenApp {
         if self.active_tab() == Some(Tab::Modules) && !self.remote_fetched {
             self.remote_fetched = true;
             self.remote_loading = true;
+            self.remote.clear();
+            self.remote_arrivals.clear();
+            self.remote_error = None;
             self.worker.send(Command::ListRemote);
         }
 
@@ -1497,7 +1503,7 @@ fn modules_page(
     reload: &mut bool,
     modules_revealed_at: &mut Option<f64>,
     shown_filter: &mut ModuleFilter,
-    remote_revealed_at: Option<f64>,
+    remote_arrivals: &HashMap<String, f64>,
     removing: &HashMap<String, f64>,
 ) {
     ui.add_space(4.0);
@@ -1597,11 +1603,9 @@ fn modules_page(
             shown += 1;
         }
 
-        // Available in the org (not already installed). These load asynchronously,
-        // so their entrance is timed from when the list arrived (or the last filter
-        // switch, whichever is later) with its own stagger index.
-        let avail_reveal = reveal_at.max(remote_revealed_at.unwrap_or(reveal_at));
-        let mut avail_i = 0usize;
+        // Available in the org (not already installed). They stream in from
+        // GitHub in parallel, so each card animates from its own arrival time
+        // (falling back to the tab-reveal for ones already present).
         for r in remote {
             if *filter == ModuleFilter::Installed
                 || installed_names.contains(r.name.as_str())
@@ -1610,10 +1614,10 @@ fn modules_page(
                 continue;
             }
             let id = egui::Id::new(("availcard", r.name.as_str()));
-            reveal_card(ui, id, avail_i, avail_reveal, now, animate, 0.0, |ui| {
+            let arrival = remote_arrivals.get(&r.name).copied().unwrap_or(reveal_at);
+            reveal_card(ui, id, 0, arrival, now, animate, 0.0, |ui| {
                 available_card(ui, r, installing, add);
             });
-            avail_i += 1;
             shown += 1;
         }
 

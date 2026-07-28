@@ -6,7 +6,7 @@
 //! frame.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
@@ -16,7 +16,10 @@ use limen_core::{
     Config, Engine, ModuleSpec, UpdateInfo, apply_update, can_install, check_update,
     install_runtime, is_newer, paths,
 };
-use limen_registry::{Lockfile, Registry, RemoteModule, latest_release_version, list_org_modules};
+use limen_registry::{
+    Lockfile, Registry, RemoteModule, fetch_remote_module, latest_release_version,
+    list_org_module_repos,
+};
 use serde_json::Value;
 
 /// A snapshot of installed modules plus which ones came from a git install
@@ -29,6 +32,9 @@ pub struct ModuleSnapshot {
     /// name → error, for modules that failed to start (shown in their tab).
     pub failed: HashMap<String, String>,
 }
+
+/// How many available-module metadata fetches run concurrently.
+const REMOTE_FETCH_WORKERS: usize = 5;
 
 /// A request from the UI to the worker.
 pub enum Command {
@@ -84,8 +90,10 @@ pub enum Event {
     Ready(ModuleSnapshot),
     /// Updated installed set (after `Refresh` / install / remove).
     Modules(ModuleSnapshot),
-    /// Modules available in the org (or an error string).
-    RemoteModules(Result<Vec<RemoteModule>, String>),
+    /// One available module resolved (streamed as it's fetched, in parallel).
+    RemoteFound(RemoteModule),
+    /// The available-module listing finished (`Ok`) or the org list failed.
+    RemoteDone(Result<(), String>),
     /// A run finished.
     RunDone {
         tag: RunTag,
@@ -326,8 +334,38 @@ fn run(
                 reload(&mut engine, &dirs, &evt_tx);
             }
             Command::ListRemote => {
-                let result = list_org_modules(&org()).map_err(|e| format!("{e:#}"));
-                let _ = evt_tx.send(Event::RemoteModules(result));
+                // Off-thread so the worker stays responsive, and fan the per-repo
+                // metadata fetches across a small pool — each module is streamed
+                // to the UI (RemoteFound) the moment it resolves, so cards appear
+                // progressively instead of all at once.
+                let evt = evt_tx.clone();
+                let org = org();
+                thread::spawn(move || {
+                    let candidates = match list_org_module_repos(&org) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = evt.send(Event::RemoteDone(Err(format!("{e:#}"))));
+                            return;
+                        }
+                    };
+                    let queue = Arc::new(Mutex::new(candidates.into_iter()));
+                    let mut handles = Vec::new();
+                    for _ in 0..REMOTE_FETCH_WORKERS {
+                        let queue = Arc::clone(&queue);
+                        let evt = evt.clone();
+                        handles.push(thread::spawn(move || loop {
+                            let next = queue.lock().unwrap().next();
+                            let Some(cand) = next else { break };
+                            if let Some(m) = fetch_remote_module(&cand) {
+                                let _ = evt.send(Event::RemoteFound(m));
+                            }
+                        }));
+                    }
+                    for h in handles {
+                        let _ = h.join();
+                    }
+                    let _ = evt.send(Event::RemoteDone(Ok(())));
+                });
             }
             Command::Run {
                 tag,
