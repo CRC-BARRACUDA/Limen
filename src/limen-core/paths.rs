@@ -37,6 +37,14 @@ pub fn settings_path() -> PathBuf {
     home().join("settings.json")
 }
 
+/// The app icon extracted to disk (`<home>/state/icon.png`).
+///
+/// OS notifiers take an image *path*, but the icon is compiled into the binary —
+/// so it is written out here on demand. Derived, not user data: safe to delete.
+pub fn icon_path() -> PathBuf {
+    state_dir().join("icon.png")
+}
+
 /// Create the standard portable directories (currently the modules dir) so a
 /// fresh install has a place to drop modules. Best-effort; ignores errors.
 pub fn ensure_dirs() {

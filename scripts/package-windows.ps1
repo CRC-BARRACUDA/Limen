@@ -80,7 +80,10 @@ $archive = Join-Path $dist "$stem.7z"
 if ($LASTEXITCODE -ne 0) { throw "7z failed (exit $LASTEXITCODE)" }
 
 # Also drop the raw GUI binary next to the archive for the self-updater's release asset.
-Copy-Item 'target\release\Limen.exe' (Join-Path $dist 'Limen.exe')
+# It MUST carry the platform + arch tokens: the updater only considers assets whose
+# name contains both, so a bare "Limen.exe" is invisible to it and the .7z gets
+# picked up instead.
+Copy-Item 'target\release\Limen.exe' (Join-Path $dist "$stem.exe")
 
 Remove-Item -Recurse -Force (Join-Path $dist '.stage')
 

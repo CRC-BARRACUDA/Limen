@@ -70,8 +70,15 @@ fn platform_needle() -> (&'static str, &'static str) {
 }
 
 /// Whether an asset name is a distribution archive we can extract a binary from.
+///
+/// Getting this list wrong is destructive, not merely unhelpful: anything not
+/// recognised here is taken for a raw binary and renamed straight over the
+/// running executable. A `.7z` slipping through did exactly that — the installed
+/// `Limen.exe` became a 7-Zip archive, and Windows then refused to start it with
+/// "Unsupported 16-Bit Application". Every archive format the packaging scripts
+/// can emit must appear here.
 fn is_extractable_archive(name: &str) -> bool {
-    const EXTS: [&str; 4] = [".tar.gz", ".tgz", ".tar", ".zip"];
+    const EXTS: [&str; 5] = [".tar.gz", ".tgz", ".tar", ".zip", ".7z"];
     EXTS.iter().any(|e| name.ends_with(e))
 }
 
@@ -270,37 +277,145 @@ pub fn restart_app() -> ! {
     }
 }
 
+/// The app icon written to disk, so a notifier can point at it.
+///
+/// Notifiers take an image path, but the icon ships compiled into the binary, so
+/// it is extracted to `<home>/state/icon.png` on first use. Rewritten only when
+/// missing or a different size, so repeat notifications don't touch the disk.
+/// `None` means the notification simply goes out without an icon.
+fn icon_file() -> Option<PathBuf> {
+    const ICON: &[u8] = include_bytes!("../../resources/icon.png");
+    let path = crate::paths::icon_path();
+    let current = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if current as usize == ICON.len() {
+        return Some(path);
+    }
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::write(&path, ICON).ok()?;
+    Some(path)
+}
+
+/// Register Limen's identity with the Windows notification platform, so toasts
+/// carry the app name **and icon** in their header rather than a bare name.
+///
+/// Windows takes that identity from an AppUserModelID registration; there is no
+/// way to supply it on the toast itself. The only alternative source is a Start
+/// Menu shortcut carrying `System.AppUserModel.ID`, which would mean writing into
+/// the user's profile — this single `HKCU` key is the smaller footprint. It is
+/// still the one thing Limen leaves outside its base dir, so it is written only
+/// when absent or stale (a portable install changes path when the stick moves).
+///
+/// Note the icon does **not** appear on the run that registers: `WpnUserService`
+/// caches an app's display data when it starts, so the header icon shows from the
+/// next sign-in onwards. Best-effort throughout — failure just means a plainer
+/// notification. A no-op on other platforms.
+pub fn register_notifier() {
+    #[cfg(target_os = "windows")]
+    {
+        const KEY: &str = r"HKCU\Software\Classes\AppUserModelId\Limen";
+        let Some(icon) = icon_file() else { return };
+        let icon = icon.to_string_lossy().to_string();
+
+        // Skip the write when it already says the right thing — this runs at
+        // every startup, and the registry is not ours to churn.
+        let current = Command::new("reg")
+            .args(["query", KEY, "/v", "IconUri"])
+            .no_console()
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        // `reg query` prints "    IconUri    REG_SZ    <value>".
+        if current.lines().any(|l| l.trim_end().ends_with(&icon)) {
+            return;
+        }
+
+        // A `.png` is what the platform actually renders here; an `.ico` is not
+        // picked up. IconBackgroundColor is only used by older shells.
+        for (name, value) in [
+            ("DisplayName", "Limen"),
+            ("IconUri", icon.as_str()),
+            ("IconBackgroundColor", "00000000"),
+        ] {
+            // `.output()` rather than `run_ok`: it captures reg's chatty "The
+            // operation completed successfully." instead of letting it land in
+            // the debug build's console.
+            let _ = Command::new("reg")
+                .args(["add", KEY, "/v", name, "/t", "REG_SZ", "/d", value, "/f"])
+                .no_console()
+                .output();
+        }
+    }
+}
+
 /// Show a best-effort native desktop notification using the OS's own notifier
 /// (`notify-send` / `osascript` / PowerShell toast) — no extra dependency, and a
 /// silent no-op if the notifier isn't present.
 pub fn notify(title: &str, body: &str) {
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("notify-send")
-            .args(["--app-name", "Limen", title, body])
-            .spawn();
+        let mut cmd = Command::new("notify-send");
+        cmd.args(["--app-name", "Limen"]);
+        if let Some(icon) = icon_file() {
+            cmd.arg("--icon").arg(icon);
+        }
+        let _ = cmd.args([title, body]).spawn();
     }
     #[cfg(target_os = "macos")]
     {
+        // `display notification` has no icon parameter — the notification always
+        // carries the icon of whatever ran the script. Showing a custom one needs
+        // a signed app bundle, so the icon is simply omitted here.
         let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
         let script = format!("display notification {} with title {}", q(body), q(title));
         let _ = Command::new("osascript").args(["-e", &script]).spawn();
     }
     #[cfg(target_os = "windows")]
     {
-        let q = |s: &str| s.replace('\'', "''");
-        let ps = format!(
+        // Escape for XML first (the toast payload is a document), then for the
+        // single-quoted PowerShell string that carries it.
+        let xml = |s: &str| {
+            s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        };
+        let ps = |s: String| s.replace('\'', "''");
+        // The modern `ToastGeneric` binding is NOT usable here: Limen has no
+        // registered AppUserModelID (registering one means writing outside the
+        // portable dir), and for an unregistered id Windows accepts only the
+        // legacy templates. A ToastGeneric document is dropped *silently* —
+        // `Show()` returns without error and nothing is displayed. The legacy
+        // `ToastImageAndText02` is accepted and has an image slot, so use it,
+        // falling back to the image-less `ToastText02` when the icon is missing.
+        let image = icon_file().map(|p| {
+            // The image needs a URI, and the path must use forward slashes.
+            format!(
+                "<image id='1' src='file:///{}'/>",
+                xml(&p.to_string_lossy().replace('\\', "/"))
+            )
+        });
+        let template = if image.is_some() {
+            "ToastImageAndText02"
+        } else {
+            "ToastText02"
+        };
+        let doc = format!(
+            "<toast><visual><binding template='{template}'>{}\
+             <text id='1'>{}</text><text id='2'>{}</text>\
+             </binding></visual></toast>",
+            image.unwrap_or_default(),
+            xml(title),
+            xml(body),
+        );
+        let script = format!(
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null; \
-             $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
-             $t = $x.GetElementsByTagName('text'); \
-             $t[0].AppendChild($x.CreateTextNode('{}')) > $null; \
-             $t[1].AppendChild($x.CreateTextNode('{}')) > $null; \
+             [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType=WindowsRuntime] > $null; \
+             $x = New-Object Windows.Data.Xml.Dom.XmlDocument; \
+             $x.LoadXml('{}'); \
              [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Limen').Show([Windows.UI.Notifications.ToastNotification]::new($x));",
-            q(title),
-            q(body),
+            ps(doc),
         );
         let _ = Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
             .no_console()
             .spawn();
     }
@@ -322,7 +437,8 @@ fn extract_binary(
         // bsdtar (default `tar` on Windows/macOS) reads zips; fall back to unzip.
         run_ok(Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(&dir))
             || run_ok(Command::new("unzip").arg("-oq").arg(archive).arg("-d").arg(&dir))
-    } else if lower_name.ends_with(".tar") {
+    } else if lower_name.ends_with(".tar") || lower_name.ends_with(".7z") {
+        // bsdtar reads 7-Zip archives too (libarchive), so no 7z.exe is needed.
         run_ok(Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(&dir))
     } else {
         run_ok(Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(&dir))
@@ -438,6 +554,34 @@ mod tests {
         assert_eq!(select_asset(&assets), None);
     }
 
+    /// A `.7z` must never be mistaken for a raw binary. It once was, and the
+    /// updater renamed the archive over the running `Limen.exe` — which Windows
+    /// then refused to launch as an "Unsupported 16-Bit Application".
+    #[test]
+    fn archive_is_never_mistaken_for_a_raw_binary() {
+        let (os, arch) = platform_needle();
+        let sevenz = format!("limen-1.0.0-{os}-{arch}.7z");
+        let sha = format!("{sevenz}.sha256");
+        let exe = format!("limen-1.0.0-{os}-{arch}.exe");
+
+        for name in [&sevenz, &format!("limen-{os}-{arch}.zip"), &format!("limen-{os}-{arch}.tgz")] {
+            assert!(is_extractable_archive(name), "{name} must count as an archive");
+        }
+
+        // Archive + checksum only → the archive is chosen, to be extracted.
+        let assets = vec![(sevenz.clone(), "u_7z".into()), (sha.clone(), "u_sha".into())];
+        assert_eq!(select_asset(&assets).as_deref(), Some("u_7z"));
+
+        // With a real binary alongside it, the binary wins — and the packaging
+        // script names it with the platform tokens so it is visible at all.
+        let assets = vec![
+            (sevenz, "u_7z".into()),
+            (exe, "u_exe".into()),
+            (sha, "u_sha".into()),
+        ];
+        assert_eq!(select_asset(&assets).as_deref(), Some("u_exe"));
+    }
+
     #[test]
     fn extracts_binary_from_tarball() {
         // Build a tarball shaped like our release: <stem>/<exe> inside.
@@ -460,6 +604,44 @@ mod tests {
         let found = extract_binary(&archive, &fake_exe, exe_name, "limen.tar.gz").unwrap();
         assert_eq!(found.file_name().unwrap(), "Limen");
         assert_eq!(std::fs::read(&found).unwrap(), b"#!/bin/true\n");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The Windows packaging script emits a `.7z`, so the updater has to be able
+    /// to get the binary back out of one — otherwise it falls through to treating
+    /// the archive itself as the new executable.
+    #[test]
+    fn extracts_binary_from_7z() {
+        let base = std::env::temp_dir().join(format!("limen-7z-test-{}", std::process::id()));
+        let stem = base.join("Limen-9.9.9-windows-x86_64");
+        std::fs::create_dir_all(&stem).unwrap();
+        std::fs::write(stem.join("Limen.exe"), b"MZ fake binary").unwrap();
+        std::fs::write(stem.join("LICENSE"), b"gpl").unwrap();
+        let archive = base.join("Limen-9.9.9-windows-x86_64.7z");
+        // bsdtar writes 7z via libarchive; skip rather than fail where it can't.
+        let built = run_ok(
+            Command::new("tar")
+                .arg("-a")
+                .arg("-cf")
+                .arg(&archive)
+                .arg("--format")
+                .arg("7zip")
+                .arg("-C")
+                .arg(&base)
+                .arg("Limen-9.9.9-windows-x86_64"),
+        );
+        if !built {
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+
+        let fake_exe = base.join("Limen.exe");
+        let exe_name = std::ffi::OsStr::new("Limen.exe");
+        let found =
+            extract_binary(&archive, &fake_exe, exe_name, "limen-9.9.9-windows-x86_64.7z").unwrap();
+        assert_eq!(found.file_name().unwrap(), "Limen.exe");
+        assert_eq!(std::fs::read(&found).unwrap(), b"MZ fake binary");
 
         let _ = std::fs::remove_dir_all(&base);
     }
