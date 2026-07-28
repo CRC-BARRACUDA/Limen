@@ -89,10 +89,20 @@ impl Widget {
     pub fn row_ids(self, ids: Vec<String>) -> Self {
         self.set("row_ids", json!(ids))
     }
-    /// Attach a right-click context menu to each row (see [`menu_item`]).
+    /// Attach a right-click context menu shared by every row (see [`menu_item`]).
     pub fn row_menu(self, items: Vec<MenuItem>) -> Self {
         let arr: Vec<Value> = items.into_iter().map(MenuItem::into_value).collect();
         self.set("menu", Value::Array(arr))
+    }
+    /// Per-row menus (parallel to `rows`); a non-empty entry overrides the
+    /// shared `row_menu` for that row — so rows can offer different actions (or
+    /// an empty menu for none).
+    pub fn row_menus(self, per_row: Vec<Vec<MenuItem>>) -> Self {
+        let arr: Vec<Value> = per_row
+            .into_iter()
+            .map(|items| Value::Array(items.into_iter().map(MenuItem::into_value).collect()))
+            .collect();
+        self.set("row_menus", Value::Array(arr))
     }
     /// Invoke `capability`.`method` when a row is double-clicked, opening the
     /// returned view in a new tab.

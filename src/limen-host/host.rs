@@ -477,20 +477,45 @@ fn host_open(params: Value) -> std::result::Result<Value, RpcError> {
 
 #[cfg(target_os = "linux")]
 fn open_target(target: &str, value: &str) {
+    use std::process::Command;
     // Registry / Device Manager are Windows-only; a path or URL opens in the
     // desktop's default handler (file manager for a directory).
     if matches!(target, "registry" | "device_manager") || value.is_empty() {
         return;
     }
-    let _ = std::process::Command::new("xdg-open").arg(value).spawn();
+    match target {
+        // No portable "select this file" across file managers, so settle for
+        // opening the containing directory.
+        "reveal" => {
+            let dir = std::path::Path::new(value).parent().unwrap_or(std::path::Path::new(value));
+            let _ = Command::new("xdg-open").arg(dir).spawn();
+        }
+        // xdg-open already routes text files to the configured editor.
+        _ => {
+            let _ = Command::new("xdg-open").arg(value).spawn();
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn open_target(target: &str, value: &str) {
+    use std::process::Command;
     if matches!(target, "registry" | "device_manager") || value.is_empty() {
         return;
     }
-    let _ = std::process::Command::new("open").arg(value).spawn();
+    match target {
+        // -R reveals the file in Finder rather than opening it.
+        "reveal" => {
+            let _ = Command::new("open").args(["-R", value]).spawn();
+        }
+        // -t forces the default *text editor* instead of the file's handler.
+        "edit" => {
+            let _ = Command::new("open").args(["-t", value]).spawn();
+        }
+        _ => {
+            let _ = Command::new("open").arg(value).spawn();
+        }
+    }
 }
 
 /// Launch something through the shell, optionally asking for elevation.
@@ -580,7 +605,23 @@ fn open_target(target: &str, value: &str) {
         "url" => {
             let _ = Command::new("cmd").args(["/C", "start", "", value]).no_console().spawn();
         }
-        // A filesystem path → reveal in Explorer.
+        // Open Explorer with the item itself selected, rather than just opening
+        // its folder. `/select,<path>` must arrive as ONE argument with the path
+        // quoted inside it — Rust's own argument quoting produces a form
+        // explorer rejects, so the switch is passed raw.
+        "reveal" => {
+            use std::os::windows::process::CommandExt;
+            let _ = Command::new("explorer")
+                .raw_arg(format!("/select,\"{value}\""))
+                .no_console()
+                .spawn();
+        }
+        // Show a file's contents as text, whatever its extension says. Notepad
+        // is guaranteed present; the default handler would run a .bat, not open it.
+        "edit" => {
+            let _ = Command::new("notepad.exe").arg(value).no_console().spawn();
+        }
+        // A filesystem path → open in Explorer.
         _ => {
             let _ = Command::new("explorer").arg(value).spawn();
         }

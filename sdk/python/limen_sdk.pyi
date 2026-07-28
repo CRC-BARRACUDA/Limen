@@ -88,6 +88,7 @@ class Table(Widget):
         row_ids: Optional[List[str]] = ...,
         menu: Optional[List[MenuItem]] = ...,
         on_activate: Optional[tuple[str, str]] = ...,
+        row_menus: Optional[List[List[MenuItem]]] = ...,
     ) -> None: ...
 
 class Row(Widget):
