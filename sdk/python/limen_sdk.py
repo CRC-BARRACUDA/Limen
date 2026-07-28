@@ -181,11 +181,15 @@ class Table(Widget):
     returned view opens in a new tab. The activated row's id is sent as `id`.
     """
 
-    def __init__(self, columns, rows, row_ids=None, menu=None, on_activate=None):
+    def __init__(self, columns, rows, row_ids=None, menu=None, on_activate=None,
+                 row_menus=None):
         self.columns, self.rows = columns, rows
         self.row_ids = row_ids
         self.menu = menu
         self.on_activate = on_activate
+        # Optional per-row menus (parallel to rows); a non-empty entry overrides
+        # `menu` for that row.
+        self.row_menus = row_menus
 
     def to_spec(self):
         spec = {
@@ -197,6 +201,8 @@ class Table(Widget):
             spec["row_ids"] = [str(i) for i in self.row_ids]
         if self.menu:
             spec["menu"] = [mi.to_spec() for mi in self.menu]
+        if self.row_menus:
+            spec["row_menus"] = [[mi.to_spec() for mi in m] for m in self.row_menus]
         if self.on_activate is not None:
             cap, method = self.on_activate
             spec["on_activate"] = {

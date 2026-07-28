@@ -697,9 +697,14 @@ pub enum Widget {
         /// Per-row identity (parallel to `rows`), sent as `id` on a row action.
         #[serde(default)]
         row_ids: Vec<String>,
-        /// Right-click context-menu items for a row.
+        /// Right-click context-menu items shared by every row.
         #[serde(default)]
         menu: Vec<MenuItem>,
+        /// Optional per-row menus (parallel to `rows`); a non-empty entry here
+        /// overrides the shared `menu` for that row — so rows can offer
+        /// different actions (or none).
+        #[serde(default)]
+        row_menus: Vec<Vec<MenuItem>>,
         /// What double-clicking a row does.
         #[serde(default)]
         on_activate: Option<RowAction>,
@@ -841,6 +846,7 @@ fn render_widget(
             rows,
             row_ids,
             menu,
+            row_menus,
             on_activate,
         } => render_table(
             ui,
@@ -848,6 +854,7 @@ fn render_widget(
             rows,
             row_ids,
             menu,
+            row_menus,
             on_activate.as_ref(),
             clicked,
         ),
@@ -948,6 +955,7 @@ fn render_table(
     rows: &[Vec<String>],
     row_ids: &[String],
     menu: &[MenuItem],
+    row_menus: &[Vec<MenuItem>],
     on_activate: Option<&RowAction>,
     clicked: &mut Option<Invoke>,
 ) {
@@ -957,18 +965,12 @@ fn render_table(
     if ncols == 0 {
         return;
     }
-    if menu.is_empty() && on_activate.is_none() {
+    let has_row_menus = row_menus.iter().any(|m| !m.is_empty());
+    if menu.is_empty() && !has_row_menus && on_activate.is_none() {
         render_plain_table(ui, columns, rows, ncols);
     } else {
         render_interactive_table(
-            ui,
-            columns,
-            rows,
-            row_ids,
-            menu,
-            on_activate,
-            clicked,
-            ncols,
+            ui, columns, rows, row_ids, menu, row_menus, on_activate, clicked, ncols,
         );
     }
 }
@@ -1007,6 +1009,7 @@ fn render_interactive_table(
     rows: &[Vec<String>],
     row_ids: &[String],
     menu: &[MenuItem],
+    row_menus: &[Vec<MenuItem>],
     on_activate: Option<&RowAction>,
     clicked: &mut Option<Invoke>,
     ncols: usize,
@@ -1103,9 +1106,14 @@ fn render_interactive_table(
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             let row_id = row_ids.get(r).cloned().unwrap_or_default();
-            if !menu.is_empty() {
+            // A non-empty per-row menu overrides the shared one for this row.
+            let this_menu: &[MenuItem] = match row_menus.get(r) {
+                Some(m) if !m.is_empty() => m,
+                _ => menu,
+            };
+            if !this_menu.is_empty() {
                 let mut picked: Option<Invoke> = None;
-                resp.context_menu(|ui| render_row_menu(ui, menu, &row_id, &mut picked));
+                resp.context_menu(|ui| render_row_menu(ui, this_menu, &row_id, &mut picked));
                 if picked.is_some() {
                     *clicked = picked;
                 }
