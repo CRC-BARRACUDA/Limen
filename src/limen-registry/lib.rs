@@ -22,7 +22,9 @@ mod source;
 mod trust;
 mod util;
 
-pub use github::{list_org_modules, RemoteModule};
+pub use github::{
+    fetch_remote_module, list_org_module_repos, list_org_modules, RemoteModule, RepoCandidate,
+};
 pub use lockfile::{LockEntry, Lockfile};
 pub use registry::{
     latest_release_version, set_update_modules_dir, InstallReport, Registry, VerifyItem,
