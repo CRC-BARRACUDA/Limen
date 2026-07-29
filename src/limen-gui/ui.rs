@@ -152,7 +152,14 @@ pub fn reveal_t(
 /// A single-line text field whose border eases from grey (`BORDER`) to `ACCENT`
 /// on focus (and part-way on hover) — instead of snapping. It owns the border:
 /// egui's own frame stroke is suppressed so there's no double outline.
-pub fn text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> egui::Response {
+/// `password` masks the input (for secrets) while keeping the same animation.
+pub fn text_field(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+    password: bool,
+) -> egui::Response {
     // Draw the field with no frame stroke (the fill stays), so ours is the only
     // border. `scope` keeps the visuals tweak local to this widget.
     let resp = ui
@@ -168,6 +175,7 @@ pub fn text_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) 
             ui.add(
                 egui::TextEdit::singleline(text)
                     .hint_text(hint)
+                    .password(password)
                     // Taller box: more vertical padding so the caret sits inside
                     // it with room, rather than looking taller than the field.
                     .margin(egui::Margin::symmetric(8.0, 7.0))
@@ -668,6 +676,14 @@ pub enum Widget {
         #[serde(default)]
         default: String,
     },
+    /// An animated on/off checkbox; its boolean state is returned in params.
+    Checkbox {
+        id: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        default: bool,
+    },
     Button {
         text: String,
         action: Action,
@@ -773,16 +789,10 @@ fn render_widget(
                         .desired_width(f32::INFINITY)
                         .hint_text(placeholder.as_str()),
                 );
-            } else if *password {
-                ui.add(
-                    egui::TextEdit::singleline(value)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(placeholder.as_str())
-                        .password(true),
-                );
             } else {
-                // Single-line fields get the animated focus border.
-                text_field(ui, value, placeholder.as_str(), f32::INFINITY);
+                // Single-line fields — including password/secret ones — get the
+                // animated focus border.
+                text_field(ui, value, placeholder.as_str(), f32::INFINITY, *password);
             }
         }
         Widget::Select {
@@ -801,6 +811,12 @@ fn render_widget(
             };
             let value = inputs.entry(id.clone()).or_insert(initial);
             dropdown(ui, id.clone(), value, options);
+        }
+        Widget::Checkbox { id, label, default } => {
+            let entry = inputs.entry(id.clone()).or_insert_with(|| default.to_string());
+            let mut on = entry.as_str() == "true";
+            toggle(ui, &mut on, label);
+            *entry = on.to_string();
         }
         Widget::Button {
             text,
@@ -1351,6 +1367,10 @@ fn collect_ids(
                 if let Some(v) = inputs.get(id) {
                     map.insert(id.clone(), Value::String(v.clone()));
                 }
+            }
+            Widget::Checkbox { id, default, .. } => {
+                let on = inputs.get(id).map(|s| s == "true").unwrap_or(*default);
+                map.insert(id.clone(), Value::Bool(on));
             }
             Widget::Row { children } => collect_ids(children, inputs, map),
             _ => {}

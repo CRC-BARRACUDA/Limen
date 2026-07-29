@@ -1354,10 +1354,11 @@ fn dev_mode_view(
                 dev_limen_path,
                 "dir of Limen-<ver>-<platform>.tar.gz",
                 320.0,
+                false,
             );
             ui.end_row();
             ui.label("Module update path");
-            ui::text_field(ui, dev_modules_path, "dir of <name>/ module folders", 320.0);
+            ui::text_field(ui, dev_modules_path, "dir of <name>/ module folders", 320.0, false);
             ui.end_row();
         });
     ui.add_space(8.0);
@@ -1523,6 +1524,7 @@ fn modules_page(
         search,
         "Search modules — local and in the org…",
         f32::INFINITY,
+        false,
     );
     ui.add_space(8.0);
 

@@ -452,6 +452,7 @@ fn host_handler(
         "host.about" => Ok(host_about()),
         "host.capabilities" => Ok(json!(broker.capabilities())),
         "host.open" => host_open(params),
+        "host.pick_file" => Ok(host_pick_file()),
         "host.log" => {
             let msg = params.as_str().map(str::to_string).unwrap_or_else(|| params.to_string());
             logger(&format!("[module] {msg}"));
@@ -462,6 +463,64 @@ fn host_handler(
             format!("unknown host method {other}"),
         )),
     }
+}
+
+/// Show a native "open file" dialog on the host and return the chosen path as
+/// `{ "path": "..." }`, or `Null` if the user cancelled. Shells out to the
+/// platform's dialog (no extra dependency), matching how `host.open` works.
+fn host_pick_file() -> Value {
+    match pick_file_native() {
+        Some(path) if !path.is_empty() => json!({ "path": path }),
+        _ => Value::Null,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pick_file_native() -> Option<String> {
+    let out = std::process::Command::new("zenity")
+        .args(["--file-selection", "--title=Choose a file"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // non-zero on cancel
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(target_os = "macos")]
+fn pick_file_native() -> Option<String> {
+    let out = std::process::Command::new("osascript")
+        .args(["-e", "POSIX path of (choose file with prompt \"Choose a file\")"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // user cancelled
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(target_os = "windows")]
+fn pick_file_native() -> Option<String> {
+    use limen_proto::NoConsole;
+    // STA is required for the WinForms dialog; write only the path to stdout.
+    let ps = "Add-Type -AssemblyName System.Windows.Forms; \
+              $d = New-Object System.Windows.Forms.OpenFileDialog; \
+              $d.Filter = 'Images (*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp)|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|All files (*.*)|*.*'; \
+              if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }";
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", ps])
+        .no_console()
+        .output()
+        .ok()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn pick_file_native() -> Option<String> {
+    None
 }
 
 /// Open something in the OS on a module's behalf (e.g. the devices module's

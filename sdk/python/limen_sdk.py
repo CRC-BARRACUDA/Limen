@@ -88,6 +88,18 @@ class Select(Widget):
         }
 
 
+class Checkbox(Widget):
+    """An on/off checkbox keyed by `id`; its boolean state comes back in the
+    method params. Unchecked unless `default=True`."""
+
+    def __init__(self, id, label="", default=False):
+        self.id, self.label, self.default = id, label, default
+
+    def to_spec(self):
+        return {"kind": "checkbox", "id": self.id, "label": self.label,
+                "default": bool(self.default)}
+
+
 class Button(Widget):
     """A button. `calls` names a method on THIS module; the SDK fills in the
     capability. Use `capability=`/`method=` to target another module instead.
@@ -289,6 +301,12 @@ class Host:
         registry and device_manager are Windows-only."""
         self._m._request("host.open", {"target": target, "value": value})
 
+    def pick_file(self):
+        """Show a native 'open file' dialog on the host; returns the chosen path,
+        or None if the user cancelled."""
+        r = self._m._request("host.pick_file", None)
+        return r.get("path") if isinstance(r, dict) else None
+
     def log(self, message):
         self._m._request("host.log", str(message))
 
@@ -402,7 +420,12 @@ class Module:
 
         rid = msg.get("id")
         try:
-            result, error = self._handle(method, msg.get("params") or {}), None
+            result = self._handle(method, msg.get("params") or {})
+            # A method may return a Window/Widget object directly (like the ui
+            # handler); serialize it to its spec so it's JSON-encodable.
+            if hasattr(result, "to_spec"):
+                result = result.to_spec()
+            error = None
         except Exception as exc:  # noqa: BLE001
             result, error = None, {"code": -32000, "message": str(exc)}
         if rid is not None:
