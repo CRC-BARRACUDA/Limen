@@ -73,6 +73,10 @@ impl Widget {
     pub fn primary(self) -> Self {
         self.set("style", json!("primary"))
     }
+    /// Start a `checkbox` checked.
+    pub fn checked(self) -> Self {
+        self.set("default", json!(true))
+    }
     /// Extra params merged into this button's call (e.g. a device id/path).
     pub fn args(self, args: Value) -> Self {
         self.set("args", args)
@@ -188,6 +192,14 @@ pub fn select(id: impl Into<String>, options: Vec<String>) -> Widget {
     Widget::of_kind("select")
         .set("id", json!(id.into()))
         .set("options", json!(options))
+}
+
+/// An on/off checkbox; its `id` keys a boolean returned in params. Unchecked
+/// unless `.checked()` is called.
+pub fn checkbox(id: impl Into<String>, label: impl Into<String>) -> Widget {
+    Widget::of_kind("checkbox")
+        .set("id", json!(id.into()))
+        .set("label", json!(label.into()))
 }
 
 /// A button that invokes `capability`.`method` when clicked.

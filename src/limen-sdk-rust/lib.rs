@@ -97,6 +97,14 @@ impl Host {
         let _ = self.raw("host.open", json!({ "target": target, "value": value }));
     }
 
+    /// Show a native "open file" dialog on the host; returns the chosen path, or
+    /// `None` if the user cancelled.
+    pub fn pick_file(&self) -> Option<String> {
+        self.raw("host.pick_file", Value::Null)
+            .ok()
+            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+    }
+
     fn raw(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let params_bytes = serde_json::to_vec(&params).unwrap_or_default();
         let mut captured: Option<(i32, Vec<u8>)> = None;
