@@ -31,6 +31,9 @@ pub(crate) mod color {
     pub const ACCENT: Color32 = Color32::from_rgb(0x5c, 0x9c, 0xf5); // soft blue
     pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0x82, 0xb6, 0xff); // accent, hovered
     pub const ON_ACCENT: Color32 = Color32::from_rgb(0xf5, 0xf8, 0xff);
+    pub const SUCCESS: Color32 = Color32::from_rgb(0x5a, 0xc8, 0x8a); // done / OK green
+    pub const WARNING: Color32 = Color32::from_rgb(0xe4, 0xb2, 0x4d); // warning amber
+    pub const ERROR: Color32 = Color32::from_rgb(0xe0, 0x5d, 0x5d); // error red
 }
 
 // --------------------------------------------------------------------------- //
@@ -566,6 +569,13 @@ pub struct View {
     pub title: String,
     #[serde(default)]
     pub widgets: Vec<Widget>,
+    /// When present, the GUI auto-invokes this action once, right after the view
+    /// is shown — with no user click. Lets a module chain a multi-step flow
+    /// (e.g. a progress checklist that advances on its own): each step returns a
+    /// view carrying the next step's `auto`, and the chain ends at a view without
+    /// one.
+    #[serde(default)]
+    pub auto: Option<AutoAction>,
 }
 
 /// The capability + method a button invokes.
@@ -573,6 +583,27 @@ pub struct View {
 pub struct Action {
     pub capability: String,
     pub method: String,
+}
+
+/// An action a [`View`] asks the GUI to invoke automatically once it renders.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoAction {
+    pub capability: String,
+    pub method: String,
+    /// Extra params merged into the call.
+    #[serde(default)]
+    pub args: serde_json::Map<String, Value>,
+}
+
+impl AutoAction {
+    /// The [`Invoke`] this auto-action dispatches (always in the same tab).
+    pub fn into_invoke(self) -> Invoke {
+        Invoke {
+            action: Action { capability: self.capability, method: self.method },
+            args: self.args,
+            open_in_tab: false,
+        }
+    }
 }
 
 /// What double-clicking a table row does.
@@ -684,6 +715,14 @@ pub enum Widget {
         #[serde(default)]
         default: bool,
     },
+    /// A progress step with an animated status icon — a loading spinner that
+    /// morphs into a check when done. `state`: "pending" | "loading" | "done".
+    Step {
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        state: String,
+    },
     Button {
         text: String,
         action: Action,
@@ -759,6 +798,74 @@ fn render_widgets(
     }
 }
 
+/// A step's status icon: a faint hollow circle (pending), a rotating spinner
+/// (loading), or a *settled* mark — a green check (`done`), red ✕ (`error`), or
+/// amber ⚠ (`warning`). The spinner smoothly morphs into the settled mark. Keyed
+/// by `key` (the step label) so the morph persists across the view updates that
+/// advance a multi-step flow.
+fn step_icon(ui: &mut egui::Ui, key: &str, state: &str) {
+    let sz = 18.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(sz, sz), egui::Sense::hover());
+    let settled = matches!(state, "done" | "error" | "warning");
+    let loading = state == "loading";
+    // 0 while loading, ramps to 1 once settled — drives the spinner→mark morph.
+    let t = anim_bool(ui, egui::Id::new(("step", key)), settled, 0.35);
+    let time = ui.input(|i| i.time) as f32;
+    let painter = ui.painter().clone();
+    let c = rect.center();
+    let r = sz * 0.42;
+
+    // Pending: a faint hollow circle.
+    if !loading && !settled {
+        painter.circle_stroke(c, r, egui::Stroke::new(1.6f32, with_alpha(color::TEXT_MUTED, 0.45)));
+        return;
+    }
+    // Spinner: a rotating arc, fading out as the settled mark takes over.
+    if t < 1.0 {
+        let a = 1.0 - t;
+        let base = time * 4.5;
+        let sweep = std::f32::consts::PI * 1.4;
+        let n = 20;
+        let pts: Vec<egui::Pos2> = (0..=n)
+            .map(|i| {
+                let ang = base + sweep * (i as f32 / n as f32);
+                c + r * egui::vec2(ang.cos(), ang.sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, egui::Stroke::new(2.2f32, with_alpha(color::ACCENT, a))));
+        ui.ctx().request_repaint();
+    }
+    // Settled mark: fades + scales in as `t` rises.
+    if t > 0.0 {
+        let s = ease_out(t);
+        let p = |dx: f32, dy: f32| c + r * egui::vec2(dx, dy) * s;
+        match state {
+            // Red ✕ in a red ring.
+            "error" => {
+                let col = with_alpha(color::ERROR, t);
+                painter.circle_stroke(c, r, egui::Stroke::new(2.0f32, col));
+                painter.line_segment([p(-0.32, -0.32), p(0.32, 0.32)], egui::Stroke::new(2.4f32, col));
+                painter.line_segment([p(-0.32, 0.32), p(0.32, -0.32)], egui::Stroke::new(2.4f32, col));
+            }
+            // Amber ⚠ — a triangle with an exclamation.
+            "warning" => {
+                let col = with_alpha(color::WARNING, t);
+                let tri = vec![p(0.0, -0.62), p(-0.58, 0.42), p(0.58, 0.42), p(0.0, -0.62)];
+                painter.add(egui::Shape::line(tri, egui::Stroke::new(2.0f32, col)));
+                painter.line_segment([p(0.0, -0.18), p(0.0, 0.14)], egui::Stroke::new(2.2f32, col));
+                painter.circle_filled(p(0.0, 0.30), 1.3f32 * s.max(0.4), col);
+            }
+            // Green check in a green ring.
+            _ => {
+                let col = with_alpha(color::SUCCESS, t);
+                painter.circle_stroke(c, r, egui::Stroke::new(2.0f32, col));
+                painter.line_segment([p(-0.42, 0.02), p(-0.12, 0.34)], egui::Stroke::new(2.4f32, col));
+                painter.line_segment([p(-0.12, 0.34), p(0.46, -0.34)], egui::Stroke::new(2.4f32, col));
+            }
+        }
+    }
+}
+
 fn render_widget(
     ui: &mut egui::Ui,
     widget: &Widget,
@@ -817,6 +924,18 @@ fn render_widget(
             let mut on = entry.as_str() == "true";
             toggle(ui, &mut on, label);
             *entry = on.to_string();
+        }
+        Widget::Step { label, state } => {
+            ui.horizontal(|ui| {
+                step_icon(ui, label, state);
+                ui.add_space(8.0);
+                let s = match state.as_str() {
+                    "loading" => LabelStyle::Strong,
+                    "done" => LabelStyle::Normal,
+                    _ => LabelStyle::Weak,
+                };
+                ui.label(styled(label, s));
+            });
         }
         Widget::Button {
             text,

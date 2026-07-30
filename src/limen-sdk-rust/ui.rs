@@ -214,6 +214,14 @@ pub fn separator() -> Widget {
     Widget::of_kind("separator")
 }
 
+/// A progress step with an animated status icon — a loading spinner that morphs
+/// into a check when done. `state` is "pending", "loading", or "done".
+pub fn step(label: impl Into<String>, state: impl Into<String>) -> Widget {
+    Widget::of_kind("step")
+        .set("label", json!(label.into()))
+        .set("state", json!(state.into()))
+}
+
 /// A horizontal group of widgets.
 pub fn row(children: Vec<Widget>) -> Widget {
     let kids: Vec<Value> = children.into_iter().map(Widget::into_value).collect();
@@ -243,6 +251,27 @@ pub fn chart(title: impl Into<String>, data: Vec<(String, f64)>) -> Widget {
 pub fn window(title: impl Into<String>, widgets: Vec<Widget>) -> Value {
     let ws: Vec<Value> = widgets.into_iter().map(Widget::into_value).collect();
     json!({ "title": title.into(), "widgets": ws })
+}
+
+/// A view that auto-invokes `capability`.`method` once, right after it renders
+/// (no user click). Use it to chain a multi-step flow — each step returns a view
+/// with the next step's `auto`, and the last step returns a plain [`window`] to
+/// stop. `args` are merged into the call.
+pub fn window_auto(
+    title: impl Into<String>,
+    widgets: Vec<Widget>,
+    capability: impl Into<String>,
+    method: impl Into<String>,
+    args: Value,
+) -> Value {
+    let mut v = window(title, widgets);
+    if let Value::Object(m) = &mut v {
+        m.insert(
+            "auto".into(),
+            json!({ "capability": capability.into(), "method": method.into(), "args": args }),
+        );
+    }
+    v
 }
 
 #[cfg(test)]
