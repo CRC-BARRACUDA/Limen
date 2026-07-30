@@ -692,9 +692,12 @@ fn install_fonts(ctx: &egui::Context) {
     use egui::{FontData, FontDefinitions, FontFamily};
 
     let mut fonts = FontDefinitions::default();
+    // A static instance (weight 400) of Orbitron — a *variable* font is markedly
+    // slower to lay out and rasterize per glyph, which showed up as a first-render
+    // hitch on text-heavy pages. Same look, much cheaper.
     fonts.font_data.insert(
         "Orbitron".to_owned(),
-        FontData::from_static(include_bytes!("../../resources/fonts/Orbitron.ttf")),
+        FontData::from_static(include_bytes!("../../resources/fonts/Orbitron-Static.ttf")),
     );
     fonts.font_data.insert(
         "ShareTechMono".to_owned(),

@@ -1971,9 +1971,11 @@ dependencies = [
  "anyhow",
  "eframe",
  "limen-core",
+ "limen-proto",
  "limen-registry",
  "serde",
  "serde_json",
+ "toml 0.8.23",
  "winresource",
 ]
 
@@ -2017,6 +2019,7 @@ version = "0.17.0"
 dependencies = [
  "limen-proto",
  "serde_json",
+ "toml 0.8.23",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@
 //! is on a background thread — see [`worker`].
 
 mod app;
+mod i18n;
 mod ui;
 mod worker;
 
