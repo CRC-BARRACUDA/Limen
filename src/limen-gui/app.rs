@@ -182,6 +182,14 @@ pub struct LimenApp {
     updating: bool,
     /// A portable interpreter currently being installed (e.g. "Python"), if any.
     installing_runtime: Option<String>,
+    /// Startup splash: the frame time it first rendered (set lazily on the first
+    /// frame), and whether the ~2s animated intro has finished. Once done, the
+    /// normal UI takes over.
+    splash_start: Option<f64>,
+    splash_done: bool,
+    /// Whether the window has been centered + revealed yet (it's created hidden
+    /// to avoid a dark startup flash).
+    window_shown: bool,
 }
 
 impl LimenApp {
@@ -255,6 +263,9 @@ impl LimenApp {
             update: None,
             updating: false,
             installing_runtime: None,
+            splash_start: None,
+            splash_done: false,
+            window_shown: false,
         }
     }
 
@@ -646,12 +657,70 @@ impl LimenApp {
 }
 
 impl eframe::App for LimenApp {
+    /// Clear transparent during the startup splash so only the floating icons
+    /// show over the desktop; opaque warm-black once the app takes over.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if self.splash_done {
+            let c = ui::color::BG;
+            [
+                c.r() as f32 / 255.0,
+                c.g() as f32 / 255.0,
+                c.b() as f32 / 255.0,
+                1.0,
+            ]
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now_t = ctx.input(|i| i.time);
         self.drain_events(now_t);
 
         // Apply the global UI scale (set_zoom_factor no-ops if unchanged).
         ctx.set_zoom_factor(self.ui_scale / 100.0);
+
+        // The window is created hidden; on the first frame centre it on the
+        // monitor and reveal it, so the splash appears cleanly mid-screen instead
+        // of flashing a dark, unfocused window at the default position.
+        if !self.window_shown {
+            let size = egui::vec2(980.0, 640.0);
+            if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
+                let pos = egui::pos2(
+                    ((mon.x - size.x) * 0.5).max(0.0),
+                    ((mon.y - size.y) * 0.5).max(0.0),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.window_shown = true;
+        }
+
+        // Startup splash in the centred window: the marks fade transparent→opaque,
+        // hold opaque ~1s, then a 2s exit animation, after which the window
+        // maximizes and the app takes over. Worker events keep draining above.
+        // Skipped when animations are off.
+        if !self.splash_done {
+            let start = *self.splash_start.get_or_insert(now_t);
+            let elapsed = (now_t - start) as f32;
+            // With animations off, keep the transparent lead (so the clumsy opaque
+            // startup frames stay hidden), then show the marks statically — no
+            // fade/scanline motion.
+            let dur = if self.animations {
+                SPLASH_SECS
+            } else {
+                SPLASH_LEAD + SPLASH_HOLD
+            };
+            if elapsed < dur {
+                ctx.request_repaint();
+                splash_screen(ctx, elapsed, self.animations);
+                return;
+            }
+            self.splash_done = true;
+            // Grow into the app: fill the screen once the intro finishes.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
 
         // Reload is requested from the Modules page (set during the central panel).
         let mut reload = false;
@@ -703,7 +772,7 @@ impl eframe::App for LimenApp {
                     // App icon (the ◈ brand mark) in place of the wordmark.
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
-                    draw_brand(ui.painter(), rect);
+                    draw_brand(ui.painter(), rect, 1.0, true);
                     ui.add_space(12.0);
                     let active = self.active_tab();
                     if ui::chip(ui, "About", active == Some(Tab::About)).clicked() {
@@ -2548,6 +2617,81 @@ fn draw_barracuda(painter: &egui::Painter, rect: egui::Rect, color: egui::Color3
     }
 }
 
+/// Splash phase durations (seconds): a fully-transparent blank lead (so the
+/// window's clumsy opaque startup frames read as transparent and are trimmable),
+/// then fade transparent→opaque, hold fully opaque, then the exit animation.
+/// Their sum is the total splash length.
+const SPLASH_LEAD: f32 = 0.4;
+const SPLASH_FADE_IN: f32 = 0.2;
+const SPLASH_HOLD: f32 = 0.75;
+const SPLASH_ANIM: f32 = 0.25;
+const SPLASH_SECS: f32 = SPLASH_LEAD + SPLASH_FADE_IN + SPLASH_HOLD + SPLASH_ANIM;
+
+/// Paint the startup splash: the Limen mark + Barracuda logo centre-screen. When
+/// `animated`, it's fully transparent for `SPLASH_LEAD`, then fades in over
+/// `SPLASH_FADE_IN`, holds for `SPLASH_HOLD`, then runs the `SPLASH_ANIM` exit
+/// (scanline sweep + fade out). When not, the marks simply appear (opaque, no
+/// motion) after the transparent lead. `t` is elapsed seconds since it began.
+fn splash_screen(ctx: &egui::Context, t: f32, animated: bool) {
+    egui::CentralPanel::default()
+        // Transparent frame — the framebuffer is cleared transparent during the
+        // splash (see `clear_color`), so only the icons show over the desktop.
+        .frame(egui::Frame::none())
+        .show(ctx, |ui| {
+            let rect = ui.max_rect();
+            // Envelope: blank transparent lead, then either fade+scale in / hold /
+            // fade out (animated) or a plain opaque appearance (static). `vis`
+            // fades each element's own alpha (the window is transparent — there's
+            // no background to veil against).
+            let (vis, scale) = if animated {
+                let vin = ui::ease_out(((t - SPLASH_LEAD) / SPLASH_FADE_IN).clamp(0.0, 1.0));
+                let exit = ((t - (SPLASH_LEAD + SPLASH_FADE_IN + SPLASH_HOLD)) / SPLASH_ANIM)
+                    .clamp(0.0, 1.0);
+                let vout = 1.0 - ui::smoothstep(exit);
+                (vin * vout, 0.92 + 0.08 * vin)
+            } else {
+                (if t >= SPLASH_LEAD { 1.0 } else { 0.0 }, 1.0)
+            };
+
+            let mark = 84.0 * scale;
+            let gap = 22.0;
+            let cx = rect.center().x;
+            let cy = rect.center().y - 8.0;
+            let half = mark / 2.0 + gap / 2.0 + 0.5;
+            let painter = ui.painter();
+
+            // Left: Limen mark · amber divider · right: Barracuda logo.
+            let r1 =
+                egui::Rect::from_center_size(egui::pos2(cx - half, cy), egui::vec2(mark, mark));
+            let r2 =
+                egui::Rect::from_center_size(egui::pos2(cx + half, cy), egui::vec2(mark, mark));
+            draw_brand(painter, r1, vis, false);
+            draw_barracuda(painter, r2, ui::with_alpha(ui::color::ACCENT_BRIGHT, vis));
+            let dh = 46.0 * scale;
+            painter.vline(
+                cx,
+                (cy - dh / 2.0)..=(cy + dh / 2.0),
+                egui::Stroke::new(1.0_f32, ui::with_alpha(ui::color::ACCENT, 0.4 * vis)),
+            );
+
+            // A single amber scanline sweeps down across the marks (animated only),
+            // over the hold into the start of the exit.
+            if animated {
+                let scan = ((t - SPLASH_LEAD - SPLASH_FADE_IN) / SPLASH_HOLD).clamp(0.0, 1.0);
+                if scan > 0.0 && scan < 1.0 {
+                    let y = egui::lerp((cy - mark * 0.7)..=(cy + mark * 0.7), scan);
+                    let a = (1.0 - (scan * 2.0 - 1.0).abs()) * 0.5 * vis;
+                    painter.hline(
+                        (cx - mark * 1.4)..=(cx + mark * 1.4),
+                        y,
+                        egui::Stroke::new(1.5_f32, ui::with_alpha(ui::color::ACCENT_BRIGHT, a)),
+                    );
+                }
+            }
+
+        });
+}
+
 fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
     let muted = ui::color::TEXT_MUTED;
     let mut license_clicked = false;
@@ -2576,7 +2720,7 @@ fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
                         ui.allocate_exact_size(egui::vec2(row_w, mark), egui::Sense::hover());
 
                     let r1 = egui::Rect::from_min_size(rect.left_top(), egui::vec2(mark, mark));
-                    draw_brand(ui.painter(), r1);
+                    draw_brand(ui.painter(), r1, 1.0, true);
 
                     let sep_x = rect.left() + mark + gap + 0.5;
                     let half = 26.0_f32;
@@ -2685,12 +2829,14 @@ fn license_view(ui: &mut egui::Ui, reveal_at: f64) {
 ///
 /// (The OS icon files — `resources/icon.png`/`.ico` — still carry the original
 /// cyan mark; regenerating those needs image tooling and is a separate step.)
-fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
+fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32, show_tile: bool) {
     use egui::{Color32, Mesh, Pos2, Shape};
 
-    // Tile: a warm vertical gradient, lighter at the top.
-    let tile_top = Color32::from_rgb(0x24, 0x1a, 0x10);
-    let tile_bottom = Color32::from_rgb(0x0d, 0x0a, 0x06);
+    // Scale every colour's alpha by `alpha` (1.0 = opaque) so the mark can fade
+    // as a whole — used by the transparent startup splash.
+    let fa = |c: Color32| {
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * alpha).round() as u8)
+    };
     // Diamond: one diagonal gradient across the whole device — light at the
     // top-left, dark at the bottom-right — so the top *and left* vertices are
     // bright amber while the right and bottom ones deepen to orange.
@@ -2699,15 +2845,19 @@ fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
 
     let s = rect.width().min(rect.height()) / 256.0;
 
-    // The tile is inset within the icon's box and has rounded corners, so it
-    // needs a colored mesh rather than `rect_filled` to carry the gradient.
-    let tile = egui::Rect::from_center_size(rect.center(), egui::vec2(224.0 * s, 224.0 * s));
-    painter.add(Shape::mesh(rounded_rect_mesh(
-        tile,
-        44.0 * s,
-        tile_top,
-        tile_bottom,
-    )));
+    // The dark rounded tile (the app-icon background). Skipped for the splash,
+    // where the mark floats transparently beside the Barracuda logo.
+    if show_tile {
+        let tile_top = fa(Color32::from_rgb(0x24, 0x1a, 0x10));
+        let tile_bottom = fa(Color32::from_rgb(0x0d, 0x0a, 0x06));
+        let tile = egui::Rect::from_center_size(rect.center(), egui::vec2(224.0 * s, 224.0 * s));
+        painter.add(Shape::mesh(rounded_rect_mesh(
+            tile,
+            44.0 * s,
+            tile_top,
+            tile_bottom,
+        )));
+    }
 
     let c = rect.center();
     let diamond = |half: f32| {
@@ -2724,7 +2874,7 @@ fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
 
     // Position along the top-left → bottom-right diagonal, normalized to 0..1.
     let span = 2.0 * 88.0 * s;
-    let shade = |p: Pos2| lerp_color(light, dark, ((p.x - c.x) + (p.y - c.y)) / span + 0.5);
+    let shade = |p: Pos2| fa(lerp_color(light, dark, ((p.x - c.x) + (p.y - c.y)) / span + 0.5));
 
     let mut mesh = Mesh::default();
     let mut quad = |pts: [Pos2; 4]| {
@@ -2752,7 +2902,7 @@ fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
     // faint sheen along the edge rather than a distinct line.
     painter.add(Shape::closed_line(
         outer.to_vec(),
-        egui::Stroke::new(1.4 * s, Color32::from_rgb(0xff, 0xe0, 0xb0)),
+        egui::Stroke::new(1.4 * s, fa(Color32::from_rgb(0xff, 0xe0, 0xb0))),
     ));
 }
 
