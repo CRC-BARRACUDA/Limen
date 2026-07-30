@@ -17,23 +17,30 @@ use serde::Deserialize;
 use serde_json::Value;
 
 // --------------------------------------------------------------------------- //
-// Zed One Dark palette
+// Barracuda "EVE-Frontier" amber-HUD palette
+//
+// Mirrors the platform ui-kit design tokens (Libraries/ui-kit `src/tokens.ts` +
+// `theme.css`): a warm amber accent over deep warm-black backgrounds, orange CTA,
+// and warm brown-grey neutrals (not a cool slate). Keep these in sync with the
+// kit so Limen and the web platform read as one product.
 // --------------------------------------------------------------------------- //
 pub(crate) mod color {
     use eframe::egui::Color32;
-    pub const BG: Color32 = Color32::from_rgb(0x1c, 0x1f, 0x24); // deepest panel
-    pub const BG_ELEVATED: Color32 = Color32::from_rgb(0x21, 0x25, 0x2b); // inputs/code
-    pub const BG_WIDGET: Color32 = Color32::from_rgb(0x2b, 0x30, 0x3b); // buttons/rows
-    pub const BG_HOVER: Color32 = Color32::from_rgb(0x34, 0x3a, 0x46);
-    pub const BORDER: Color32 = Color32::from_rgb(0x3b, 0x41, 0x4d);
-    pub const TEXT: Color32 = Color32::from_rgb(0xc8, 0xcc, 0xd4);
-    pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x7a, 0x82, 0x8e);
-    pub const ACCENT: Color32 = Color32::from_rgb(0x5c, 0x9c, 0xf5); // soft blue
-    pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0x82, 0xb6, 0xff); // accent, hovered
-    pub const ON_ACCENT: Color32 = Color32::from_rgb(0xf5, 0xf8, 0xff);
-    pub const SUCCESS: Color32 = Color32::from_rgb(0x5a, 0xc8, 0x8a); // done / OK green
-    pub const WARNING: Color32 = Color32::from_rgb(0xe4, 0xb2, 0x4d); // warning amber
-    pub const ERROR: Color32 = Color32::from_rgb(0xe0, 0x5d, 0x5d); // error red
+    pub const BG: Color32 = Color32::from_rgb(0x08, 0x06, 0x04); // deep warm-black page
+    pub const BG_ELEVATED: Color32 = Color32::from_rgb(0x0d, 0x0a, 0x06); // inputs/code, near-black
+    pub const BG_WIDGET: Color32 = Color32::from_rgb(0x18, 0x11, 0x09); // buttons/rows
+    pub const BG_HOVER: Color32 = Color32::from_rgb(0x2a, 0x1d, 0x0f); // amber-tinted hover
+    pub const BORDER: Color32 = Color32::from_rgb(0x3a, 0x2c, 0x1c); // warm amber-dim border
+    pub const TEXT: Color32 = Color32::from_rgb(0xc4, 0xb4, 0x98); // warm body text
+    pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x8a, 0x78, 0x68); // warm grey
+    pub const ACCENT: Color32 = Color32::from_rgb(0xc8, 0x78, 0x30); // amber — primary accent
+    pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xf0, 0xa8, 0x50); // amber, hovered
+    pub const ORANGE: Color32 = Color32::from_rgb(0xf9, 0x73, 0x16); // orange — CTA fill
+    pub const ORANGE_BRIGHT: Color32 = Color32::from_rgb(0xfb, 0x92, 0x3c); // orange, hovered
+    pub const ON_ACCENT: Color32 = Color32::from_rgb(0xff, 0xf5, 0xe8); // text on amber/orange
+    pub const SUCCESS: Color32 = Color32::from_rgb(0x4a, 0xde, 0x80); // done / OK green
+    pub const WARNING: Color32 = Color32::from_rgb(0xfb, 0xbf, 0x24); // warning amber-yellow
+    pub const ERROR: Color32 = Color32::from_rgb(0xf8, 0x71, 0x71); // error red
 }
 
 // --------------------------------------------------------------------------- //
@@ -195,7 +202,7 @@ pub fn text_field(
     let frame_rect = resp.rect.expand2(egui::vec2(8.0, 7.0));
     ui.painter().rect_stroke(
         frame_rect,
-        egui::Rounding::same(5.0),
+        egui::Rounding::ZERO,
         egui::Stroke::new(1.0_f32, lerp_color(color::BORDER, color::ACCENT, t)),
     );
     resp
@@ -238,7 +245,7 @@ pub fn dropdown(
     let border_t = open_t.max(a.hover * 0.6);
 
     {
-        let rounding = egui::Rounding::same(5.0);
+        let rounding = egui::Rounding::ZERO;
         let painter = ui.painter();
         painter.rect_filled(
             rect,
@@ -316,7 +323,7 @@ fn dropdown_option(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Respo
         ui.allocate_at_least(egui::vec2(w, gs.y + pad.y * 2.0), egui::Sense::click());
     let a = interact(ui, &resp);
     let painter = ui.painter();
-    let rounding = egui::Rounding::same(4.0);
+    let rounding = egui::Rounding::ZERO;
     // The current value is marked with a steady blue fill and does not react to
     // hover; every other option highlights on hover.
     if selected {
@@ -333,28 +340,102 @@ fn dropdown_option(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Respo
     resp
 }
 
-/// An accent-filled primary button: brightens + grows on hover, dips on press.
-/// `min` is a minimum size (`Vec2::ZERO` to size to the text; a fixed width for a
-/// button column).
+/// The six corner points of a chamfered rectangle — the ui-kit clip-path shape
+/// with the **top-right** and **bottom-left** corners cut by `ch`. Shared by the
+/// primary and secondary buttons so both read as the same beveled family.
+fn chamfer_pts(rect: egui::Rect, ch: f32) -> [egui::Pos2; 6] {
+    [
+        rect.left_top(),                             // TL (square)
+        egui::pos2(rect.right() - ch, rect.top()),   // top edge, before TR cut
+        egui::pos2(rect.right(), rect.top() + ch),   // right edge, after TR cut
+        rect.right_bottom(),                         // BR (square)
+        egui::pos2(rect.left() + ch, rect.bottom()), // bottom edge, before BL cut
+        egui::pos2(rect.left(), rect.bottom() - ch), // left edge, after BL cut
+    ]
+}
+
+/// The ui-kit's primary CTA: a chamfered bar (top-right + bottom-left corners
+/// cut) filled with a diagonal deep-orange→bright gradient, a lit top bevel and
+/// a thin orange border, its label upper-cased. Brightens on hover, dips on
+/// press. `min` is a minimum size (`Vec2::ZERO` to size to the text).
 pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
+    use egui::{Color32, Mesh, Pos2, Shape};
+
     let font = egui::TextStyle::Button.resolve(ui.style());
+    let label = text.to_uppercase();
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_owned(), font, color::ON_ACCENT);
-    let padding = egui::vec2(14.0, 7.0);
+        .layout_no_wrap(label, font, color::ON_ACCENT);
+    let padding = egui::vec2(20.0, 9.0);
     let size = (galley.size() + padding * 2.0).max(min);
     let (rect, resp) = ui.allocate_at_least(size, egui::Sense::click());
 
     let a = interact(ui, &resp);
-    let draw = rect.expand(2.0 * a.hover - 3.0 * a.press);
-    let fill = lerp_color(
-        lerp_color(color::ACCENT, color::ACCENT_BRIGHT, a.hover),
-        color::BG,
-        0.25 * a.press,
-    );
+    let draw = rect.expand(1.5 * a.hover - 2.5 * a.press);
+    // Chamfer size — cuts the top-right and bottom-left corners.
+    let ch = (draw.height() * 0.5).min(draw.width() * 0.5).min(18.0);
+    let pts = chamfer_pts(draw, ch);
+
+    // Four-stop orange gradient (kit: #c2410c → #ea580c → #f97316 → #fb923c),
+    // shifted brighter on hover and darker on press.
+    let shift = 0.18 * a.hover - 0.12 * a.press;
+    let stops = [
+        Color32::from_rgb(0xc2, 0x41, 0x0c),
+        Color32::from_rgb(0xea, 0x58, 0x0c),
+        color::ORANGE,
+        color::ORANGE_BRIGHT,
+    ];
+    let grad = |t: f32| -> Color32 {
+        let t = (t + shift).clamp(0.0, 1.0) * 3.0; // into 0..3 across 4 stops
+        let i = (t.floor() as usize).min(2);
+        lerp_color(stops[i], stops[i + 1], t - i as f32)
+    };
+    // Diagonal position (mostly left→right, a touch top→bottom) → 135° feel.
+    let span = draw.width() + draw.height() * 0.35;
+    let shade = |p: Pos2| grad(((p.x - draw.left()) + (p.y - draw.top()) * 0.35) / span);
 
     let painter = ui.painter();
-    painter.rect_filled(draw, egui::Rounding::same(6.0), fill);
+    // Faint orange bloom behind — expand the *chamfered* outline (not a square
+    // rect, which would poke square nubs out past the cut corners).
+    let expand_poly = |e: f32| -> Vec<Pos2> {
+        let c = draw.center();
+        pts.iter()
+            .map(|p| {
+                let v = *p - c;
+                c + v + v.normalized() * e
+            })
+            .collect()
+    };
+    for i in 1..=3u8 {
+        let e = i as f32 * 2.0;
+        let alpha = (0.03 + 0.06 * a.hover) / i as f32;
+        painter.add(Shape::convex_polygon(
+            expand_poly(e),
+            with_alpha(color::ORANGE, alpha),
+            egui::Stroke::NONE,
+        ));
+    }
+    // Gradient fill — fan-triangulate the (convex) chamfered hexagon from its
+    // centre, colouring every vertex by its diagonal position.
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(draw.center(), shade(draw.center()));
+    for p in pts {
+        mesh.colored_vertex(p, shade(p));
+    }
+    let n = pts.len() as u32;
+    for k in 0..n {
+        mesh.add_triangle(0, 1 + k, 1 + (k + 1) % n);
+    }
+    painter.add(Shape::mesh(mesh));
+    // Thin orange border + a brighter lit top edge.
+    painter.add(Shape::closed_line(
+        pts.to_vec(),
+        egui::Stroke::new(1.0_f32, with_alpha(color::ORANGE, 0.55)),
+    ));
+    painter.line_segment(
+        [pts[0], pts[1]],
+        egui::Stroke::new(1.0_f32, with_alpha(Color32::from_rgb(0xfd, 0xba, 0x74), 0.7)),
+    );
     painter.galley(
         draw.center() - galley.size() * 0.5,
         galley,
@@ -363,31 +444,44 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
     resp
 }
 
-/// A secondary button: a blue outline fades in on hover, dips on press. `min` is
-/// a minimum size (e.g. a fixed column width); the button grows to fit its text.
+/// The ui-kit's secondary button: a transparent chamfered outline (top-right +
+/// bottom-left corners cut) with a thin amber border and upper-cased muted-amber
+/// text. On hover the border and text brighten to `ACCENT` and a faint amber
+/// wash fades in; it dips on press. `min` is a minimum size.
 pub fn outline_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
+    let label = text.to_uppercase();
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_owned(), font, color::TEXT);
+        .layout_no_wrap(label, font, color::TEXT_MUTED);
     // Vertical padding matches `primary_button` so the two never differ in height
     // when placed side by side.
-    let padding = egui::vec2(12.0, 7.0);
+    let padding = egui::vec2(16.0, 9.0);
     let size = (galley.size() + padding * 2.0).max(min);
     let (rect, resp) = ui.allocate_at_least(size, egui::Sense::click());
 
     let a = interact(ui, &resp);
     let draw = rect.shrink(2.0 * a.press);
-    let rounding = egui::Rounding::same(6.0);
+    let ch = (draw.height() * 0.5).min(draw.width() * 0.5).min(12.0);
+    let pts = chamfer_pts(draw, ch);
+
     let painter = ui.painter();
-    let base = lerp_color(color::BG_WIDGET, color::BG_HOVER, a.hover);
-    painter.rect_filled(draw, rounding, lerp_color(base, color::BG, 0.35 * a.press));
-    painter.rect_stroke(
-        draw,
-        rounding,
-        egui::Stroke::new(1.5_f32, with_alpha(color::ACCENT, a.hover)),
+    // Transparent at rest; a faint amber wash fades in on hover.
+    painter.add(egui::Shape::convex_polygon(
+        pts.to_vec(),
+        with_alpha(color::ACCENT, 0.08 * a.hover),
+        egui::Stroke::NONE,
+    ));
+    // Border eases amber-dim → bright amber on hover.
+    painter.add(egui::Shape::closed_line(
+        pts.to_vec(),
+        egui::Stroke::new(1.0_f32, lerp_color(color::BORDER, color::ACCENT, a.hover)),
+    ));
+    painter.galley(
+        draw.center() - galley.size() * 0.5,
+        galley,
+        lerp_color(color::TEXT_MUTED, color::TEXT, a.hover),
     );
-    painter.galley(draw.center() - galley.size() * 0.5, galley, color::TEXT);
     resp
 }
 
@@ -459,7 +553,7 @@ pub fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     let a = interact(ui, &resp);
     let sel = anim_bool(ui, resp.id.with("sel"), selected, 0.14);
 
-    let rounding = egui::Rounding::same(7.0);
+    let rounding = egui::Rounding::ZERO;
     let painter = ui.painter();
     // Use BG_WIDGET (not BG_ELEVATED, which matches the title-bar fill and would
     // make the hover invisible there) so the chip lifts on any background.
@@ -481,9 +575,155 @@ pub fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     resp
 }
 
-/// Apply the Zed One Dark theme to the whole context.
+// --------------------------------------------------------------------------- //
+// Custom window chrome (client-side decorations)
+//
+// The OS titlebar is turned off (`with_decorations(false)`), so the app draws its
+// own controls and must also drive move/resize itself. These helpers render the
+// minimize/maximize/close glyphs and the edge/corner resize grips.
+// --------------------------------------------------------------------------- //
+
+/// A window-control button.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WinBtn {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+/// Draw one window-control button (minimize / maximize / restore / close) with a
+/// painted glyph and a hover fill — red for close, neutral otherwise.
+pub fn window_button(ui: &mut egui::Ui, kind: WinBtn) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(34.0, 26.0), egui::Sense::click());
+    let a = interact(ui, &resp);
+    let is_close = kind == WinBtn::Close;
+
+    let painter = ui.painter();
+    let fill = if is_close { color::ERROR } else { color::BG_HOVER };
+    painter.rect_filled(
+        rect,
+        egui::Rounding::ZERO,
+        with_alpha(fill, if is_close { a.hover } else { a.hover * 0.9 }),
+    );
+    let glyph = if is_close {
+        lerp_color(color::TEXT_MUTED, color::ON_ACCENT, a.hover)
+    } else {
+        lerp_color(color::TEXT_MUTED, color::TEXT, a.hover)
+    };
+    let stroke = egui::Stroke::new(1.3_f32, glyph);
+    let c = rect.center();
+    let s = 5.0_f32;
+    match kind {
+        WinBtn::Minimize => {
+            painter.hline((c.x - s)..=(c.x + s), c.y + s, stroke);
+        }
+        WinBtn::Maximize => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(2.0 * s, 2.0 * s)),
+                egui::Rounding::ZERO,
+                stroke,
+            );
+        }
+        WinBtn::Restore => {
+            // Two overlapping squares — the standard "restore down" glyph.
+            let sq = egui::vec2(2.0 * s - 2.0, 2.0 * s - 2.0);
+            let front = egui::Rect::from_min_size(egui::pos2(c.x - s, c.y - s + 2.0), sq);
+            let back = egui::Rect::from_min_size(egui::pos2(c.x - s + 2.0, c.y - s), sq);
+            painter.rect_stroke(back, egui::Rounding::ZERO, stroke);
+            painter.rect_filled(front, egui::Rounding::ZERO, color::BG_ELEVATED);
+            painter.rect_stroke(front, egui::Rounding::ZERO, stroke);
+        }
+        WinBtn::Close => {
+            painter.line_segment([c + egui::vec2(-s, -s), c + egui::vec2(s, s)], stroke);
+            painter.line_segment([c + egui::vec2(s, -s), c + egui::vec2(-s, s)], stroke);
+        }
+    }
+    resp
+}
+
+/// Invisible edge/corner drag strips that resize the window, since turning off OS
+/// decorations also removes the native resize borders. No-op while maximized.
+pub fn window_resize_grips(ctx: &egui::Context) {
+    use egui::{CursorIcon as Cur, ResizeDirection as Dir};
+
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+        return;
+    }
+    let rect = ctx.screen_rect();
+    let b = 6.0_f32; // edge thickness
+    let c = 14.0_f32; // corner arm length
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
+    };
+    // Corners last so they take precedence over the edges they overlap.
+    let grips = [
+        ("rz_n", r(rect.left() + c, rect.top(), rect.right() - c, rect.top() + b), Dir::North, Cur::ResizeNorth),
+        ("rz_s", r(rect.left() + c, rect.bottom() - b, rect.right() - c, rect.bottom()), Dir::South, Cur::ResizeSouth),
+        ("rz_w", r(rect.left(), rect.top() + c, rect.left() + b, rect.bottom() - c), Dir::West, Cur::ResizeWest),
+        ("rz_e", r(rect.right() - b, rect.top() + c, rect.right(), rect.bottom() - c), Dir::East, Cur::ResizeEast),
+        ("rz_nw", r(rect.left(), rect.top(), rect.left() + c, rect.top() + c), Dir::NorthWest, Cur::ResizeNorthWest),
+        ("rz_ne", r(rect.right() - c, rect.top(), rect.right(), rect.top() + c), Dir::NorthEast, Cur::ResizeNorthEast),
+        ("rz_sw", r(rect.left(), rect.bottom() - c, rect.left() + c, rect.bottom()), Dir::SouthWest, Cur::ResizeSouthWest),
+        ("rz_se", r(rect.right() - c, rect.bottom() - c, rect.right(), rect.bottom()), Dir::SouthEast, Cur::ResizeSouthEast),
+    ];
+    for (id, rect, dir, cursor) in grips {
+        egui::Area::new(egui::Id::new(id))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ctx, |ui| {
+                let resp = ui.allocate_rect(rect, egui::Sense::drag());
+                if resp.hovered() || resp.dragged() {
+                    ui.ctx().set_cursor_icon(cursor);
+                }
+                if resp.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+                }
+            });
+    }
+}
+
+/// Install the Barracuda brand fonts: **Orbitron** (display / proportional) and
+/// **Share Tech Mono** (monospace), matching the platform ui-kit. Both are
+/// Latin-only, so they're inserted at the *front* of each family with egui's
+/// bundled faces kept behind them as fallback — Cyrillic (e.g. the Ukrainian
+/// software-banlist) and emoji still render via those.
+fn install_fonts(ctx: &egui::Context) {
+    use egui::{FontData, FontDefinitions, FontFamily};
+
+    let mut fonts = FontDefinitions::default();
+    // A static instance (weight 400) of Orbitron — a *variable* font is markedly
+    // slower to lay out and rasterize per glyph, which showed up as a first-render
+    // hitch on text-heavy pages. Same look, much cheaper.
+    fonts.font_data.insert(
+        "Orbitron".to_owned(),
+        FontData::from_static(include_bytes!("../../resources/fonts/Orbitron-Static.ttf")),
+    );
+    fonts.font_data.insert(
+        "ShareTechMono".to_owned(),
+        FontData::from_static(include_bytes!(
+            "../../resources/fonts/ShareTechMono-Regular.ttf"
+        )),
+    );
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "Orbitron".to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(0, "ShareTechMono".to_owned());
+    ctx.set_fonts(fonts);
+}
+
+/// Apply the Barracuda amber-HUD theme (palette + fonts + sharp chrome) to the
+/// whole context.
 pub fn apply_theme(ctx: &egui::Context) {
     use egui::{FontFamily, FontId, Rounding, Stroke, TextStyle};
+
+    install_fonts(ctx);
 
     let mut style = (*ctx.style()).clone();
 
@@ -520,12 +760,13 @@ pub fn apply_theme(ctx: &egui::Context) {
     v.extreme_bg_color = color::BG_ELEVATED;
     v.faint_bg_color = color::BG_ELEVATED;
     v.window_stroke = Stroke::new(1.0_f32, color::BORDER);
-    v.window_rounding = Rounding::same(6.0_f32);
-    v.hyperlink_color = color::ACCENT;
+    v.window_rounding = Rounding::ZERO;
+    v.hyperlink_color = color::ACCENT_BRIGHT;
     v.selection.bg_fill = color::ACCENT.gamma_multiply(0.35);
     v.selection.stroke = Stroke::new(1.0_f32, color::ACCENT);
 
-    let rounding = Rounding::same(5.0_f32);
+    // Sharp, zero-radius HUD chrome — the ui-kit uses `border-radius: 0` throughout.
+    let rounding = Rounding::ZERO;
     v.widgets.noninteractive.bg_fill = color::BG;
     v.widgets.noninteractive.weak_bg_fill = color::BG;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, color::BORDER);
@@ -556,6 +797,39 @@ pub fn apply_theme(ctx: &egui::Context) {
     v.widgets.open.rounding = rounding;
 
     ctx.set_style(style);
+}
+
+/// Draw L-shaped amber corner brackets just inside `rect` — the ui-kit's framed
+/// "panel"/"dialog" accent. `len` is the arm length, `inset` pulls them off the
+/// edge, `alpha` sets the amber intensity.
+pub fn corner_brackets(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    len: f32,
+    inset: f32,
+    alpha: f32,
+) {
+    let s = egui::Stroke::new(1.5_f32, with_alpha(color::ACCENT, alpha));
+    let r = rect.shrink(inset);
+    let (tl, tr, bl, br) = (
+        r.left_top(),
+        r.right_top(),
+        r.left_bottom(),
+        r.right_bottom(),
+    );
+    let seg = |painter: &egui::Painter, a, b| painter.line_segment([a, b], s);
+    // top-left
+    seg(painter, tl, tl + egui::vec2(len, 0.0));
+    seg(painter, tl, tl + egui::vec2(0.0, len));
+    // top-right
+    seg(painter, tr, tr + egui::vec2(-len, 0.0));
+    seg(painter, tr, tr + egui::vec2(0.0, len));
+    // bottom-left
+    seg(painter, bl, bl + egui::vec2(len, 0.0));
+    seg(painter, bl, bl + egui::vec2(0.0, -len));
+    // bottom-right
+    seg(painter, br, br + egui::vec2(-len, 0.0));
+    seg(painter, br, br + egui::vec2(0.0, -len));
 }
 
 // --------------------------------------------------------------------------- //
@@ -599,7 +873,10 @@ impl AutoAction {
     /// The [`Invoke`] this auto-action dispatches (always in the same tab).
     pub fn into_invoke(self) -> Invoke {
         Invoke {
-            action: Action { capability: self.capability, method: self.method },
+            action: Action {
+                capability: self.capability,
+                method: self.method,
+            },
             args: self.args,
             open_in_tab: false,
         }
@@ -817,7 +1094,11 @@ fn step_icon(ui: &mut egui::Ui, key: &str, state: &str) {
 
     // Pending: a faint hollow circle.
     if !loading && !settled {
-        painter.circle_stroke(c, r, egui::Stroke::new(1.6f32, with_alpha(color::TEXT_MUTED, 0.45)));
+        painter.circle_stroke(
+            c,
+            r,
+            egui::Stroke::new(1.6f32, with_alpha(color::TEXT_MUTED, 0.45)),
+        );
         return;
     }
     // Spinner: a rotating arc, fading out as the settled mark takes over.
@@ -832,7 +1113,10 @@ fn step_icon(ui: &mut egui::Ui, key: &str, state: &str) {
                 c + r * egui::vec2(ang.cos(), ang.sin())
             })
             .collect();
-        painter.add(egui::Shape::line(pts, egui::Stroke::new(2.2f32, with_alpha(color::ACCENT, a))));
+        painter.add(egui::Shape::line(
+            pts,
+            egui::Stroke::new(2.2f32, with_alpha(color::ACCENT, a)),
+        ));
         ui.ctx().request_repaint();
     }
     // Settled mark: fades + scales in as `t` rises.
@@ -844,23 +1128,38 @@ fn step_icon(ui: &mut egui::Ui, key: &str, state: &str) {
             "error" => {
                 let col = with_alpha(color::ERROR, t);
                 painter.circle_stroke(c, r, egui::Stroke::new(2.0f32, col));
-                painter.line_segment([p(-0.32, -0.32), p(0.32, 0.32)], egui::Stroke::new(2.4f32, col));
-                painter.line_segment([p(-0.32, 0.32), p(0.32, -0.32)], egui::Stroke::new(2.4f32, col));
+                painter.line_segment(
+                    [p(-0.32, -0.32), p(0.32, 0.32)],
+                    egui::Stroke::new(2.4f32, col),
+                );
+                painter.line_segment(
+                    [p(-0.32, 0.32), p(0.32, -0.32)],
+                    egui::Stroke::new(2.4f32, col),
+                );
             }
             // Amber ⚠ — a triangle with an exclamation.
             "warning" => {
                 let col = with_alpha(color::WARNING, t);
                 let tri = vec![p(0.0, -0.62), p(-0.58, 0.42), p(0.58, 0.42), p(0.0, -0.62)];
                 painter.add(egui::Shape::line(tri, egui::Stroke::new(2.0f32, col)));
-                painter.line_segment([p(0.0, -0.18), p(0.0, 0.14)], egui::Stroke::new(2.2f32, col));
+                painter.line_segment(
+                    [p(0.0, -0.18), p(0.0, 0.14)],
+                    egui::Stroke::new(2.2f32, col),
+                );
                 painter.circle_filled(p(0.0, 0.30), 1.3f32 * s.max(0.4), col);
             }
             // Green check in a green ring.
             _ => {
                 let col = with_alpha(color::SUCCESS, t);
                 painter.circle_stroke(c, r, egui::Stroke::new(2.0f32, col));
-                painter.line_segment([p(-0.42, 0.02), p(-0.12, 0.34)], egui::Stroke::new(2.4f32, col));
-                painter.line_segment([p(-0.12, 0.34), p(0.46, -0.34)], egui::Stroke::new(2.4f32, col));
+                painter.line_segment(
+                    [p(-0.42, 0.02), p(-0.12, 0.34)],
+                    egui::Stroke::new(2.4f32, col),
+                );
+                painter.line_segment(
+                    [p(-0.12, 0.34), p(0.46, -0.34)],
+                    egui::Stroke::new(2.4f32, col),
+                );
             }
         }
     }
@@ -920,7 +1219,9 @@ fn render_widget(
             dropdown(ui, id.clone(), value, options);
         }
         Widget::Checkbox { id, label, default } => {
-            let entry = inputs.entry(id.clone()).or_insert_with(|| default.to_string());
+            let entry = inputs
+                .entry(id.clone())
+                .or_insert_with(|| default.to_string());
             let mut on = entry.as_str() == "true";
             toggle(ui, &mut on, label);
             *entry = on.to_string();
@@ -1052,13 +1353,13 @@ fn render_chart(ui: &mut egui::Ui, title: &str, data: &[ChartBar]) {
         );
         ui.painter().rect_filled(
             track,
-            egui::Rounding::same(3.0),
+            egui::Rounding::ZERO,
             with_alpha(color::BG_WIDGET, 0.55),
         );
         let frac = (b.value / max).clamp(0.0, 1.0) as f32;
         let fill = egui::Rect::from_min_size(track.min, egui::vec2(bar_area * frac, bh));
         ui.painter()
-            .rect_filled(fill, egui::Rounding::same(3.0), color::ACCENT);
+            .rect_filled(fill, egui::Rounding::ZERO, color::ACCENT);
         // Value.
         ui.painter().text(
             egui::pos2(rect.right(), rect.center().y),
@@ -1105,7 +1406,15 @@ fn render_table(
         render_plain_table(ui, columns, rows, ncols);
     } else {
         render_interactive_table(
-            ui, columns, rows, row_ids, menu, row_menus, on_activate, clicked, ncols,
+            ui,
+            columns,
+            rows,
+            row_ids,
+            menu,
+            row_menus,
+            on_activate,
+            clicked,
+            ncols,
         );
     }
 }
@@ -1174,7 +1483,7 @@ fn render_interactive_table(
     let content_w =
         widths.iter().sum::<f32>() + col_gap * ncols.saturating_sub(1) as f32 + pad_x * 2.0;
     let row_h = font.size + pad_y * 2.0;
-    let rounding = egui::Rounding::same(4.0);
+    let rounding = egui::Rounding::ZERO;
 
     let id = ui.make_persistent_id(("limen_itable", ncols, rows.len()));
     egui::ScrollArea::horizontal().id_source(id).show(ui, |ui| {
@@ -1561,8 +1870,7 @@ pub fn render_demo_ui(ui: &mut egui::Ui, inputs: &mut HashMap<String, String>) {
                 ] {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(56.0, 34.0), egui::Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, egui::Rounding::same(5.0_f32), c);
+                    ui.painter().rect_filled(rect, egui::Rounding::ZERO, c);
                     ui.painter().text(
                         rect.center_bottom() + egui::vec2(0.0, -2.0),
                         egui::Align2::CENTER_BOTTOM,
@@ -1578,6 +1886,23 @@ pub fn render_demo_ui(ui: &mut egui::Ui, inputs: &mut HashMap<String, String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The brand fonts must actually parse and lay out — egui panics on a
+    /// malformed face when it builds the atlas, so running one headless frame
+    /// with Latin + Cyrillic text (Cyrillic exercises the fallback face) proves
+    /// Orbitron (variable) and Share Tech Mono both load.
+    #[test]
+    fn brand_fonts_load_and_lay_out() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label("Limen HUD 0123");
+                ui.monospace("path/to/mod.rs");
+                ui.label("Заборонене ПЗ"); // Cyrillic → fallback face
+            });
+        });
+    }
 
     #[test]
     fn markdown_inline_tokenizes_bold_code_and_links() {

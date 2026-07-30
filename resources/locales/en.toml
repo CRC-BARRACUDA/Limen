@@ -1,0 +1,133 @@
+# English UI strings. Keys are referenced as `i18n::t("section.key")`.
+# This is the source-of-truth locale — every key here must also exist in the
+# other locale files (enforced by a test).
+
+[tab]
+about = "About"
+license = "License"
+modules = "Modules"
+settings = "Settings"
+developer = "Developer"
+update = "Update"
+details = "Details"
+
+[nav]
+about = "About"
+modules = "Modules"
+update_available = "Update available"
+update_available_hint = "A newer version is available"
+installing = "Installing"
+developer = "Developer"
+settings = "Settings"
+
+[win]
+close = "Close"
+restore = "Restore"
+maximize = "Maximize"
+minimize = "Minimize"
+
+[app]
+engine_failed = "The engine failed to start:"
+no_tabs = "No open tabs — use the buttons above."
+
+[about]
+branch = "branch"
+commit = "commit"
+tagline = "A modular tool for security and analysis."
+view_license = "View license"
+github = "GitHub ↗"
+created_by = "Created by the CRC BARRACUDA"
+
+[settings]
+title = "Settings"
+language = "Language"
+language_hint = "Choose the interface language."
+ui_scale = "UI scale"
+ui_scale_hint = "Make the whole interface bigger or smaller."
+animations = "Animations"
+animations_hint = "Smoothly animate buttons and transitions."
+animations_toggle = "Enable animations"
+
+[modules]
+title = "Modules"
+reload = "Reload"
+search_hint = "Search modules — local and in the org…"
+open = "Open"
+pin = "Pin"
+unpin = "Unpin"
+remove = "Remove"
+github = "GitHub ↗"
+update = "Update"
+install = "Install"
+updating = "Updating…"
+installing = "Installing…"
+preparing_runtime = "Preparing runtime…"
+may_require_admin = "Some methods may require elevated permissions."
+by = "by"
+requires = "Requires:"
+optional = "Optional:"
+org_error = "Couldn't list the org:"
+none_match = "No modules match."
+
+[modules.filter]
+all = "All"
+installed = "Installed"
+available = "Available"
+
+[tabstrip]
+frequent_hint = "Frequently used — open"
+
+[perm]
+this_module = "This module"
+wants_to_run = "“{name}” wants to run “{method}”, which needs elevated permissions."
+grant_run = "Grant & Run"
+deny = "Deny"
+remembered = "Approval is remembered for this version."
+denied = "permission denied"
+
+[update]
+title = "Update"
+up_to_date = "Limen is up to date."
+available = "A new version is available"
+release_notes = "Release notes ↗"
+button = "Update"
+installing = "downloading & installing… the app will restart"
+no_binary = "no prebuilt binary for this platform — see release notes"
+
+[license]
+title = "License"
+intro = "Limen is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License, version 3 or later."
+
+[detail]
+unavailable = "This detail view is no longer available."
+loading = "Loading…"
+
+[module]
+result = "Result"
+failed_start = "This module failed to start:"
+
+[dev]
+tab_dev_mode = "Dev mode"
+tab_ui_kit = "UI Kit"
+tab_console = "Console"
+dev_mode = "Dev mode"
+dev_mode_help = "Source app and module updates from local directories instead of GitHub — for testing update flows. A relative path resolves against the working directory. Resets when Limen restarts."
+limen_path = "Limen update path"
+limen_path_hint = "dir of Limen-<ver>-<platform>.tar.gz"
+modules_path = "Module update path"
+modules_path_hint = "dir of <name>/ module folders"
+set_dev_mode = "Set dev mode"
+update_dev_mode = "Update dev mode"
+turn_off = "Turn off"
+token_title = "GitHub token"
+token_help = "Optional. Authenticates module-registry requests (5,000/hr instead of 60/hr) and enables free conditional checks. Stored in settings.json; leave blank for the unauthenticated default."
+token_hint = "ghp_… (blank = unauthenticated)"
+save_token = "Save token"
+token_saved = "Saved — token verified against GitHub."
+token_not_saved = "Not saved —"
+token_cleared = "Cleared — using the unauthenticated default."
+verifying = "Verifying…"
+dev_mode_on = "Dev mode on — updates sourced from the paths above."
+lines = "lines"
+autoscroll = "Autoscroll"
+no_logs = "No logs yet."

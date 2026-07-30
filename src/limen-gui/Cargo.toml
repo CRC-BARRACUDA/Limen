@@ -13,10 +13,12 @@ path = "main.rs"
 [dependencies]
 limen-core = { workspace = true }
 limen-registry = { workspace = true }
+limen-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 eframe = { workspace = true }
+toml = { workspace = true }
 
 # Embed the app icon + version info into the .exe (Explorer / taskbar file icon).
 [target.'cfg(windows)'.build-dependencies]

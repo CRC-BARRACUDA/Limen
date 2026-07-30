@@ -17,8 +17,8 @@ use limen_core::{
     install_runtime, is_newer, paths,
 };
 use limen_registry::{
-    Lockfile, Registry, RemoteModule, fetch_remote_module, latest_release_version,
-    list_org_module_repos,
+    Lockfile, Registry, RemoteModule, TrustStore, digest_dir, fetch_remote_module,
+    latest_release_version, list_org_module_repos,
 };
 use serde_json::Value;
 
@@ -31,6 +31,10 @@ pub struct ModuleSnapshot {
     pub git_meta: std::collections::HashMap<String, (String, String)>,
     /// name → error, for modules that failed to start (shown in their tab).
     pub failed: HashMap<String, String>,
+    /// Sensitive modules whose current on-disk digest matches the trust store.
+    /// Computed here (worker thread) because digesting a module dir hashes all
+    /// its files — some large — and must never run on the UI thread.
+    pub trusted: Vec<String>,
 }
 
 /// How many available-module metadata fetches run concurrently.
@@ -197,11 +201,24 @@ fn snapshot(engine: &Engine) -> ModuleSnapshot {
             git_installed.push(e.name);
         }
     }
+    // Trust check (digests each sensitive module's dir) — on the worker thread.
+    let specs = engine.modules().to_vec();
+    let trust = TrustStore::load(&paths::home()).unwrap_or_default();
+    let trusted: Vec<String> = specs
+        .iter()
+        .filter(|m| m.permissions.sensitive())
+        .filter_map(|m| {
+            let digest = digest_dir(&m.cwd).ok()?;
+            trust.is_trusted(&m.name, &digest).then(|| m.name.clone())
+        })
+        .collect();
+
     ModuleSnapshot {
-        specs: engine.modules().to_vec(),
+        specs,
         git_installed,
         git_meta,
         failed: engine.failed_modules().clone(),
+        trusted,
     }
 }
 
@@ -287,19 +304,33 @@ fn org() -> String {
 /// Restart the engine after the installed set changed.
 fn reload(engine: &mut Engine, dirs: &[PathBuf], evt_tx: &Sender<Event>) -> bool {
     engine.shutdown();
-    match start_engine(dirs, evt_tx) {
-        Ok(e) => {
-            *engine = e;
-            let snap = snapshot(engine);
-            spawn_update_check(update_check_refs(&snap), evt_tx.clone());
-            let _ = evt_tx.send(Event::Modules(snap));
-            true
-        }
+    // Discovery (reads manifests off disk) is cheap; (re)starting modules —
+    // spawning interpreters, dlopen-ing native libs, running each `initialize` —
+    // is the slow part. So refresh the manager list from discovery *first*, then
+    // start the modules: clicking Reload updates the cards immediately instead of
+    // freezing on the restart.
+    let mut e = match Engine::load(dirs).map_err(|err| format!("{err:#}")) {
+        Ok(e) => e,
         Err(err) => {
             let _ = evt_tx.send(Event::Fatal(err));
-            false
+            return false;
         }
+    };
+    let log_tx = evt_tx.clone();
+    e.set_logger(Arc::new(move |line: &str| {
+        let _ = log_tx.send(Event::Log(line.to_string()));
+    }));
+    let _ = evt_tx.send(Event::Modules(snapshot(&e)));
+
+    if let Err(err) = e.start().map_err(|err| format!("{err:#}")) {
+        let _ = evt_tx.send(Event::Fatal(err));
+        return false;
     }
+    *engine = e;
+    let snap = snapshot(engine);
+    spawn_update_check(update_check_refs(&snap), evt_tx.clone());
+    let _ = evt_tx.send(Event::Modules(snap));
+    true
 }
 
 fn run(

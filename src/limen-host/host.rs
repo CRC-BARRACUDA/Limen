@@ -451,6 +451,7 @@ fn host_handler(
         "host.emit" => broker.emit(params),
         "host.about" => Ok(host_about()),
         "host.capabilities" => Ok(json!(broker.capabilities())),
+        "host.locale" => Ok(json!(limen_proto::locale::current())),
         "host.open" => host_open(params),
         "host.pick_file" => Ok(host_pick_file()),
         "host.log" => {

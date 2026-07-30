@@ -18,11 +18,12 @@ use eframe::egui;
 use limen_core::{ModuleSpec, Runtime};
 use limen_registry::RemoteModule;
 
+use crate::i18n;
 use crate::ui;
 use crate::worker::{Command, Event, RunTag, Worker};
 
 /// An open tab. All tabs are closable.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 enum Tab {
     About,
     License,
@@ -40,16 +41,16 @@ enum Tab {
 impl Tab {
     fn title(&self) -> String {
         match self {
-            Tab::About => "About".into(),
-            Tab::License => "License".into(),
-            Tab::Modules => "Modules".into(),
+            Tab::About => i18n::t("tab.about"),
+            Tab::License => i18n::t("tab.license"),
+            Tab::Modules => i18n::t("tab.modules"),
             Tab::Module(n) => n.clone(),
-            Tab::Settings => "Settings".into(),
-            Tab::Developer => "Developer".into(),
-            Tab::Update => "Update".into(),
+            Tab::Settings => i18n::t("tab.settings"),
+            Tab::Developer => i18n::t("tab.developer"),
+            Tab::Update => i18n::t("tab.update"),
             // The real label comes from the stored view's title (looked up in the
             // tab bar); this is only a fallback.
-            Tab::Detail { .. } => "Details".into(),
+            Tab::Detail { .. } => i18n::t("tab.details"),
         }
     }
 }
@@ -156,6 +157,9 @@ pub struct LimenApp {
     /// Whether UI animations are enabled (persisted in settings).
     animations: bool,
 
+    /// The active UI language (persisted in settings; mirrors `i18n`'s global).
+    language: i18n::Lang,
+
     /// When the About tab was last shown — drives its staggered content reveal.
     about_revealed_at: Option<f64>,
     /// Reveal timers for the Settings/Developer/License tab entrance animations.
@@ -182,6 +186,17 @@ pub struct LimenApp {
     updating: bool,
     /// A portable interpreter currently being installed (e.g. "Python"), if any.
     installing_runtime: Option<String>,
+    /// Startup splash: the frame time it first rendered (set lazily on the first
+    /// frame), and whether the ~2s animated intro has finished. Once done, the
+    /// normal UI takes over.
+    splash_start: Option<f64>,
+    splash_done: bool,
+    /// Whether the window has been centered + revealed yet (it's created hidden
+    /// to avoid a dark startup flash).
+    window_shown: bool,
+    /// How many startup frames have pre-warmed the font atlas so far (warmed for
+    /// the first several, after zoom/DPI settles, then stops).
+    fonts_warm_frames: u32,
 }
 
 impl LimenApp {
@@ -191,6 +206,23 @@ impl LimenApp {
             .map(|c| c.animations)
             .unwrap_or(true);
         ui::set_animations(animations);
+        // Resolve the UI language: saved choice → OS locale → English.
+        let language = limen_core::Config::load()
+            .ok()
+            .and_then(|c| c.language)
+            .and_then(|code| i18n::Lang::from_code(&code))
+            .unwrap_or_else(i18n::detect);
+        i18n::set_locale(language);
+        // Share it with the module host + registry (host.locale callback, and the
+        // localized-description lookup when listing modules).
+        limen_proto::locale::set(language.code());
+        // Apply the admin's GitHub token (if set) to the module registry before the
+        // first request; absent = unauthenticated (the default). Point the registry
+        // at ~/.limen for its conditional-request (ETag) cache.
+        limen_registry::set_registry_cache_dir(limen_core::paths::home());
+        limen_registry::set_github_token(
+            limen_core::Config::load().ok().and_then(|c| c.github_token),
+        );
         Self {
             worker: Worker::spawn(dirs),
             status: "starting modules…".to_string(),
@@ -236,6 +268,7 @@ impl LimenApp {
                 if pct == 0 { 100.0 } else { pct as f32 }
             },
             animations,
+            language,
             about_revealed_at: None,
             settings_revealed_at: None,
             developer_revealed_at: None,
@@ -248,6 +281,10 @@ impl LimenApp {
             update: None,
             updating: false,
             installing_runtime: None,
+            splash_start: None,
+            splash_done: false,
+            window_shown: false,
+            fonts_warm_frames: 0,
         }
     }
 
@@ -319,6 +356,16 @@ impl LimenApp {
         }
     }
 
+    /// Apply the chosen language globally and persist it to settings.json.
+    fn save_language(&self) {
+        i18n::set_locale(self.language);
+        limen_proto::locale::set(self.language.code());
+        if let Ok(mut cfg) = limen_core::Config::load() {
+            cfg.language = Some(self.language.code().to_string());
+            let _ = cfg.save();
+        }
+    }
+
     /// Pin or unpin a module, then persist the pin list to settings.json.
     fn toggle_pin(&mut self, name: &str) {
         if let Some(i) = self.pinned.iter().position(|n| n == name) {
@@ -335,22 +382,6 @@ impl LimenApp {
 
     /// Recompute which sensitive modules the user has granted (trusted at their
     /// current digest). Cheap enough to run on module load / after a grant.
-    fn refresh_trust(&mut self) {
-        let trust =
-            limen_registry::TrustStore::load(&limen_core::paths::home()).unwrap_or_default();
-        self.trusted.clear();
-        for m in &self.modules {
-            if !m.permissions.sensitive() {
-                continue;
-            }
-            if let Ok(digest) = limen_registry::digest_dir(&m.cwd)
-                && trust.is_trusted(&m.name, &digest)
-            {
-                self.trusted.insert(m.name.clone());
-            }
-        }
-    }
-
     /// The module that provides `capability`, if any.
     fn module_of(&self, capability: &str) -> Option<&ModuleSpec> {
         self.modules
@@ -404,7 +435,8 @@ impl LimenApp {
                     self.git_installed = snap.git_installed.into_iter().collect();
                     self.git_meta = snap.git_meta;
                     self.failed = snap.failed;
-                    self.refresh_trust();
+                    // Trust was digested on the worker thread — just take the result.
+                    self.trusted = snap.trusted.into_iter().collect();
                     // A reload follows a completed install/remove — clear the spinner.
                     self.installing = None;
                     self.status = format!("{} module(s) loaded", self.modules.len());
@@ -520,7 +552,6 @@ impl LimenApp {
                     if msg.starts_with("update failed") {
                         self.updating = false;
                     }
-                    self.refresh_trust();
                     self.push_log(format!("[status] {msg}"));
                     self.status = msg;
                 }
@@ -548,7 +579,7 @@ impl LimenApp {
         // A module that failed to start has no live connection — show why, here,
         // instead of trying to call it (or blocking the whole app).
         if let Some(err) = self.failed.get(&name) {
-            self.view_error = Some(format!("This module failed to start:\n\n{err}"));
+            self.view_error = Some(format!("{}\n\n{err}", i18n::t("module.failed_start")));
             return;
         }
         match self.first_capability(&name) {
@@ -639,12 +670,85 @@ impl LimenApp {
 }
 
 impl eframe::App for LimenApp {
+    /// Clear transparent during the startup splash so only the floating icons
+    /// show over the desktop; opaque warm-black once the app takes over.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if self.splash_done {
+            let c = ui::color::BG;
+            [
+                c.r() as f32 / 255.0,
+                c.g() as f32 / 255.0,
+                c.b() as f32 / 255.0,
+                1.0,
+            ]
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now_t = ctx.input(|i| i.time);
         self.drain_events(now_t);
 
         // Apply the global UI scale (set_zoom_factor no-ops if unchanged).
         ctx.set_zoom_factor(self.ui_scale / 100.0);
+
+        // The window is created hidden; on the first frame centre it on the
+        // monitor and reveal it, so the splash appears cleanly mid-screen instead
+        // of flashing a dark, unfocused window at the default position.
+        if !self.window_shown {
+            let size = egui::vec2(980.0, 640.0);
+            if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
+                let pos = egui::pos2(
+                    ((mon.x - size.x) * 0.5).max(0.0),
+                    ((mon.y - size.y) * 0.5).max(0.0),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.window_shown = true;
+        }
+
+        // Warm the font atlas over the first few frames while the window is still
+        // a blank transparent canvas — *before* the splash starts. The glyph
+        // rasterization hitches, but nothing is drawn yet (the window is
+        // transparent, showing the desktop) and the splash clock hasn't started,
+        // so it's invisible. Warming several frames lets the pixels-per-point /
+        // zoom settle first, and returning early keeps the hitch off the splash
+        // animation, which then plays smoothly against a settled atlas.
+        const WARM_FRAMES: u32 = 6;
+        if self.fonts_warm_frames < WARM_FRAMES {
+            self.fonts_warm_frames += 1;
+            prewarm_fonts(ctx);
+            ctx.request_repaint();
+            return;
+        }
+
+        // Startup splash in the centred window: the marks fade transparent→opaque,
+        // hold opaque ~1s, then a 2s exit animation, after which the window
+        // maximizes and the app takes over. Worker events keep draining above.
+        // Skipped when animations are off.
+        if !self.splash_done {
+            let start = *self.splash_start.get_or_insert(now_t);
+            let elapsed = (now_t - start) as f32;
+            // With animations off, keep the transparent lead (so the clumsy opaque
+            // startup frames stay hidden), then show the marks statically — no
+            // fade/scanline motion.
+            let dur = if self.animations {
+                SPLASH_SECS
+            } else {
+                SPLASH_LEAD + SPLASH_HOLD
+            };
+            if elapsed < dur {
+                ctx.request_repaint();
+                splash_screen(ctx, elapsed, self.animations);
+                return;
+            }
+            self.splash_done = true;
+            // Grow into the app: fill the screen once the intro finishes.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
 
         // Reload is requested from the Modules page (set during the central panel).
         let mut reload = false;
@@ -655,39 +759,65 @@ impl eframe::App for LimenApp {
         let mut close_idx: Option<usize> = None;
         let mut scale_changed = false;
         let mut anim_changed = false;
+        let mut lang_changed = false;
         let mut dev_applied = false;
+
+        // Custom-decoration resize grips along the window edges/corners.
+        ui::window_resize_grips(ctx);
 
         // Title bar: brand + quick-open buttons + status.
         egui::TopBottomPanel::top("titlebar")
             .frame(
                 egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(0x21, 0x25, 0x2b))
+                    .fill(ui::color::BG_ELEVATED)
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        ui::with_alpha(ui::color::ACCENT, 0.18),
+                    ))
                     .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
             )
             .show(ctx, |ui| {
+                // Whole-bar drag to move the window + double-click to maximize.
+                // Done before the row below so its buttons sit on top and keep
+                // their own clicks. Constrain the drag zone to the row height —
+                // `max_rect` here spans the whole window until content is measured,
+                // so an unconstrained rect would hijack clicks on the pages below.
+                let full = ui.max_rect();
+                let bar_rect =
+                    egui::Rect::from_min_max(full.min, egui::pos2(full.max.x, full.min.y + 28.0));
+                let bar = ui.interact(
+                    bar_rect,
+                    egui::Id::new("titlebar_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                if bar.double_clicked() {
+                    let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+                }
+                if bar.drag_started_by(egui::PointerButton::Primary) {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
                 ui.horizontal(|ui| {
                     // App icon (the ◈ brand mark) in place of the wordmark.
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
-                    draw_brand(ui.painter(), rect);
+                    draw_brand(ui.painter(), rect, 1.0, false);
                     ui.add_space(12.0);
                     let active = self.active_tab();
-                    if ui::chip(ui, "About", active == Some(Tab::About)).clicked() {
+                    if ui::chip(ui, &i18n::t("nav.about"), active == Some(Tab::About)).clicked() {
                         open_tab = Some(Tab::About);
                     }
-                    if ui::chip(ui, "Modules", active == Some(Tab::Modules)).clicked() {
+                    if ui::chip(ui, &i18n::t("nav.modules"), active == Some(Tab::Modules))
+                        .clicked()
+                    {
                         open_tab = Some(Tab::Modules);
                     }
                     // "Update available" pill, next to Modules.
                     if self.update.is_some() {
                         ui.add_space(6.0);
-                        if ui::pill(
-                            ui,
-                            "Update available",
-                            egui::Color32::from_rgb(0xe6, 0x9a, 0x5c),
-                        )
-                        .on_hover_text("A newer version is available")
-                        .clicked()
+                        if ui::pill(ui, &i18n::t("nav.update_available"), ui::color::ORANGE)
+                            .on_hover_text(i18n::t("nav.update_available_hint"))
+                            .clicked()
                         {
                             open_tab = Some(Tab::Update);
                         }
@@ -698,20 +828,51 @@ impl eframe::App for LimenApp {
                         ui.add_space(8.0);
                         ui.spinner();
                         ui.label(
-                            egui::RichText::new(format!("Installing {rt}…"))
+                            egui::RichText::new(format!("{} {rt}…", i18n::t("nav.installing")))
                                 .small()
                                 .color(ui::color::TEXT_MUTED),
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Window controls (rightmost). GNOME's default title bar
+                        // shows only a close button, so on Linux that's all we
+                        // draw (double-click still maximizes); Windows/macOS get
+                        // the full close · maximize · minimize set.
+                        if ui::window_button(ui, ui::WinBtn::Close)
+                            .on_hover_text(i18n::t("win.close"))
+                            .clicked()
+                        {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if !cfg!(target_os = "linux") {
+                            let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                            let (mbtn, tip) = if maximized {
+                                (ui::WinBtn::Restore, i18n::t("win.restore"))
+                            } else {
+                                (ui::WinBtn::Maximize, i18n::t("win.maximize"))
+                            };
+                            if ui::window_button(ui, mbtn).on_hover_text(tip).clicked() {
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                            }
+                            if ui::window_button(ui, ui::WinBtn::Minimize)
+                                .on_hover_text(i18n::t("win.minimize"))
+                                .clicked()
+                            {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(6.0);
                         if ui::chip(ui, "🛠", active == Some(Tab::Developer))
-                            .on_hover_text("Developer")
+                            .on_hover_text(i18n::t("nav.developer"))
                             .clicked()
                         {
                             open_tab = Some(Tab::Developer);
                         }
                         if ui::chip(ui, "⚙", active == Some(Tab::Settings))
-                            .on_hover_text("Settings")
+                            .on_hover_text(i18n::t("nav.settings"))
                             .clicked()
                         {
                             open_tab = Some(Tab::Settings);
@@ -726,7 +887,7 @@ impl eframe::App for LimenApp {
         egui::TopBottomPanel::top("tabstrip")
             .frame(
                 egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(0x18, 0x1a, 0x1f))
+                    .fill(ui::color::BG)
                     .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
             )
             .show(ctx, |ui| {
@@ -847,7 +1008,7 @@ impl eframe::App for LimenApp {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             for name in frequent.iter().rev() {
                                 if ui::chip(ui, &format!("↗ {name}"), false)
-                                    .on_hover_text("Frequently used — open")
+                                    .on_hover_text(i18n::t("tabstrip.frequent_hint"))
                                     .clicked()
                                 {
                                     open_tab = Some(Tab::Module(name.clone()));
@@ -925,6 +1086,7 @@ impl eframe::App for LimenApp {
                 log_autoscroll,
                 ui_scale,
                 animations,
+                language,
                 dev_mode_on,
                 dev_limen_path,
                 dev_modules_path,
@@ -937,90 +1099,100 @@ impl eframe::App for LimenApp {
                 detail_tabs,
                 ..
             } = self;
-            egui::CentralPanel::default().show(ctx, |ui| {
-                if let Some(err) = fatal {
-                    ui.colored_label(egui::Color32::LIGHT_RED, "The engine failed to start:");
-                    ui.add_space(4.0);
-                    ui.monospace(err.as_str());
-                    return;
-                }
-                match active_tab {
-                    None => {
-                        ui.add_space(24.0);
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new("No open tabs — use the buttons above.").weak(),
-                            );
-                        });
+            let content_margin = 16.0_f32;
+            let content_frame = egui::Frame::none()
+                .fill(ui::color::BG)
+                .inner_margin(egui::Margin::same(content_margin));
+            egui::CentralPanel::default()
+                .frame(content_frame)
+                .show(ctx, |ui| {
+                    // Framed HUD corner brackets, evenly inset from the window edge;
+                    // the panel margin keeps page content padded inside them.
+                    let outer = ui.max_rect().expand(content_margin);
+                    ui::corner_brackets(ui.painter(), outer, 18.0, 8.0, 0.55);
+                    if let Some(err) = fatal {
+                        ui.colored_label(egui::Color32::LIGHT_RED, i18n::t("app.engine_failed"));
+                        ui.add_space(4.0);
+                        ui.monospace(err.as_str());
+                        return;
                     }
-                    Some(Tab::About) => {
-                        if about_view(ui, about_reveal) {
-                            open_tab = Some(Tab::License);
+                    match active_tab {
+                        None => {
+                            ui.add_space(24.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(egui::RichText::new(i18n::t("app.no_tabs")).weak());
+                            });
+                        }
+                        Some(Tab::About) => {
+                            if about_view(ui, about_reveal) {
+                                open_tab = Some(Tab::License);
+                            }
+                        }
+                        Some(Tab::License) => license_view(ui, license_reveal),
+                        Some(Tab::Modules) => modules_page(
+                            ui,
+                            modules,
+                            git_installed,
+                            git_meta,
+                            available_updates,
+                            pinned,
+                            remote,
+                            *remote_loading,
+                            remote_error,
+                            installing,
+                            installing_runtime,
+                            filter,
+                            search,
+                            &mut open_module,
+                            &mut remove_module,
+                            &mut add_module,
+                            &mut update_module,
+                            &mut toggle_pin,
+                            &mut reload,
+                            modules_revealed_at,
+                            shown_filter,
+                            remote_arrivals,
+                            removing,
+                        ),
+                        Some(Tab::Module(name)) => module_view(
+                            ui,
+                            &name,
+                            view,
+                            view_error,
+                            inputs,
+                            output,
+                            busy_action.as_ref(),
+                            &mut action,
+                        ),
+                        Some(Tab::Detail { id }) => detail_view(ui, id, detail_tabs, &mut action),
+                        Some(Tab::Settings) => settings_view(
+                            ui,
+                            ui_scale,
+                            &mut scale_changed,
+                            animations,
+                            &mut anim_changed,
+                            language,
+                            &mut lang_changed,
+                            settings_reveal,
+                        ),
+                        Some(Tab::Developer) => developer_view(
+                            ui,
+                            dev_tab,
+                            inputs,
+                            logs,
+                            log_autoscroll,
+                            dev_mode_on,
+                            dev_limen_path,
+                            dev_modules_path,
+                            &mut dev_applied,
+                            developer_revealed_at,
+                            shown_dev_tab,
+                        ),
+                        Some(Tab::Update) => {
+                            update_view(ui, update_info.as_ref(), updating, &mut do_update)
                         }
                     }
-                    Some(Tab::License) => license_view(ui, license_reveal),
-                    Some(Tab::Modules) => modules_page(
-                        ui,
-                        modules,
-                        git_installed,
-                        git_meta,
-                        available_updates,
-                        pinned,
-                        remote,
-                        *remote_loading,
-                        remote_error,
-                        installing,
-                        installing_runtime,
-                        filter,
-                        search,
-                        &mut open_module,
-                        &mut remove_module,
-                        &mut add_module,
-                        &mut update_module,
-                        &mut toggle_pin,
-                        &mut reload,
-                        modules_revealed_at,
-                        shown_filter,
-                        remote_arrivals,
-                        removing,
-                    ),
-                    Some(Tab::Module(name)) => module_view(
-                        ui,
-                        &name,
-                        view,
-                        view_error,
-                        inputs,
-                        output,
-                        busy_action.as_ref(),
-                        &mut action,
-                    ),
-                    Some(Tab::Detail { id }) => detail_view(ui, id, detail_tabs, &mut action),
-                    Some(Tab::Settings) => settings_view(
-                        ui,
-                        ui_scale,
-                        &mut scale_changed,
-                        animations,
-                        &mut anim_changed,
-                        settings_reveal,
-                    ),
-                    Some(Tab::Developer) => developer_view(
-                        ui,
-                        dev_tab,
-                        inputs,
-                        logs,
-                        log_autoscroll,
-                        dev_mode_on,
-                        dev_limen_path,
-                        dev_modules_path,
-                        &mut dev_applied,
-                        developer_revealed_at,
-                        shown_dev_tab,
-                    ),
-                    Some(Tab::Update) => {
-                        update_view(ui, update_info.as_ref(), updating, &mut do_update)
-                    }
-                }
-            });
+                });
         }
 
         if do_update && let Some(info) = self.update.clone() {
@@ -1050,6 +1222,16 @@ impl eframe::App for LimenApp {
         if anim_changed {
             ui::set_animations(self.animations);
             self.save_animations();
+        }
+        if lang_changed {
+            self.save_language();
+            // Installed cards re-resolve their description in-place (localized_desc
+            // reads the module's locales/ folder, cached per language) — no engine
+            // reload. The org list, though, resolved its descriptions over the
+            // network at fetch time, so re-fetch it (async; cards stream back in).
+            self.remote_fetched = false;
+            self.remote.clear();
+            self.remote_arrivals.clear();
         }
         if dev_applied {
             // Re-run both update checks now so the change is reflected without a
@@ -1143,15 +1325,14 @@ impl eframe::App for LimenApp {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.set_max_width(420.0);
-                    let name = module
-                        .as_ref()
-                        .map(|m| m.name.as_str())
-                        .unwrap_or("This module");
+                    let fallback = i18n::t("perm.this_module");
+                    let name = module.as_ref().map(|m| m.name.as_str()).unwrap_or(&fallback);
                     ui.label(
-                        egui::RichText::new(format!(
-                            "“{name}” wants to run “{}”, which needs elevated permissions.",
-                            pending.action.method
-                        ))
+                        egui::RichText::new(
+                            i18n::t("perm.wants_to_run")
+                                .replace("{name}", name)
+                                .replace("{method}", &pending.action.method),
+                        )
                         .size(15.0),
                     );
                     if let Some(m) = &module {
@@ -1171,14 +1352,17 @@ impl eframe::App for LimenApp {
                     }
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
-                        if ui::primary_button(ui, "Grant & Run", egui::Vec2::ZERO).clicked() {
+                        if ui::primary_button(ui, &i18n::t("perm.grant_run"), egui::Vec2::ZERO)
+                            .clicked()
+                        {
                             decision = Some(true);
                         }
-                        if ui::outline_button(ui, "Deny", egui::Vec2::ZERO).clicked() {
+                        if ui::outline_button(ui, &i18n::t("perm.deny"), egui::Vec2::ZERO).clicked()
+                        {
                             decision = Some(false);
                         }
                         ui.label(
-                            egui::RichText::new("Approval is remembered for this version.")
+                            egui::RichText::new(i18n::t("perm.remembered"))
                                 .small()
                                 .color(ui::color::TEXT_MUTED),
                         );
@@ -1194,14 +1378,18 @@ impl eframe::App for LimenApp {
                 }
                 Some(false) => {
                     self.pending_action = None;
-                    self.status = "permission denied".to_string();
+                    self.status = i18n::t("perm.denied");
                 }
                 None => {}
             }
         }
 
-        // Fetch the org's module list the first time we land on the Modules page.
-        if self.active_tab() == Some(Tab::Modules) && !self.remote_fetched {
+        // Prefetch the org's module list once at startup (not lazily on first
+        // Modules open) — the fetch is async on the worker, so it runs in the
+        // background during/after the splash and the manager is already populated
+        // by the time the user opens it. Also re-fires after a reload or a
+        // language change (both reset `remote_fetched`).
+        if !self.remote_fetched {
             self.remote_fetched = true;
             self.remote_loading = true;
             self.remote.clear();
@@ -1224,25 +1412,27 @@ fn update_view(
     do_update: &mut bool,
 ) {
     ui.add_space(4.0);
-    ui.heading("Update");
+    ui.heading(i18n::t("update.title"));
     ui.separator();
     ui.add_space(8.0);
 
     let Some(info) = info else {
-        ui.label(egui::RichText::new("Limen is up to date.").color(ui::color::TEXT_MUTED));
+        ui.label(egui::RichText::new(i18n::t("update.up_to_date")).color(ui::color::TEXT_MUTED));
         return;
     };
 
     ui.label(
         egui::RichText::new(format!(
-            "A new version is available: v{} -> v{}",
-            info.current, info.latest
+            "{}: v{} -> v{}",
+            i18n::t("update.available"),
+            info.current,
+            info.latest
         ))
         .size(15.0),
     );
     if !info.url.is_empty() {
         ui.add_space(2.0);
-        ui.hyperlink_to("Release notes ↗", &info.url);
+        ui.hyperlink_to(i18n::t("update.release_notes"), &info.url);
     }
     if !info.notes.trim().is_empty() {
         ui.add_space(8.0);
@@ -1257,7 +1447,7 @@ fn update_view(
     ui.horizontal(|ui| {
         let clicked = ui
             .add_enabled_ui(!updating, |ui| {
-                ui::primary_button(ui, "Update", egui::Vec2::ZERO)
+                ui::primary_button(ui, &i18n::t("update.button"), egui::Vec2::ZERO)
             })
             .inner
             .clicked();
@@ -1267,10 +1457,10 @@ fn update_view(
         if updating {
             ui.add_space(6.0);
             ui.spinner();
-            ui.label(egui::RichText::new("downloading & installing… the app will restart").small());
+            ui.label(egui::RichText::new(i18n::t("update.installing")).small());
         } else if info.asset_url.is_none() {
             ui.label(
-                egui::RichText::new("no prebuilt binary for this platform — see release notes")
+                egui::RichText::new(i18n::t("update.no_binary"))
                     .small()
                     .color(ui::color::TEXT_MUTED),
             );
@@ -1279,30 +1469,56 @@ fn update_view(
 }
 
 /// The Settings tab. `reveal_at` staggers the sections in when the tab is shown.
+#[allow(clippy::too_many_arguments)]
 fn settings_view(
     ui: &mut egui::Ui,
     scale: &mut f32,
     changed: &mut bool,
     animations: &mut bool,
     anim_changed: &mut bool,
+    lang: &mut i18n::Lang,
+    lang_changed: &mut bool,
     reveal_at: f64,
 ) {
     let now = ui.input(|i| i.time);
     let animate = ui::animations_enabled();
-
-    ui.add_space(4.0);
-    reveal_item(ui, 0, reveal_at, now, animate, |ui| {
-        ui.heading("Settings");
-        ui.separator();
-    });
-    ui.add_space(6.0);
-    reveal_item(ui, 1, reveal_at, now, animate, |ui| {
-        ui.label(egui::RichText::new("UI scale").strong());
+    let hint = |ui: &mut egui::Ui, key: &str| {
         ui.label(
-            egui::RichText::new("Make the whole interface bigger or smaller.")
+            egui::RichText::new(i18n::t(key))
                 .small()
                 .color(ui::color::TEXT_MUTED),
         );
+    };
+
+    ui.add_space(4.0);
+    reveal_item(ui, 0, reveal_at, now, animate, |ui| {
+        ui.heading(i18n::t("settings.title"));
+        ui.separator();
+    });
+
+    // Language — the endonyms stay untranslated (a picker always shows each
+    // language in its own name).
+    ui.add_space(6.0);
+    reveal_item(ui, 1, reveal_at, now, animate, |ui| {
+        ui.label(egui::RichText::new(i18n::t("settings.language")).strong());
+        hint(ui, "settings.language_hint");
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            for l in i18n::Lang::ALL {
+                if ui::chip(ui, l.label(), *lang == l).clicked() {
+                    *lang = l;
+                    *lang_changed = true;
+                }
+            }
+        });
+    });
+
+    ui.add_space(16.0);
+    reveal_item(ui, 2, reveal_at, now, animate, |ui| {
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(i18n::t("settings.ui_scale")).strong());
+        hint(ui, "settings.ui_scale_hint");
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             for pct in [100.0_f32, 125.0, 150.0, 175.0, 200.0] {
@@ -1316,17 +1532,13 @@ fn settings_view(
     });
 
     ui.add_space(16.0);
-    reveal_item(ui, 2, reveal_at, now, animate, |ui| {
+    reveal_item(ui, 3, reveal_at, now, animate, |ui| {
         ui.separator();
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("Animations").strong());
-        ui.label(
-            egui::RichText::new("Smoothly animate buttons and transitions.")
-                .small()
-                .color(ui::color::TEXT_MUTED),
-        );
+        ui.label(egui::RichText::new(i18n::t("settings.animations")).strong());
+        hint(ui, "settings.animations_hint");
         ui.add_space(6.0);
-        if ui::toggle(ui, animations, "Enable animations").changed() {
+        if ui::toggle(ui, animations, &i18n::t("settings.animations_toggle")).changed() {
             *anim_changed = true;
         }
     });
@@ -1343,42 +1555,32 @@ fn dev_mode_view(
     applied: &mut bool,
 ) {
     ui.add_space(6.0);
-    ui.label(egui::RichText::new("Dev mode").strong());
+    ui.label(egui::RichText::new(i18n::t("dev.dev_mode")).strong());
     ui.label(
-        egui::RichText::new(
-            "Source app and module updates from local directories instead of \
-             GitHub — for testing update flows. A relative path resolves against \
-             the working directory. Resets when Limen restarts.",
-        )
-        .small()
-        .color(ui::color::TEXT_MUTED),
+        egui::RichText::new(i18n::t("dev.dev_mode_help"))
+            .small()
+            .color(ui::color::TEXT_MUTED),
     );
     ui.add_space(8.0);
     egui::Grid::new("dev_mode_paths")
         .num_columns(2)
         .spacing([10.0, 8.0])
         .show(ui, |ui| {
-            ui.label("Limen update path");
-            ui::text_field(
-                ui,
-                dev_limen_path,
-                "dir of Limen-<ver>-<platform>.tar.gz",
-                320.0,
-                false,
-            );
+            ui.label(i18n::t("dev.limen_path"));
+            ui::text_field(ui, dev_limen_path, &i18n::t("dev.limen_path_hint"), 320.0, false);
             ui.end_row();
-            ui.label("Module update path");
-            ui::text_field(ui, dev_modules_path, "dir of <name>/ module folders", 320.0, false);
+            ui.label(i18n::t("dev.modules_path"));
+            ui::text_field(ui, dev_modules_path, &i18n::t("dev.modules_path_hint"), 320.0, false);
             ui.end_row();
         });
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         let label = if *dev_mode_on {
-            "Update dev mode"
+            i18n::t("dev.update_dev_mode")
         } else {
-            "Set dev mode"
+            i18n::t("dev.set_dev_mode")
         };
-        if ui::primary_button(ui, label, egui::Vec2::ZERO).clicked() {
+        if ui::primary_button(ui, &label, egui::Vec2::ZERO).clicked() {
             let as_dir = |s: &str| {
                 let t = s.trim();
                 (!t.is_empty()).then(|| std::path::PathBuf::from(t))
@@ -1388,17 +1590,130 @@ fn dev_mode_view(
             *dev_mode_on = true;
             *applied = true;
         }
-        if *dev_mode_on && ui::outline_button(ui, "Turn off", egui::Vec2::ZERO).clicked() {
+        if *dev_mode_on && ui::outline_button(ui, &i18n::t("dev.turn_off"), egui::Vec2::ZERO).clicked() {
             limen_core::set_update_dir(None);
             limen_registry::set_update_modules_dir(None);
             *dev_mode_on = false;
             *applied = true;
         }
     });
+
+    // GitHub token (persistent) — authenticates module-registry requests, lifting
+    // the 60/hr anonymous limit to 5,000/hr and making conditional (304) checks
+    // free. Self-contained: the edit buffer lives in egui memory; Save persists it
+    // to settings.json and applies it live.
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(i18n::t("dev.token_title")).strong());
+    ui.label(
+        egui::RichText::new(i18n::t("dev.token_help"))
+            .small()
+            .color(ui::color::TEXT_MUTED),
+    );
+    ui.add_space(4.0);
+    // The validation call hits the network, so it runs on a background thread; the
+    // shared slot below carries its result back (`Ok(token)` = verified, save it;
+    // `Err(msg)` = rejected). While the slot is present but empty, a spinner shows.
+    type TokenProbe = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>;
+    let tok_id = egui::Id::new("dev_github_token_buf");
+    let status_id = egui::Id::new("dev_github_token_status");
+    let probe_id = egui::Id::new("dev_github_token_probe");
+    let mut token = ui.data_mut(|d| {
+        d.get_temp::<String>(tok_id).unwrap_or_else(|| {
+            limen_core::Config::load()
+                .ok()
+                .and_then(|c| c.github_token)
+                .unwrap_or_default()
+        })
+    });
+    // (message, is_error) — result of the last Save, kept in egui memory.
+    let mut status = ui.data_mut(|d| d.get_temp::<(String, bool)>(status_id).unwrap_or_default());
+
+    // Collect the result of an in-flight validation, if any has finished.
+    let probe = ui.data_mut(|d| d.get_temp::<TokenProbe>(probe_id));
+    let mut testing = false;
+    if let Some(p) = probe {
+        match p.lock().unwrap().take() {
+            Some(Ok(t)) => {
+                if let Ok(mut cfg) = limen_core::Config::load() {
+                    cfg.github_token = Some(t.clone());
+                    let _ = cfg.save();
+                }
+                limen_registry::set_github_token(Some(t));
+                status = (i18n::t("dev.token_saved"), false);
+                *applied = true;
+                ui.data_mut(|d| d.remove::<TokenProbe>(probe_id));
+            }
+            Some(Err(e)) => {
+                status = (format!("{} {e}", i18n::t("dev.token_not_saved")), true);
+                ui.data_mut(|d| d.remove::<TokenProbe>(probe_id));
+            }
+            None => {
+                // Still running — keep the frame animating.
+                testing = true;
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui::text_field(ui, &mut token, &i18n::t("dev.token_hint"), 320.0, true);
+        ui.add_enabled_ui(!testing, |ui| {
+            if ui::primary_button(ui, &i18n::t("dev.save_token"), egui::Vec2::ZERO).clicked() {
+                let t = token.trim().to_string();
+                if t.is_empty() {
+                    // Clearing needs no test — revert to the unauthenticated default.
+                    if let Ok(mut cfg) = limen_core::Config::load() {
+                        cfg.github_token = None;
+                        let _ = cfg.save();
+                    }
+                    limen_registry::set_github_token(None);
+                    status = (i18n::t("dev.token_cleared"), false);
+                    *applied = true;
+                } else {
+                    // Verify the token grants API access, off-thread, before saving.
+                    let slot: TokenProbe = std::sync::Arc::new(std::sync::Mutex::new(None));
+                    let sink = slot.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let res = limen_registry::test_github_token(&t).map(|()| t);
+                        *sink.lock().unwrap() = Some(res);
+                        ctx.request_repaint();
+                    });
+                    ui.data_mut(|d| d.insert_temp(probe_id, slot));
+                    status = (String::new(), false);
+                    ui.ctx().request_repaint();
+                }
+            }
+        });
+        if testing {
+            ui.add(egui::Spinner::new().size(16.0));
+            ui.label(
+                egui::RichText::new(i18n::t("dev.verifying"))
+                    .small()
+                    .color(ui::color::TEXT_MUTED),
+            );
+        }
+    });
+    if !status.0.is_empty() {
+        ui.add_space(2.0);
+        let color = if status.1 {
+            ui::color::ERROR
+        } else {
+            ui::color::SUCCESS
+        };
+        ui.label(egui::RichText::new(&status.0).small().color(color));
+    }
+    ui.data_mut(|d| {
+        d.insert_temp(tok_id, token);
+        d.insert_temp(status_id, status);
+    });
+
     if *dev_mode_on {
         ui.add_space(4.0);
         ui.label(
-            egui::RichText::new("Dev mode on — updates sourced from the paths above.")
+            egui::RichText::new(i18n::t("dev.dev_mode_on"))
                 .small()
                 .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
         );
@@ -1423,13 +1738,13 @@ fn developer_view(
     shown_dev_tab: &mut DevTab,
 ) {
     ui.horizontal(|ui| {
-        if ui::chip(ui, "Dev mode", *dev_tab == DevTab::DevMode).clicked() {
+        if ui::chip(ui, &i18n::t("dev.tab_dev_mode"), *dev_tab == DevTab::DevMode).clicked() {
             *dev_tab = DevTab::DevMode;
         }
-        if ui::chip(ui, "UI Kit", *dev_tab == DevTab::UiKit).clicked() {
+        if ui::chip(ui, &i18n::t("dev.tab_ui_kit"), *dev_tab == DevTab::UiKit).clicked() {
             *dev_tab = DevTab::UiKit;
         }
-        if ui::chip(ui, "Console", *dev_tab == DevTab::Console).clicked() {
+        if ui::chip(ui, &i18n::t("dev.tab_console"), *dev_tab == DevTab::Console).clicked() {
             *dev_tab = DevTab::Console;
         }
     });
@@ -1464,9 +1779,12 @@ fn dev_console(
     autoscroll: &mut bool,
 ) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("{} lines", logs.len())).color(ui::color::TEXT_MUTED));
+        ui.label(
+            egui::RichText::new(format!("{} {}", logs.len(), i18n::t("dev.lines")))
+                .color(ui::color::TEXT_MUTED),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui::toggle(ui, autoscroll, "Autoscroll");
+            ui::toggle(ui, autoscroll, &i18n::t("dev.autoscroll"));
         });
     });
     ui.separator();
@@ -1480,13 +1798,69 @@ fn dev_console(
                 .stick_to_bottom(*autoscroll)
                 .show(ui, |ui| {
                     if logs.is_empty() {
-                        ui.label(egui::RichText::new("No logs yet.").color(ui::color::TEXT_MUTED));
+                        ui.label(
+                            egui::RichText::new(i18n::t("dev.no_logs"))
+                                .color(ui::color::TEXT_MUTED),
+                        );
                     }
                     for line in logs {
                         ui.label(egui::RichText::new(line).monospace().size(12.0));
                     }
                 });
         });
+}
+
+/// Rasterize the common glyphs (Latin + Cyrillic + digits + punctuation) into
+/// egui's font atlas by laying them out once. egui rasterizes glyphs lazily on
+/// first layout/paint, so the first content-heavy page (the Modules manager,
+/// with many names/descriptions — worse with the variable display font) would
+/// otherwise rasterize a big batch in one frame and hitch the render thread.
+/// Doing it on the first frame, behind the splash, pays that cost up-front.
+fn prewarm_fonts(ctx: &egui::Context) {
+    // Every glyph the host UI uses — the full Latin + Ukrainian-Cyrillic
+    // alphabets, digits, punctuation, and the specific symbols/emoji (`• … ▸ ↗
+    // × — · “ ” ⚙ 📌 🛠`). Any glyph/size missing here would first appear on a
+    // tab, forcing egui to rebuild + re-upload the whole atlas that frame — the
+    // hitch that ate the entrance animation.
+    const GLYPHS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 \
+        .,:;!?'\"“”-—·•…()[]{}<>%/@#&№×↗▸ ⚙📌🛠 \
+        АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯабвгґдеєжзиіїйклмнопрстуфхцчшщьюя";
+    // Cover every size the UI renders text at, for both faces.
+    const SIZES: [f32; 11] = [
+        10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 24.0, 30.0,
+    ];
+    ctx.fonts(|f| {
+        for &size in &SIZES {
+            let _ = f.layout_no_wrap(
+                GLYPHS.to_owned(),
+                egui::FontId::proportional(size),
+                egui::Color32::WHITE,
+            );
+            let _ = f.layout_no_wrap(
+                GLYPHS.to_owned(),
+                egui::FontId::monospace(size),
+                egui::Color32::WHITE,
+            );
+        }
+    });
+}
+
+/// An installed module's card description, translated for the active UI language
+/// from its `locales/<lang>.toml`, else the manifest default. The file read is
+/// cached in egui memory per (module, language), so language switches update the
+/// cards with no engine reload and no per-frame disk I/O.
+fn localized_desc(ui: &egui::Ui, m: &ModuleSpec) -> Option<String> {
+    let lang = i18n::locale();
+    let id = egui::Id::new(("moddesc", m.name.as_str(), lang.code()));
+    let resolved = match ui.data(|d| d.get_temp::<Option<String>>(id)) {
+        Some(v) => v,
+        None => {
+            let r = limen_proto::manifest::localized_description(&m.cwd, lang.code());
+            ui.data_mut(|d| d.insert_temp(id, r.clone()));
+            r
+        }
+    };
+    resolved.or_else(|| m.description.clone())
 }
 
 /// The Modules page — a Zed-Extensions-style list: installed modules plus the
@@ -1519,9 +1893,9 @@ fn modules_page(
 ) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.heading("Modules");
+        ui.heading(i18n::t("modules.title"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui::outline_button(ui, "Reload", egui::Vec2::ZERO).clicked() {
+            if ui::outline_button(ui, &i18n::t("modules.reload"), egui::Vec2::ZERO).clicked() {
                 *reload = true;
             }
         });
@@ -1529,23 +1903,17 @@ fn modules_page(
     ui.add_space(10.0);
 
     // One universal search across installed (local) and org (remote) modules.
-    ui::text_field(
-        ui,
-        search,
-        "Search modules — local and in the org…",
-        f32::INFINITY,
-        false,
-    );
+    ui::text_field(ui, search, &i18n::t("modules.search_hint"), f32::INFINITY, false);
     ui.add_space(8.0);
 
     // Installed / Available filter.
     ui.horizontal(|ui| {
-        for (value, label) in [
-            (ModuleFilter::All, "All"),
-            (ModuleFilter::Installed, "Installed"),
-            (ModuleFilter::Available, "Available"),
+        for (value, key) in [
+            (ModuleFilter::All, "modules.filter.all"),
+            (ModuleFilter::Installed, "modules.filter.installed"),
+            (ModuleFilter::Available, "modules.filter.available"),
         ] {
-            if ui::chip(ui, label, *filter == value).clicked() {
+            if ui::chip(ui, &i18n::t(key), *filter == value).clicked() {
                 *filter = value;
             }
         }
@@ -1636,7 +2004,7 @@ fn modules_page(
         if let Some(err) = remote_error {
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new(format!("Couldn't list the org: {err}"))
+                egui::RichText::new(format!("{} {err}", i18n::t("modules.org_error")))
                     .small()
                     .color(ui::color::TEXT_MUTED),
             );
@@ -1644,7 +2012,10 @@ fn modules_page(
         if shown == 0 && !remote_loading {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("No modules match.").color(ui::color::TEXT_MUTED));
+                ui.label(
+                    egui::RichText::new(i18n::t("modules.none_match"))
+                        .color(ui::color::TEXT_MUTED),
+                );
             });
         }
     });
@@ -1801,7 +2172,7 @@ fn module_card(
                                 badge(ui, cap);
                             }
                         });
-                        if let Some(desc) = &m.description {
+                        if let Some(desc) = localized_desc(ui, m) {
                             ui.add_space(6.0);
                             ui.label(desc);
                         }
@@ -1810,19 +2181,21 @@ fn module_card(
                         if m.permissions.may_require_admin {
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new(
-                                    "Some methods may require elevated permissions.",
-                                )
-                                .small()
-                                .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
+                                egui::RichText::new(i18n::t("modules.may_require_admin"))
+                                    .small()
+                                    .color(egui::Color32::from_rgb(0xe6, 0x9a, 0x5c)),
                             );
                         }
                         if !m.authors.is_empty() {
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new(format!("by {}", m.authors.join(", ")))
-                                    .small()
-                                    .color(ui::color::TEXT_MUTED),
+                                egui::RichText::new(format!(
+                                    "{} {}",
+                                    i18n::t("modules.by"),
+                                    m.authors.join(", ")
+                                ))
+                                .small()
+                                .color(ui::color::TEXT_MUTED),
                             );
                         }
                         // Git revision this module was installed from — branch on
@@ -1830,10 +2203,10 @@ fn module_card(
                         if let Some((branch, commit)) = git_meta {
                             let mut lines: Vec<String> = Vec::new();
                             if !branch.is_empty() {
-                                lines.push(format!("branch - {branch}"));
+                                lines.push(format!("{} - {branch}", i18n::t("about.branch")));
                             }
                             if !commit.is_empty() {
-                                lines.push(format!("commit - {commit}"));
+                                lines.push(format!("{} - {commit}", i18n::t("about.commit")));
                             }
                             if !lines.is_empty() {
                                 ui.add_space(4.0);
@@ -1853,7 +2226,8 @@ fn module_card(
                             ui.add_space(6.0);
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "Requires: {}",
+                                    "{} {}",
+                                    i18n::t("modules.requires"),
                                     m.requires.keys().cloned().collect::<Vec<_>>().join(", ")
                                 ))
                                 .small()
@@ -1864,7 +2238,8 @@ fn module_card(
                             ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "Optional: {}",
+                                    "{} {}",
+                                    i18n::t("modules.optional"),
                                     m.optional.keys().cloned().collect::<Vec<_>>().join(", ")
                                 ))
                                 .small()
@@ -1879,9 +2254,53 @@ fn module_card(
                     egui::vec2(right_w, 0.0),
                     egui::Layout::top_down(egui::Align::Max),
                     |ui| {
-                        // add_sized centers-and-justifies, so the label is
-                        // centered within each fixed-width button.
-                        let bw = egui::vec2(96.0, ui.spacing().interact_size.y);
+                        // Size every action button to the widest label shown on
+                        // this card, so the column is one uniform width. `+ 40`
+                        // covers the button padding (the larger, primary, one) so
+                        // both outline and primary buttons land at the same width.
+                        let btn_font = egui::TextStyle::Button.resolve(ui.style());
+                        // Resolve each label once so the width measurement and the
+                        // buttons use exactly the same (localized) text.
+                        let open_lbl = i18n::t("modules.open");
+                        let pin_lbl = format!(
+                            "📌 {}",
+                            if pinned {
+                                i18n::t("modules.unpin")
+                            } else {
+                                i18n::t("modules.pin")
+                            }
+                        );
+                        let remove_lbl = i18n::t("modules.remove");
+                        let github_lbl = i18n::t("modules.github");
+                        let update_lbl = (from_git && latest.is_some()).then(|| match latest {
+                            Some(v) => format!("{} {v}", i18n::t("modules.update")),
+                            None => i18n::t("modules.update"),
+                        });
+
+                        let mut labels: Vec<&str> = vec![open_lbl.as_str()];
+                        if let Some(u) = &update_lbl {
+                            labels.push(u);
+                        }
+                        labels.push(&pin_lbl);
+                        labels.push(&remove_lbl);
+                        if from_git && m.repo.is_some() {
+                            labels.push(&github_lbl);
+                        }
+                        let max_text = labels
+                            .iter()
+                            .map(|l| {
+                                ui.fonts(|f| {
+                                    f.layout_no_wrap(
+                                        l.to_uppercase(),
+                                        btn_font.clone(),
+                                        egui::Color32::WHITE,
+                                    )
+                                    .size()
+                                    .x
+                                })
+                            })
+                            .fold(0.0_f32, f32::max);
+                        let bw = egui::vec2(max_text + 40.0, ui.spacing().interact_size.y);
                         if this_busy {
                             // Mid-update: spinner in place of the action buttons.
                             ui.allocate_ui_with_layout(
@@ -1890,7 +2309,7 @@ fn module_card(
                                 |ui| {
                                     ui.spinner();
                                     ui.label(
-                                        egui::RichText::new("Updating…")
+                                        egui::RichText::new(i18n::t("modules.updating"))
                                             .small()
                                             .color(ui::color::TEXT_MUTED),
                                     );
@@ -1900,7 +2319,9 @@ fn module_card(
                         }
                         // Open is disabled while this module's runtime downloads.
                         let open_clicked = ui
-                            .add_enabled_ui(!runtime_busy, |ui| ui::outline_button(ui, "Open", bw))
+                            .add_enabled_ui(!runtime_busy, |ui| {
+                                ui::outline_button(ui, &open_lbl, bw)
+                            })
                             .inner
                             .clicked();
                         if open_clicked {
@@ -1910,37 +2331,34 @@ fn module_card(
                             ui.horizontal(|ui| {
                                 ui.spinner();
                                 ui.label(
-                                    egui::RichText::new("Preparing runtime…")
+                                    egui::RichText::new(i18n::t("modules.preparing_runtime"))
                                         .small()
                                         .color(ui::color::TEXT_MUTED),
                                 );
                             });
                         }
-                        if from_git && latest.is_some() {
+                        if let Some(update_lbl) = &update_lbl {
                             // Update only shows when a newer release exists.
-                            let label = match latest {
-                                Some(v) => format!("Update {v}"),
-                                None => "Update".into(),
-                            };
                             let clicked = ui
-                                .add_enabled_ui(!any_busy, |ui| ui::primary_button(ui, &label, bw))
+                                .add_enabled_ui(!any_busy, |ui| {
+                                    ui::primary_button(ui, update_lbl, bw)
+                                })
                                 .inner
                                 .clicked();
                             if clicked {
                                 *update = Some(m.name.clone());
                             }
                         }
-                        let pin_label = if pinned { "📌 Unpin" } else { "📌 Pin" };
-                        if ui::outline_button(ui, pin_label, bw).clicked() {
+                        if ui::outline_button(ui, &pin_lbl, bw).clicked() {
                             *toggle_pin = Some(m.name.clone());
                         }
-                        if ui::outline_button(ui, "Remove", bw).clicked() {
+                        if ui::outline_button(ui, &remove_lbl, bw).clicked() {
                             *remove = Some(m.name.clone());
                         }
                         // GitHub only for git-installed modules.
                         if from_git
                             && let Some(repo) = &m.repo
-                            && ui::outline_button(ui, "GitHub ↗", bw).clicked()
+                            && ui::outline_button(ui, &github_lbl, bw).clicked()
                         {
                             ui.output_mut(|o| {
                                 o.open_url = Some(egui::OpenUrl::new_tab(repo_url(repo)));
@@ -2030,7 +2448,25 @@ fn available_card(
                     egui::vec2(right_w, 0.0),
                     egui::Layout::top_down(egui::Align::Max),
                     |ui| {
-                        let bw = egui::vec2(96.0, ui.spacing().interact_size.y);
+                        // Uniform button width = the widest label (Install / GitHub).
+                        let btn_font = egui::TextStyle::Button.resolve(ui.style());
+                        let install_lbl = i18n::t("modules.install");
+                        let github_lbl = i18n::t("modules.github");
+                        let max_text = [&install_lbl, &github_lbl]
+                            .iter()
+                            .map(|l| {
+                                ui.fonts(|f| {
+                                    f.layout_no_wrap(
+                                        l.to_uppercase(),
+                                        btn_font.clone(),
+                                        egui::Color32::WHITE,
+                                    )
+                                    .size()
+                                    .x
+                                })
+                            })
+                            .fold(0.0_f32, f32::max);
+                        let bw = egui::vec2(max_text + 40.0, ui.spacing().interact_size.y);
                         if this_installing {
                             // This module is downloading — spinner + label.
                             ui.allocate_ui_with_layout(
@@ -2039,7 +2475,7 @@ fn available_card(
                                 |ui| {
                                     ui.spinner();
                                     ui.label(
-                                        egui::RichText::new("Installing…")
+                                        egui::RichText::new(i18n::t("modules.installing"))
                                             .small()
                                             .color(ui::color::TEXT_MUTED),
                                     );
@@ -2049,7 +2485,7 @@ fn available_card(
                             // Disable while another install is in flight.
                             let clicked = ui
                                 .add_enabled_ui(!any_installing, |ui| {
-                                    ui::primary_button(ui, "Install", bw)
+                                    ui::primary_button(ui, &install_lbl, bw)
                                 })
                                 .inner
                                 .clicked();
@@ -2057,7 +2493,7 @@ fn available_card(
                                 *add = Some(r.repo.clone());
                             }
                         }
-                        if ui::outline_button(ui, "GitHub ↗", bw).clicked() {
+                        if ui::outline_button(ui, &github_lbl, bw).clicked() {
                             let url = r.url.clone();
                             ui.output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url)));
                         }
@@ -2091,9 +2527,6 @@ fn badge(ui: &mut egui::Ui, text: &str) {
         });
 }
 
-/// The Limen tagline.
-const TAGLINE: &str = "A modular tool for security and analysis.";
-
 /// The About page. Returns `true` if the "License" button was clicked.
 /// Fade a single About-screen element in, staggered by `k`, so the block
 /// assembles itself one line at a time when the tab is shown.
@@ -2116,6 +2549,267 @@ fn reveal_item(
     });
 }
 
+/// The Barracuda logo, embedded as its source SVG (a flat set of straight-edged
+/// facets — only `M`/`l`/`z` path commands, no curves), so it can be rendered
+/// with the egui painter like the Limen mark instead of pulling in an SVG/image
+/// dependency.
+const BARRACUDA_SVG: &str = include_str!("../../resources/barracuda-white.svg");
+
+/// Parsed Barracuda artwork: each facet as a polygon of points, plus the overall
+/// bounding box (for aspect-correct fitting into any target rect).
+struct Barracuda {
+    polys: Vec<Vec<[f32; 2]>>,
+    min: egui::Pos2,
+    max: egui::Pos2,
+}
+
+/// Parse one SVG path `d` string into a polyline of absolute points. Supports the
+/// commands the logo actually uses — `M`/`m`, `L`/`l`, `H`/`h`, `V`/`v`, `C`/`c`
+/// (cubic béziers, flattened to short segments), and `Z`/`z` — in both absolute
+/// (uppercase) and relative (lowercase) forms, including implicit operand repeats.
+fn parse_facet(d: &str) -> Vec<[f32; 2]> {
+    let b = d.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    let mut cur = [0.0f32, 0.0f32];
+    let mut pts: Vec<[f32; 2]> = Vec::new();
+    let mut cmd = 0u8;
+
+    let read_number = |b: &[u8], i: &mut usize| -> Option<f32> {
+        while *i < b.len() && matches!(b[*i], b',' | b' ' | b'\n' | b'\t' | b'\r') {
+            *i += 1;
+        }
+        let start = *i;
+        if *i < b.len() && (b[*i] == b'-' || b[*i] == b'+') {
+            *i += 1;
+        }
+        while *i < b.len() && (b[*i].is_ascii_digit() || b[*i] == b'.') {
+            *i += 1;
+        }
+        if *i == start {
+            return None;
+        }
+        std::str::from_utf8(&b[start..*i]).ok()?.parse().ok()
+    };
+
+    while i < n {
+        let c = b[i];
+        if c.is_ascii_alphabetic() {
+            cmd = c;
+            i += 1;
+            continue;
+        }
+        if matches!(c, b',' | b' ' | b'\n' | b'\t' | b'\r') {
+            i += 1;
+            continue;
+        }
+        let rel = cmd.is_ascii_lowercase();
+        match cmd.to_ascii_uppercase() {
+            b'H' => {
+                let Some(x) = read_number(b, &mut i) else {
+                    break;
+                };
+                cur[0] = if rel { cur[0] + x } else { x };
+                pts.push(cur);
+            }
+            b'V' => {
+                let Some(y) = read_number(b, &mut i) else {
+                    break;
+                };
+                cur[1] = if rel { cur[1] + y } else { y };
+                pts.push(cur);
+            }
+            b'C' => {
+                let mut num = [0.0f32; 6];
+                let mut ok = true;
+                for slot in &mut num {
+                    match read_number(b, &mut i) {
+                        Some(v) => *slot = v,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    break;
+                }
+                let abs = |dx: f32, dy: f32| {
+                    if rel {
+                        [cur[0] + dx, cur[1] + dy]
+                    } else {
+                        [dx, dy]
+                    }
+                };
+                let p0 = cur;
+                let c1 = abs(num[0], num[1]);
+                let c2 = abs(num[2], num[3]);
+                let end = abs(num[4], num[5]);
+                // Flatten the cubic into a few straight segments.
+                const STEPS: usize = 8;
+                for k in 1..=STEPS {
+                    let t = k as f32 / STEPS as f32;
+                    let u = 1.0 - t;
+                    let bx = u * u * u * p0[0]
+                        + 3.0 * u * u * t * c1[0]
+                        + 3.0 * u * t * t * c2[0]
+                        + t * t * t * end[0];
+                    let by = u * u * u * p0[1]
+                        + 3.0 * u * u * t * c1[1]
+                        + 3.0 * u * t * t * c2[1]
+                        + t * t * t * end[1];
+                    pts.push([bx, by]);
+                }
+                cur = end;
+            }
+            // M / L (and their implicit repeats): a single coordinate pair. After
+            // an `M`, implicit following pairs are linetos, so keep `cmd` as-is —
+            // both M and L consume one pair here, which is the desired behaviour.
+            _ => {
+                let Some(x) = read_number(b, &mut i) else {
+                    break;
+                };
+                let Some(y) = read_number(b, &mut i) else {
+                    break;
+                };
+                cur = if rel {
+                    [cur[0] + x, cur[1] + y]
+                } else {
+                    [x, y]
+                };
+                pts.push(cur);
+            }
+        }
+    }
+    pts
+}
+
+/// Parse (once) the embedded Barracuda SVG into paintable facets.
+fn barracuda_art() -> &'static Barracuda {
+    static ART: std::sync::OnceLock<Barracuda> = std::sync::OnceLock::new();
+    ART.get_or_init(|| {
+        let mut polys: Vec<Vec<[f32; 2]>> = Vec::new();
+        // Each real facet lives in a `<path d="…">`; splitting on `<path` and
+        // taking the first `d="` per chunk skips the metadata <g id="…"> nodes.
+        for seg in BARRACUDA_SVG.split("<path").skip(1) {
+            let Some(s) = seg.find("d=\"") else { continue };
+            let rest = &seg[s + 3..];
+            let Some(e) = rest.find('"') else { continue };
+            let pts = parse_facet(&rest[..e]);
+            if pts.len() >= 3 {
+                polys.push(pts);
+            }
+        }
+        let mut min = egui::pos2(f32::MAX, f32::MAX);
+        let mut max = egui::pos2(f32::MIN, f32::MIN);
+        for p in polys.iter().flatten() {
+            min.x = min.x.min(p[0]);
+            min.y = min.y.min(p[1]);
+            max.x = max.x.max(p[0]);
+            max.y = max.y.max(p[1]);
+        }
+        Barracuda { polys, min, max }
+    })
+}
+
+/// Draw the Barracuda logo filled with `color`, fitted (aspect-correct, centered)
+/// into `rect`.
+fn draw_barracuda(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let art = barracuda_art();
+    let src = art.max - art.min;
+    if src.x <= 0.0 || src.y <= 0.0 {
+        return;
+    }
+    let scale = (rect.width() / src.x).min(rect.height() / src.y);
+    let drawn = src * scale;
+    let origin = rect.center() - drawn * 0.5;
+    let map = |p: &[f32; 2]| {
+        egui::pos2(
+            origin.x + (p[0] - art.min.x) * scale,
+            origin.y + (p[1] - art.min.y) * scale,
+        )
+    };
+    for poly in &art.polys {
+        let pts: Vec<egui::Pos2> = poly.iter().map(map).collect();
+        painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+    }
+}
+
+/// Splash phase durations (seconds): a fully-transparent blank lead (so the
+/// window's clumsy opaque startup frames read as transparent and are trimmable),
+/// then fade transparent→opaque, hold fully opaque, then the exit animation.
+/// Their sum is the total splash length.
+const SPLASH_LEAD: f32 = 0.4;
+const SPLASH_FADE_IN: f32 = 0.2;
+const SPLASH_HOLD: f32 = 0.75;
+const SPLASH_ANIM: f32 = 0.25;
+const SPLASH_SECS: f32 = SPLASH_LEAD + SPLASH_FADE_IN + SPLASH_HOLD + SPLASH_ANIM;
+
+/// Paint the startup splash: the Limen mark + Barracuda logo centre-screen. When
+/// `animated`, it's fully transparent for `SPLASH_LEAD`, then fades in over
+/// `SPLASH_FADE_IN`, holds for `SPLASH_HOLD`, then runs the `SPLASH_ANIM` exit
+/// (scanline sweep + fade out). When not, the marks simply appear (opaque, no
+/// motion) after the transparent lead. `t` is elapsed seconds since it began.
+fn splash_screen(ctx: &egui::Context, t: f32, animated: bool) {
+    egui::CentralPanel::default()
+        // Transparent frame — the framebuffer is cleared transparent during the
+        // splash (see `clear_color`), so only the icons show over the desktop.
+        .frame(egui::Frame::none())
+        .show(ctx, |ui| {
+            let rect = ui.max_rect();
+            // Envelope: blank transparent lead, then either fade+scale in / hold /
+            // fade out (animated) or a plain opaque appearance (static). `vis`
+            // fades each element's own alpha (the window is transparent — there's
+            // no background to veil against).
+            let (vis, scale) = if animated {
+                let vin = ui::ease_out(((t - SPLASH_LEAD) / SPLASH_FADE_IN).clamp(0.0, 1.0));
+                let exit = ((t - (SPLASH_LEAD + SPLASH_FADE_IN + SPLASH_HOLD)) / SPLASH_ANIM)
+                    .clamp(0.0, 1.0);
+                let vout = 1.0 - ui::smoothstep(exit);
+                (vin * vout, 0.92 + 0.08 * vin)
+            } else {
+                (if t >= SPLASH_LEAD { 1.0 } else { 0.0 }, 1.0)
+            };
+
+            let mark = 168.0 * scale;
+            let gap = 44.0;
+            let cx = rect.center().x;
+            let cy = rect.center().y - 8.0;
+            let half = mark / 2.0 + gap / 2.0 + 0.5;
+            let painter = ui.painter();
+
+            // Left: Limen mark · amber divider · right: Barracuda logo.
+            let r1 =
+                egui::Rect::from_center_size(egui::pos2(cx - half, cy), egui::vec2(mark, mark));
+            let r2 =
+                egui::Rect::from_center_size(egui::pos2(cx + half, cy), egui::vec2(mark, mark));
+            draw_brand(painter, r1, vis, false);
+            draw_barracuda(painter, r2, ui::with_alpha(ui::color::ACCENT_BRIGHT, vis));
+            let dh = 92.0 * scale;
+            painter.vline(
+                cx,
+                (cy - dh / 2.0)..=(cy + dh / 2.0),
+                egui::Stroke::new(1.0_f32, ui::with_alpha(ui::color::ACCENT, 0.4 * vis)),
+            );
+
+            // A single amber scanline sweeps down across the marks (animated only),
+            // over the hold into the start of the exit.
+            if animated {
+                let scan = ((t - SPLASH_LEAD - SPLASH_FADE_IN) / SPLASH_HOLD).clamp(0.0, 1.0);
+                if scan > 0.0 && scan < 1.0 {
+                    let y = egui::lerp((cy - mark * 0.7)..=(cy + mark * 0.7), scan);
+                    let a = (1.0 - (scan * 2.0 - 1.0).abs()) * 0.5 * vis;
+                    painter.hline(
+                        (cx - mark * 1.4)..=(cx + mark * 1.4),
+                        y,
+                        egui::Stroke::new(1.5_f32, ui::with_alpha(ui::color::ACCENT_BRIGHT, a)),
+                    );
+                }
+            }
+
+        });
+}
+
 fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
     let muted = ui::color::TEXT_MUTED;
     let mut license_clicked = false;
@@ -2134,9 +2828,31 @@ fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
                 ui.set_max_width(480.0);
 
                 reveal_item(ui, 0, reveal_at, now, animate, |ui| {
+                    // The Limen mark paired with the Barracuda logo — one product.
+                    // Allocate the whole row as one block so `vertical_centered`
+                    // centers it.
+                    let mark = 84.0_f32;
+                    let gap = 12.0_f32;
+                    let row_w = mark + gap + 1.0 + gap + mark;
                     let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(92.0, 92.0), egui::Sense::hover());
-                    draw_brand(ui.painter(), rect);
+                        ui.allocate_exact_size(egui::vec2(row_w, mark), egui::Sense::hover());
+
+                    let r1 = egui::Rect::from_min_size(rect.left_top(), egui::vec2(mark, mark));
+                    draw_brand(ui.painter(), r1, 1.0, false);
+
+                    let sep_x = rect.left() + mark + gap + 0.5;
+                    let half = 26.0_f32;
+                    ui.painter().vline(
+                        sep_x,
+                        (rect.center().y - half)..=(rect.center().y + half),
+                        egui::Stroke::new(1.0_f32, ui::with_alpha(ui::color::ACCENT, 0.35)),
+                    );
+
+                    let r2 = egui::Rect::from_min_size(
+                        egui::pos2(rect.right() - mark, rect.top()),
+                        egui::vec2(mark, mark),
+                    );
+                    draw_barracuda(ui.painter(), r2, ui::color::ACCENT_BRIGHT);
                 });
 
                 ui.add_space(14.0);
@@ -2146,39 +2862,69 @@ fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
                 reveal_item(ui, 2, reveal_at, now, animate, |ui| {
                     ui.label(
                         egui::RichText::new(format!(
-                            "v{} · {} branch",
+                            "v{} · {} {}",
                             env!("CARGO_PKG_VERSION"),
                             env!("LIMEN_GIT_BRANCH"),
+                            i18n::t("about.branch"),
                         ))
                         .monospace()
                         .color(muted),
                     );
                     ui.label(
-                        egui::RichText::new(format!("commit {}", env!("LIMEN_GIT_COMMIT")))
-                            .monospace()
-                            .small()
-                            .color(muted),
+                        egui::RichText::new(format!(
+                            "{} {}",
+                            i18n::t("about.commit"),
+                            env!("LIMEN_GIT_COMMIT")
+                        ))
+                        .monospace()
+                        .small()
+                        .color(muted),
                     );
                 });
 
                 ui.add_space(18.0);
                 reveal_item(ui, 3, reveal_at, now, animate, |ui| {
-                    ui.label(egui::RichText::new(TAGLINE).size(15.0));
+                    ui.label(egui::RichText::new(i18n::t("about.tagline")).size(15.0));
                 });
 
                 ui.add_space(18.0);
                 reveal_item(ui, 4, reveal_at, now, animate, |ui| {
                     ui.separator();
                     ui.add_space(14.0);
-                    if ui::outline_button(ui, "View license", egui::Vec2::ZERO).clicked() {
+                    // Both buttons share the wider label's width so they match,
+                    // stacked (License on top, GitHub below).
+                    let btn_font = egui::TextStyle::Button.resolve(ui.style());
+                    let lic = i18n::t("about.view_license");
+                    let gh = i18n::t("about.github");
+                    let max_text = [&lic, &gh]
+                        .iter()
+                        .map(|l| {
+                            ui.fonts(|f| {
+                                f.layout_no_wrap(
+                                    l.to_uppercase(),
+                                    btn_font.clone(),
+                                    egui::Color32::WHITE,
+                                )
+                                .size()
+                                .x
+                            })
+                        })
+                        .fold(0.0_f32, f32::max);
+                    let bw = egui::vec2(max_text + 32.0, ui.spacing().interact_size.y);
+                    if ui::outline_button(ui, &lic, bw).clicked() {
                         license_clicked = true;
+                    }
+                    ui.add_space(8.0);
+                    if ui::outline_button(ui, &gh, bw).clicked() {
+                        let url = format!("https://github.com/{}", limen_core::update::APP_REPO);
+                        ui.output_mut(|o| o.open_url = Some(egui::OpenUrl::new_tab(url)));
                     }
                 });
 
                 ui.add_space(16.0);
                 reveal_item(ui, 5, reveal_at, now, animate, |ui| {
                     ui.label(
-                        egui::RichText::new("Powered by CRC BARRACUDA")
+                        egui::RichText::new(i18n::t("about.created_by"))
                             .small()
                             .color(muted),
                     );
@@ -2198,14 +2944,8 @@ fn license_view(ui: &mut egui::Ui, reveal_at: f64) {
     ui.vertical_centered(|ui| {
         ui.set_max_width(720.0);
         reveal_item(ui, 0, reveal_at, now, animate, |ui| {
-            ui.heading("License");
-            ui.label(
-                egui::RichText::new(
-                    "Limen is free software: you can redistribute it and/or modify it under \
-                     the terms of the GNU General Public License, version 3 or later.",
-                )
-                .color(ui::color::TEXT_MUTED),
-            );
+            ui.heading(i18n::t("license.title"));
+            ui.label(egui::RichText::new(i18n::t("license.intro")).color(ui::color::TEXT_MUTED));
             ui.add_space(6.0);
             ui.separator();
             ui.add_space(6.0);
@@ -2225,34 +2965,41 @@ fn license_view(ui: &mut egui::Ui, reveal_at: f64) {
     });
 }
 
-/// Draw the Limen brand mark — the same device as `resources/icon.png`: a
-/// cyan→blue diamond ring with a solid core, on a dark rounded tile.
+/// Draw the Limen brand mark — the diamond ring with a solid core — retinted to
+/// the Barracuda amber-HUD palette: a warm near-black tile under an amber→orange
+/// diagonal-gradient diamond, so it reads as one product with the Barracuda logo.
 ///
-/// Colors and proportions are sampled from that file (on its 256px grid) so the
-/// in-app mark matches the icon Explorer, the taskbar, and the window frame show.
-fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
+/// (The OS icon files — `resources/icon.png`/`.ico` — still carry the original
+/// cyan mark; regenerating those needs image tooling and is a separate step.)
+fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32, show_tile: bool) {
     use egui::{Color32, Mesh, Pos2, Shape};
 
-    // Tile: a vertical gradient, lighter at the top.
-    let tile_top = Color32::from_rgb(0x29, 0x2f, 0x3e);
-    let tile_bottom = Color32::from_rgb(0x14, 0x17, 0x1d);
+    // Scale every colour's alpha by `alpha` (1.0 = opaque) so the mark can fade
+    // as a whole — used by the transparent startup splash.
+    let fa = |c: Color32| {
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * alpha).round() as u8)
+    };
     // Diamond: one diagonal gradient across the whole device — light at the
     // top-left, dark at the bottom-right — so the top *and left* vertices are
-    // light while the right and bottom ones are dark.
-    let light = Color32::from_rgb(0x6a, 0xd0, 0xeb);
-    let dark = Color32::from_rgb(0x49, 0xb0, 0xe1);
+    // bright amber while the right and bottom ones deepen to orange.
+    let light = Color32::from_rgb(0xf4, 0xc0, 0x78); // bright amber
+    let dark = Color32::from_rgb(0xf9, 0x73, 0x16); // orange
 
     let s = rect.width().min(rect.height()) / 256.0;
 
-    // The tile is inset within the icon's box and has rounded corners, so it
-    // needs a colored mesh rather than `rect_filled` to carry the gradient.
-    let tile = egui::Rect::from_center_size(rect.center(), egui::vec2(224.0 * s, 224.0 * s));
-    painter.add(Shape::mesh(rounded_rect_mesh(
-        tile,
-        44.0 * s,
-        tile_top,
-        tile_bottom,
-    )));
+    // The dark rounded tile (the app-icon background). Skipped for the splash,
+    // where the mark floats transparently beside the Barracuda logo.
+    if show_tile {
+        let tile_top = fa(Color32::from_rgb(0x24, 0x1a, 0x10));
+        let tile_bottom = fa(Color32::from_rgb(0x0d, 0x0a, 0x06));
+        let tile = egui::Rect::from_center_size(rect.center(), egui::vec2(224.0 * s, 224.0 * s));
+        painter.add(Shape::mesh(rounded_rect_mesh(
+            tile,
+            44.0 * s,
+            tile_top,
+            tile_bottom,
+        )));
+    }
 
     let c = rect.center();
     let diamond = |half: f32| {
@@ -2269,7 +3016,7 @@ fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
 
     // Position along the top-left → bottom-right diagonal, normalized to 0..1.
     let span = 2.0 * 88.0 * s;
-    let shade = |p: Pos2| lerp_color(light, dark, ((p.x - c.x) + (p.y - c.y)) / span + 0.5);
+    let shade = |p: Pos2| fa(lerp_color(light, dark, ((p.x - c.x) + (p.y - c.y)) / span + 0.5));
 
     let mut mesh = Mesh::default();
     let mut quad = |pts: [Pos2; 4]| {
@@ -2297,7 +3044,7 @@ fn draw_brand(painter: &egui::Painter, rect: egui::Rect) {
     // faint sheen along the edge rather than a distinct line.
     painter.add(Shape::closed_line(
         outer.to_vec(),
-        egui::Stroke::new(1.4 * s, Color32::from_rgb(0xb4, 0xf6, 0xfc)),
+        egui::Stroke::new(1.4 * s, fa(Color32::from_rgb(0xff, 0xe0, 0xb0))),
     ));
 }
 
@@ -2379,16 +3126,16 @@ fn detail_view(
     action: &mut Option<ui::Invoke>,
 ) {
     let Some(tab) = detail_tabs.get_mut(&id) else {
-        ui.label("This detail view is no longer available.");
+        ui.label(i18n::t("detail.unavailable"));
         return;
     };
     let heading = if tab.title.is_empty() {
-        "Details"
+        i18n::t("tab.details")
     } else {
-        tab.title.as_str()
+        tab.title.clone()
     };
     if let Some(err) = &tab.error {
-        ui.heading(heading);
+        ui.heading(&heading);
         ui.separator();
         ui.colored_label(egui::Color32::LIGHT_RED, err);
         return;
@@ -2398,7 +3145,7 @@ fn detail_view(
             let heading = if v.title.is_empty() {
                 heading
             } else {
-                v.title.as_str()
+                v.title.clone()
             };
             ui.heading(heading);
             ui.separator();
@@ -2413,7 +3160,7 @@ fn detail_view(
         None => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Loading…");
+                ui.label(i18n::t("detail.loading"));
             });
         }
     }
@@ -2447,7 +3194,7 @@ fn module_view(
                     // Show the Result pane only when a method returned output.
                     if !output.is_empty() {
                         ui.add_space(12.0);
-                        ui.label(egui::RichText::new("Result").strong());
+                        ui.label(egui::RichText::new(i18n::t("module.result")).strong());
                         let mut text = output;
                         ui.add(
                             egui::TextEdit::multiline(&mut text)
@@ -2467,9 +3214,30 @@ fn module_view(
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("loading…");
+                    ui.label(i18n::t("detail.loading"));
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod barracuda_tests {
+    use super::*;
+
+    #[test]
+    fn barracuda_svg_parses_into_facets() {
+        let art = barracuda_art();
+        // All 53 <path> facets parse into drawable polygons (curves flattened).
+        assert_eq!(art.polys.len(), 53, "expected 53 drawable facets");
+        assert!(art.polys.iter().all(|p| p.len() >= 3));
+        // Bounding box must sit inside the SVG viewBox (418,31 .. 1118,731).
+        assert!(art.min.x >= 418.0 && art.min.y >= 31.0, "min {:?}", art.min);
+        assert!(
+            art.max.x <= 1118.0 && art.max.y <= 731.0,
+            "max {:?}",
+            art.max
+        );
+        assert!(art.max.x - art.min.x > 100.0 && art.max.y - art.min.y > 100.0);
     }
 }
