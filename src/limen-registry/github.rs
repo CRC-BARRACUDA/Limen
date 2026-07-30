@@ -11,11 +11,175 @@
 //! repos only; subject to GitHub's anonymous rate limit — note that the manifest
 //! check costs one extra request per candidate repo).
 
-use std::process::Command;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+use std::sync::RwLock;
 
 use anyhow::{bail, Context, Result};
 use limen_proto::NoConsole;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// An optional GitHub token applied to every registry request when set — raising
+/// the rate limit from 60/hour (unauthenticated, per IP) to 5,000/hour and making
+/// conditional (304) requests free. Set from settings at startup and whenever an
+/// administrator changes it in Developer mode; `None` = unauthenticated (default).
+static TOKEN: RwLock<Option<String>> = RwLock::new(None);
+
+/// Set (or clear) the GitHub token used for registry requests. A blank token
+/// clears it — back to the unauthenticated default.
+pub fn set_token(token: Option<String>) {
+    let cleaned = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    *TOKEN.write().unwrap() = cleaned;
+}
+
+/// Verify a token by making one authenticated request (`GET /rate_limit`, which
+/// needs no scope). `Ok(())` if GitHub accepts it (HTTP 200); `Err(reason)` if it
+/// doesn't (401/403/…) or the request couldn't be made — so a bad token is never
+/// saved.
+pub fn test_token(token: &str) -> Result<(), String> {
+    let t = token.trim();
+    if t.is_empty() {
+        return Err("empty token".into());
+    }
+    let out = Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "-H",
+            "User-Agent: limen",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            &format!("Authorization: Bearer {t}"),
+            "-w",
+            "\n@@LIMEN_META@@ %{http_code}",
+            "https://api.github.com/rate_limit",
+        ])
+        .no_console()
+        .output()
+        .map_err(|e| format!("running curl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, meta) = text.rsplit_once("\n@@LIMEN_META@@ ").ok_or("no response from GitHub")?;
+    match meta.trim() {
+        "200" => Ok(()),
+        "401" => Err("invalid token — GitHub returned 401 (bad credentials)".into()),
+        code => {
+            // Surface GitHub's own message when present (e.g. 403 blocked/SSO).
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+                && let Some(m) = v.get("message").and_then(|m| m.as_str())
+            {
+                return Err(format!("GitHub: {m} ({code})"));
+            }
+            Err(format!("token rejected (HTTP {code})"))
+        }
+    }
+}
+
+/// A registry `curl` GET: the given flags, the standard `User-Agent`, an optional
+/// `Accept`, an `Authorization: Bearer` header when a token is set, then the URL.
+fn curl_get(flags: &[&str], accept: Option<&str>, url: &str) -> std::io::Result<Output> {
+    let mut cmd = Command::new("curl");
+    cmd.args(flags).args(["-H", "User-Agent: limen"]);
+    if let Some(a) = accept {
+        cmd.arg("-H").arg(format!("Accept: {a}"));
+    }
+    if let Some(t) = TOKEN.read().unwrap().as_deref() {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
+    }
+    cmd.arg(url).no_console().output()
+}
+
+// --------------------------------------------------------------------------- //
+// Conditional requests (ETag / If-None-Match)
+// --------------------------------------------------------------------------- //
+/// Where the ETag+body cache lives (set once from settings). Without it, requests
+/// still work — just not conditionally.
+static CACHE_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Set the directory for the registry's conditional-request cache. Enables ETag /
+/// `If-None-Match`: unchanged data returns `304` (free against the rate limit when
+/// authenticated) and the cached body is reused.
+pub fn set_cache_dir(dir: PathBuf) {
+    *CACHE_DIR.write().unwrap() = Some(dir);
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CacheEntry {
+    etag: String,
+    body: String,
+}
+
+fn cache_path() -> Option<PathBuf> {
+    CACHE_DIR.read().unwrap().clone().map(|d| d.join("registry-cache.json"))
+}
+
+fn load_cache() -> HashMap<String, CacheEntry> {
+    cache_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_cache(cache: &HashMap<String, CacheEntry>) {
+    if let Some(p) = cache_path() {
+        if let Ok(s) = serde_json::to_string(cache) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+}
+
+/// A conditional GET: sends `If-None-Match` from the cache; on `304` returns the
+/// cached body (which doesn't count against the rate limit when authenticated),
+/// on `2xx` caches the new ETag + body. Returns the effective body — or, on an
+/// error status, the error body for the caller to inspect. `None` only if curl
+/// couldn't run at all.
+fn conditional_get(flags: &[&str], accept: Option<&str>, url: &str) -> Option<String> {
+    let mut cache = load_cache();
+    let prev = cache.get(url).cloned();
+
+    let mut cmd = Command::new("curl");
+    cmd.args(flags).args(["-H", "User-Agent: limen"]);
+    if let Some(a) = accept {
+        cmd.arg("-H").arg(format!("Accept: {a}"));
+    }
+    if let Some(t) = TOKEN.read().unwrap().as_deref() {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
+    }
+    if let Some(p) = &prev {
+        if !p.etag.is_empty() {
+            cmd.arg("-H").arg(format!("If-None-Match: {}", p.etag));
+        }
+    }
+    // Append `\n@@LIMEN_META@@ <status> <etag>` after the body (curl 7.84+ for
+    // %header{}; older curl yields no etag → we simply don't cache).
+    cmd.arg("-w").arg("\n@@LIMEN_META@@ %{http_code} %header{etag}");
+    let out = cmd.arg(url).no_console().output().ok()?;
+
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (body, meta) = text.rsplit_once("\n@@LIMEN_META@@ ")?;
+    let mut it = meta.trim().splitn(2, ' ');
+    let code = it.next().unwrap_or("");
+    let raw_etag = it.next().unwrap_or("").trim();
+    // Only accept a real ETag (`"…"` or weak `W/"…"`), never the literal `-w`
+    // template a pre-7.84 curl would echo back.
+    let etag = if raw_etag.starts_with('"') || raw_etag.starts_with("W/") {
+        raw_etag.to_string()
+    } else {
+        String::new()
+    };
+
+    if code == "304" {
+        return prev.map(|p| p.body);
+    }
+    let body = body.to_string();
+    if code.starts_with('2') && !etag.is_empty() {
+        cache.insert(url.to_string(), CacheEntry { etag, body: body.clone() });
+        save_cache(&cache);
+    }
+    Some(body)
+}
 
 /// A module available to install from the org. Its metadata is read from the
 /// repo's `limen.toml` on GitHub, so the manager can show it **before** install.
@@ -79,31 +243,16 @@ pub struct RepoCandidate {
 /// request. The caller resolves each candidate via [`fetch_remote_module`].
 pub fn list_org_module_repos(org: &str) -> Result<Vec<RepoCandidate>> {
     let url = format!("https://api.github.com/orgs/{org}/repos?per_page=100&type=public");
-    let output = Command::new("curl")
-        .args([
-            "-sSL",
-            "-H",
-            "User-Agent: limen",
-            "-H",
-            "Accept: application/vnd.github+json",
-            &url,
-        ])
-        .no_console()
-        .output()
+    // Conditional: a 304 (unchanged) reuses the cached body and, when
+    // authenticated, doesn't count against the rate limit.
+    let body = conditional_get(&["-sSL"], Some("application/vnd.github+json"), &url)
         .context("running curl (is it installed and on PATH?)")?;
 
-    if !output.status.success() {
-        bail!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let repos: Vec<GhRepo> = match serde_json::from_slice(&output.stdout) {
+    let repos: Vec<GhRepo> = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(_) => {
             // GitHub returns `{ "message": "..." }` on errors (rate limit, 404…).
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body)
                 && let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
                     bail!("GitHub: {msg}");
                 }
@@ -167,22 +316,8 @@ pub fn list_org_modules(org: &str) -> Result<Vec<RemoteModule>> {
 /// fresh install would fetch. `None` on any error.
 fn fetch_latest_commit(org: &str, repo: &str, branch: &str) -> Option<String> {
     let url = format!("https://api.github.com/repos/{org}/{repo}/commits/{branch}");
-    let out = Command::new("curl")
-        .args([
-            "-fsSL",
-            "-H",
-            "User-Agent: limen",
-            "-H",
-            "Accept: application/vnd.github+json",
-            &url,
-        ])
-        .no_console()
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let body = conditional_get(&["-sSL"], Some("application/vnd.github+json"), &url)?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
     let sha = json.get("sha")?.as_str()?;
     Some(sha.chars().take(7).collect())
 }
@@ -192,11 +327,9 @@ fn fetch_latest_commit(org: &str, repo: &str, branch: &str) -> Option<String> {
 /// which also serves to exclude non-module repos.
 fn fetch_manifest(org: &str, repo: &str, branch: &str) -> Option<limen_proto::Manifest> {
     let url = format!("https://raw.githubusercontent.com/{org}/{repo}/{branch}/limen.toml");
-    let out = Command::new("curl")
-        .args(["-fsSL", "-H", "User-Agent: limen", &url])
-        .no_console()
-        .output()
-        .ok()?;
+    // raw.githubusercontent is a CDN (not the rate-limited API); auth is harmless
+    // and lets private-repo manifests resolve too.
+    let out = curl_get(&["-fsSL"], None, &url).ok()?;
     if !out.status.success() {
         return None;
     }
