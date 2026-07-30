@@ -439,8 +439,13 @@ impl LimenApp {
                             match result {
                                 Ok(v) => match serde_json::from_value::<ui::View>(v) {
                                     Ok(view) => {
+                                        let auto = view.auto.clone();
                                         self.view = Some(view);
                                         self.view_error = None;
+                                        // Chain the next step, if the view asked for one.
+                                        if let Some(a) = auto {
+                                            self.dispatch(a.into_invoke());
+                                        }
                                     }
                                     Err(e) => {
                                         self.view_error = Some(format!("invalid UI spec: {e}"));
@@ -466,9 +471,14 @@ impl LimenApp {
                             Ok(v) if v.get("widgets").is_some() => {
                                 match serde_json::from_value::<ui::View>(v) {
                                     Ok(view) => {
+                                        let auto = view.auto.clone();
                                         self.view = Some(view);
                                         self.view_error = None;
                                         self.output.clear();
+                                        // Chain the next step, if the view asked for one.
+                                        if let Some(a) = auto {
+                                            self.dispatch(a.into_invoke());
+                                        }
                                     }
                                     Err(e) => self.output = format!("invalid view: {e}"),
                                 }
