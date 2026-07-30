@@ -801,7 +801,7 @@ impl eframe::App for LimenApp {
                     // App icon (the ◈ brand mark) in place of the wordmark.
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
-                    draw_brand(ui.painter(), rect, 1.0, true);
+                    draw_brand(ui.painter(), rect, 1.0, false);
                     ui.add_space(12.0);
                     let active = self.active_tab();
                     if ui::chip(ui, &i18n::t("nav.about"), active == Some(Tab::About)).clicked() {
@@ -2838,7 +2838,7 @@ fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
                         ui.allocate_exact_size(egui::vec2(row_w, mark), egui::Sense::hover());
 
                     let r1 = egui::Rect::from_min_size(rect.left_top(), egui::vec2(mark, mark));
-                    draw_brand(ui.painter(), r1, 1.0, true);
+                    draw_brand(ui.painter(), r1, 1.0, false);
 
                     let sep_x = rect.left() + mark + gap + 0.5;
                     let half = 26.0_f32;
