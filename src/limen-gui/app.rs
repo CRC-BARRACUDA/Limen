@@ -191,6 +191,13 @@ impl LimenApp {
             .map(|c| c.animations)
             .unwrap_or(true);
         ui::set_animations(animations);
+        // Apply the admin's GitHub token (if set) to the module registry before the
+        // first request; absent = unauthenticated (the default). Point the registry
+        // at ~/.limen for its conditional-request (ETag) cache.
+        limen_registry::set_registry_cache_dir(limen_core::paths::home());
+        limen_registry::set_github_token(
+            limen_core::Config::load().ok().and_then(|c| c.github_token),
+        );
         Self {
             worker: Worker::spawn(dirs),
             status: "starting modules…".to_string(),
@@ -1395,6 +1402,120 @@ fn dev_mode_view(
             *applied = true;
         }
     });
+
+    // GitHub token (persistent) — authenticates module-registry requests, lifting
+    // the 60/hr anonymous limit to 5,000/hr and making conditional (304) checks
+    // free. Self-contained: the edit buffer lives in egui memory; Save persists it
+    // to settings.json and applies it live.
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("GitHub token").strong());
+    ui.label(
+        egui::RichText::new(
+            "Optional. Authenticates module-registry requests (5,000/hr instead of \
+             60/hr) and enables free conditional checks. Stored in settings.json; \
+             leave blank for the unauthenticated default.",
+        )
+        .small()
+        .color(egui::Color32::from_rgb(0x7a, 0x82, 0x8e)),
+    );
+    ui.add_space(4.0);
+    // The validation call hits the network, so it runs on a background thread; the
+    // shared slot below carries its result back (`Ok(token)` = verified, save it;
+    // `Err(msg)` = rejected). While the slot is present but empty, a spinner shows.
+    type TokenProbe = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>;
+    let tok_id = egui::Id::new("dev_github_token_buf");
+    let status_id = egui::Id::new("dev_github_token_status");
+    let probe_id = egui::Id::new("dev_github_token_probe");
+    let mut token = ui.data_mut(|d| {
+        d.get_temp::<String>(tok_id).unwrap_or_else(|| {
+            limen_core::Config::load().ok().and_then(|c| c.github_token).unwrap_or_default()
+        })
+    });
+    // (message, is_error) — result of the last Save, kept in egui memory.
+    let mut status = ui.data_mut(|d| d.get_temp::<(String, bool)>(status_id).unwrap_or_default());
+
+    // Collect the result of an in-flight validation, if any has finished.
+    let probe = ui.data_mut(|d| d.get_temp::<TokenProbe>(probe_id));
+    let mut testing = false;
+    if let Some(p) = probe {
+        match p.lock().unwrap().take() {
+            Some(Ok(t)) => {
+                if let Ok(mut cfg) = limen_core::Config::load() {
+                    cfg.github_token = Some(t.clone());
+                    let _ = cfg.save();
+                }
+                limen_registry::set_github_token(Some(t));
+                status = ("Saved — token verified against GitHub.".into(), false);
+                *applied = true;
+                ui.data_mut(|d| d.remove::<TokenProbe>(probe_id));
+            }
+            Some(Err(e)) => {
+                status = (format!("Not saved — {e}"), true);
+                ui.data_mut(|d| d.remove::<TokenProbe>(probe_id));
+            }
+            None => {
+                // Still running — keep the frame animating.
+                testing = true;
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui::text_field(ui, &mut token, "ghp_… (blank = unauthenticated)", 320.0, true);
+        ui.add_enabled_ui(!testing, |ui| {
+            if ui::primary_button(ui, "Save token", egui::Vec2::ZERO).clicked() {
+                let t = token.trim().to_string();
+                if t.is_empty() {
+                    // Clearing needs no test — revert to the unauthenticated default.
+                    if let Ok(mut cfg) = limen_core::Config::load() {
+                        cfg.github_token = None;
+                        let _ = cfg.save();
+                    }
+                    limen_registry::set_github_token(None);
+                    status = ("Cleared — using the unauthenticated default.".into(), false);
+                    *applied = true;
+                } else {
+                    // Verify the token grants API access, off-thread, before saving.
+                    let slot: TokenProbe = std::sync::Arc::new(std::sync::Mutex::new(None));
+                    let sink = slot.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let res = limen_registry::test_github_token(&t).map(|()| t);
+                        *sink.lock().unwrap() = Some(res);
+                        ctx.request_repaint();
+                    });
+                    ui.data_mut(|d| d.insert_temp(probe_id, slot));
+                    status = (String::new(), false);
+                    ui.ctx().request_repaint();
+                }
+            }
+        });
+        if testing {
+            ui.add(egui::Spinner::new().size(16.0));
+            ui.label(
+                egui::RichText::new("Verifying…")
+                    .small()
+                    .color(egui::Color32::from_rgb(0x7a, 0x82, 0x8e)),
+            );
+        }
+    });
+    if !status.0.is_empty() {
+        ui.add_space(2.0);
+        let color = if status.1 {
+            egui::Color32::from_rgb(0xe0, 0x5d, 0x5d)
+        } else {
+            egui::Color32::from_rgb(0x5a, 0xc8, 0x8a)
+        };
+        ui.label(egui::RichText::new(&status.0).small().color(color));
+    }
+    ui.data_mut(|d| {
+        d.insert_temp(tok_id, token);
+        d.insert_temp(status_id, status);
+    });
+
     if *dev_mode_on {
         ui.add_space(4.0);
         ui.label(
