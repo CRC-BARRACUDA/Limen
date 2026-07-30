@@ -226,6 +226,22 @@ impl Manifest {
     }
 }
 
+/// A module's card description translated for `lang`, read from
+/// `<dir>/locales/<lang>.toml` (`[module] description = "…"`). `None` for `"en"`
+/// (the manifest's own language) or when no such file/key exists — the caller
+/// then keeps the manifest's default description.
+pub fn localized_description(dir: &Path, lang: &str) -> Option<String> {
+    if lang == "en" {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join("locales").join(format!("{lang}.toml"))).ok()?;
+    let val: toml::Value = toml::from_str(&text).ok()?;
+    val.get("module")?
+        .get("description")?
+        .as_str()
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

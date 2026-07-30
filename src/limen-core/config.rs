@@ -38,6 +38,11 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub animations: bool,
 
+    /// UI language code (e.g. `"en"`, `"uk"`). Absent = detect from the OS locale,
+    /// falling back to English.
+    #[serde(default)]
+    pub language: Option<String>,
+
     /// A GitHub token (personal access token) for the module registry, set by an
     /// administrator in Developer mode. When present, registry requests are
     /// authenticated — raising the rate limit from 60/hour (unauthenticated, per
@@ -55,6 +60,7 @@ impl Default for Config {
             pinned_modules: Vec::new(),
             ui_scale_percent: 0,
             animations: true,
+            language: None,
             github_token: None,
         }
     }

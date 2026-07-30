@@ -29,8 +29,10 @@
 use core::ffi::c_void;
 use std::sync::Mutex;
 
+pub mod catalog;
 pub mod ui;
 
+pub use catalog::Catalog;
 pub use limen_proto::abi::{HostCallFn, SinkFn, ABI_VERSION};
 pub use limen_proto::{rpc, RpcError};
 pub use serde_json::{json, Value};
@@ -103,6 +105,17 @@ impl Host {
         self.raw("host.pick_file", Value::Null)
             .ok()
             .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+    }
+
+    /// The user's active UI language code (e.g. `"en"`, `"uk"`). Query this while
+    /// building a view and translate your own strings (see [`Catalog`]) so the
+    /// module's screens match the rest of the app. Defaults to `"en"`.
+    pub fn locale(&self) -> String {
+        self.raw("host.locale", Value::Null)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "en".to_string())
     }
 
     fn raw(&self, method: &str, params: Value) -> Result<Value, RpcError> {
