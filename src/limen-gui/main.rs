@@ -23,6 +23,9 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([980.0, 640.0])
         .with_min_inner_size([720.0, 460.0])
+        // Client-side decorations: Limen draws its own title bar + window
+        // controls (see `app`/`ui`), for a themed frame instead of the OS one.
+        .with_decorations(false)
         .with_title("Limen");
     // The window/taskbar/Alt-Tab icon while the app is running (the embedded
     // .exe icon only covers the file itself). Decoding is best-effort.
