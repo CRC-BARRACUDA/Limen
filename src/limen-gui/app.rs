@@ -12,6 +12,7 @@
 //! All engine work is on the [`Worker`] thread, so the UI never blocks.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use eframe::egui;
@@ -68,6 +69,9 @@ struct DetailTab {
 
 /// The full license text, embedded so it's always in sync with the repo.
 const LICENSE_TEXT: &str = include_str!("../../LICENSE");
+
+/// A path a file dialog returned: `(widget id, chosen path)`.
+type FilePick = (String, String);
 
 /// The Modules-page installed/available filter.
 #[derive(Clone, Copy, PartialEq)]
@@ -165,6 +169,10 @@ pub struct LimenApp {
     /// Switching to a *different* module rearms it, so each module plays its
     /// staggered entrance rather than snapping into place.
     module_reveal: Option<(String, f64)>,
+    /// Results from native file dialogs. The dialog call blocks until the user
+    /// answers, so it runs on a thread of its own and reports back here — the UI
+    /// thread only ever drains this channel.
+    file_pick: (mpsc::Sender<FilePick>, mpsc::Receiver<FilePick>),
     /// Developer sub-tab the reveal was started for; a change replays it.
     shown_dev_tab: DevTab,
     /// When the Modules tab was last shown — drives the staggered list reveal.
@@ -276,6 +284,7 @@ impl LimenApp {
             developer_revealed_at: None,
             license_revealed_at: None,
             module_reveal: None,
+            file_pick: mpsc::channel(),
             shown_dev_tab: DevTab::DevMode,
             modules_revealed_at: None,
             shown_filter: ModuleFilter::All,
@@ -352,6 +361,51 @@ impl LimenApp {
             cfg.language = Some(self.language.code().to_string());
             let _ = cfg.save();
         }
+    }
+
+    /// Apply any path the user chose in a file dialog to its widget's input.
+    fn drain_file_picks(&mut self) {
+        while let Ok((id, path)) = self.file_pick.1.try_recv() {
+            self.inputs.insert(id, path);
+        }
+    }
+
+    /// Run a pending Browse request from a [`ui::Widget::File`].
+    ///
+    /// `rfd`'s dialog blocks until the user answers it, which would freeze the
+    /// render loop — so it goes on its own thread and the result comes back
+    /// through `file_pick`. A cancelled dialog simply sends nothing.
+    fn serve_browse_request(&mut self, ctx: &egui::Context) {
+        let req: Option<(String, bool)> = ctx.data_mut(|d| {
+            let id = ui::browse_request_id();
+            let v = d.get_temp::<(String, bool)>(id);
+            if v.is_some() {
+                d.remove::<(String, bool)>(id);
+            }
+            v
+        });
+        let Some((id, directory)) = req else { return };
+        let tx = self.file_pick.0.clone();
+        let start = self.inputs.get(&id).cloned().unwrap_or_default();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let mut dlg = rfd::FileDialog::new();
+            // Reopen where the last pick left off, when that path still exists.
+            let at = std::path::Path::new(&start);
+            if let Some(dir) = at.parent().filter(|p| p.is_dir()) {
+                dlg = dlg.set_directory(dir);
+            }
+            let picked = if directory {
+                dlg.pick_folder()
+            } else {
+                dlg.pick_file()
+            };
+            if let Some(p) = picked {
+                let _ = tx.send((id, p.display().to_string()));
+                // The dialog stole focus; wake the app so the new path paints.
+                ctx.request_repaint();
+            }
+        });
     }
 
     /// Recompute which sensitive modules the user has granted (trusted at their
@@ -662,6 +716,7 @@ impl eframe::App for LimenApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now_t = ctx.input(|i| i.time);
         self.drain_events(now_t);
+        self.drain_file_picks();
 
         // Apply the global UI scale (set_zoom_factor no-ops if unchanged).
         ctx.set_zoom_factor(self.ui_scale / 100.0);
@@ -1375,6 +1430,8 @@ impl eframe::App for LimenApp {
                 self.dispatch(a);
             }
         }
+        // A Browse button was pressed somewhere in the view just drawn.
+        self.serve_browse_request(ctx);
 
         // Consent dialog for a pending elevated action.
         if let Some(pending) = self.pending_action.clone() {

@@ -54,6 +54,17 @@ impl Widget {
 
     // ---- input options ---------------------------------------------------- //
     /// A field label (for `text` / `select`).
+    /// For a [`file`] widget: pick a directory rather than a file.
+    pub fn directory(self) -> Self {
+        self.set("directory", json!(true))
+    }
+
+    /// For a [`file`] widget: the Browse button's label, so the module can
+    /// localize it alongside the rest of its view.
+    pub fn browse(self, text: impl Into<String>) -> Self {
+        self.set("browse", json!(text.into()))
+    }
+
     pub fn label(self, text: impl Into<String>) -> Self {
         self.set("label", json!(text.into()))
     }
@@ -185,6 +196,15 @@ pub fn label(text: impl Into<String>) -> Widget {
 /// A text input; its `id` keys the value passed back in params.
 pub fn text(id: impl Into<String>) -> Widget {
     Widget::of_kind("text").set("id", json!(id.into()))
+}
+
+/// A filesystem path input; its `id` keys the chosen path in params.
+///
+/// The user can type a path, drag a file onto the field, or press Browse for the
+/// OS picker. Chain [`Widget::directory`] to pick a folder instead, and
+/// [`Widget::browse`] to localize the button.
+pub fn file(id: impl Into<String>) -> Widget {
+    Widget::of_kind("file").set("id", json!(id.into()))
 }
 
 /// A dropdown; its `id` keys the value passed back in params.

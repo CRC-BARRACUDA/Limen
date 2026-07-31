@@ -980,6 +980,25 @@ pub enum Widget {
         #[serde(default)]
         default: String,
     },
+    /// A filesystem path input. The user can type a path, drop a file or folder
+    /// onto it, or press Browse for the OS picker. Its `id` keys the chosen path
+    /// in params, exactly like [`Widget::Text`].
+    File {
+        id: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        placeholder: String,
+        #[serde(default)]
+        default: String,
+        /// Pick a directory rather than a file.
+        #[serde(default)]
+        directory: bool,
+        /// Label for the Browse button. Supplied by the module so it can be
+        /// localized alongside the rest of its view; `ui` stays i18n-free.
+        #[serde(default)]
+        browse: String,
+    },
     /// An animated on/off checkbox; its boolean state is returned in params.
     Checkbox {
         id: String,
@@ -1232,6 +1251,24 @@ fn render_widget(
             let value = inputs.entry(id.clone()).or_insert(initial);
             dropdown(ui, id.clone(), value, options);
         }
+        Widget::File {
+            id,
+            label,
+            placeholder,
+            default,
+            directory,
+            browse,
+        } => {
+            if !label.is_empty() {
+                ui.label(styled(label, LabelStyle::Weak));
+            }
+            let value = inputs.entry(id.clone()).or_insert_with(|| default.clone());
+            let mut path = value.clone();
+            let browse_label = if browse.is_empty() { "Browse…" } else { browse };
+            if file_field(ui, id, &mut path, placeholder, browse_label, *directory) {
+                *value = path;
+            }
+        }
         Widget::Checkbox { id, label, default } => {
             let entry = inputs
                 .entry(id.clone())
@@ -1392,6 +1429,70 @@ fn fmt_num(v: f64) -> String {
     } else {
         format!("{v:.2}")
     }
+}
+
+/// Where a [`Widget::File`] parks a pending Browse request: `(widget id, wants
+/// a directory)`. The app picks it up after rendering and runs the OS dialog on
+/// its own thread — the dialog blocks, and the UI thread only draws.
+pub fn browse_request_id() -> egui::Id {
+    egui::Id::new("limen_browse_request")
+}
+
+/// A path field: type it, drop a file or folder on it, or Browse for it.
+///
+/// Returns `true` when `path` changed. Drops are matched against this field's
+/// rect, so a view with several path inputs routes each drop to the one under
+/// the cursor.
+fn file_field(
+    ui: &mut egui::Ui,
+    id: &str,
+    path: &mut String,
+    placeholder: &str,
+    browse_label: &str,
+    directory: bool,
+) -> bool {
+    let ctx = ui.ctx().clone();
+    // Something is being dragged over the window right now.
+    let dragging = ctx.input(|i| !i.raw.hovered_files.is_empty());
+    let mut changed = false;
+
+    ui.horizontal(|ui| {
+        let btn_w = 108.0;
+        let field_w = (ui.available_width() - btn_w - ui.spacing().item_spacing.x).max(80.0);
+        let before = path.clone();
+        let resp = text_field(ui, path, placeholder, field_w, false);
+        changed |= *path != before;
+
+        let rect = resp.rect;
+        let over = ui.rect_contains_pointer(rect);
+        // Highlight the field the drop would land on.
+        if dragging && over {
+            ui.painter().rect_stroke(
+                rect,
+                egui::Rounding::same(2.0),
+                egui::Stroke::new(1.5_f32, color::ACCENT),
+            );
+        }
+        // Take the first dropped entry that carries a real path. A directory
+        // drops the same way a file does, so both kinds land here.
+        if over {
+            let dropped = ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .find_map(|f| f.path.clone())
+            });
+            if let Some(p) = dropped {
+                *path = p.display().to_string();
+                changed = true;
+            }
+        }
+
+        if outline_button(ui, browse_label, egui::vec2(btn_w, 0.0)).clicked() {
+            ctx.data_mut(|d| d.insert_temp(browse_request_id(), (id.to_string(), directory)));
+        }
+    });
+    changed
 }
 
 /// Where [`render_view`] parks the current entrance's start time, for widgets
@@ -1846,7 +1947,7 @@ fn collect_ids(
 ) {
     for w in widgets {
         match w {
-            Widget::Text { id, .. } | Widget::Select { id, .. } => {
+            Widget::Text { id, .. } | Widget::Select { id, .. } | Widget::File { id, .. } => {
                 if let Some(v) = inputs.get(id) {
                     map.insert(id.clone(), Value::String(v.clone()));
                 }
