@@ -26,10 +26,6 @@ pub struct Config {
     #[serde(default)]
     pub default_org: Option<String>,
 
-    /// Module names pinned to the sidebar, in display order.
-    #[serde(default)]
-    pub pinned_modules: Vec<String>,
-
     /// Global UI scale, as a percentage (100 = default). 0/absent means default.
     #[serde(default)]
     pub ui_scale_percent: u32,
@@ -57,7 +53,6 @@ impl Default for Config {
         Self {
             module_dirs: Vec::new(),
             default_org: None,
-            pinned_modules: Vec::new(),
             ui_scale_percent: 0,
             animations: true,
             language: None,

@@ -115,8 +115,6 @@ pub struct LimenApp {
     /// Open tabs (in order) and the active index.
     tabs: Vec<Tab>,
     active: usize,
-    /// Per-module visit counts, for the "frequent" quick-open chips.
-    visits: HashMap<String, u32>,
 
     view: Option<ui::View>,
     view_error: Option<String>,
@@ -148,9 +146,6 @@ pub struct LimenApp {
     dev_limen_path: String,
     dev_modules_path: String,
 
-    /// Module names pinned to the tab bar, in order (persisted in settings).
-    pinned: Vec<String>,
-
     /// Global UI scale as a percentage (persisted in settings).
     ui_scale: f32,
 
@@ -166,6 +161,10 @@ pub struct LimenApp {
     settings_revealed_at: Option<f64>,
     developer_revealed_at: Option<f64>,
     license_revealed_at: Option<f64>,
+    /// Which module the current view entrance was armed for, and when it began.
+    /// Switching to a *different* module rearms it, so each module plays its
+    /// staggered entrance rather than snapping into place.
+    module_reveal: Option<(String, f64)>,
     /// Developer sub-tab the reveal was started for; a change replays it.
     shown_dev_tab: DevTab,
     /// When the Modules tab was last shown — drives the staggered list reveal.
@@ -245,7 +244,6 @@ impl LimenApp {
             next_detail_id: 0,
             tabs: vec![Tab::About, Tab::Modules],
             active: 0,
-            visits: HashMap::new(),
             view: None,
             view_error: None,
             inputs: HashMap::new(),
@@ -265,9 +263,6 @@ impl LimenApp {
             dev_mode_on: false,
             dev_limen_path: String::new(),
             dev_modules_path: String::new(),
-            pinned: limen_core::Config::load()
-                .map(|c| c.pinned_modules)
-                .unwrap_or_default(),
             ui_scale: {
                 let pct = limen_core::Config::load()
                     .map(|c| c.ui_scale_percent)
@@ -280,6 +275,7 @@ impl LimenApp {
             settings_revealed_at: None,
             developer_revealed_at: None,
             license_revealed_at: None,
+            module_reveal: None,
             shown_dev_tab: DevTab::DevMode,
             modules_revealed_at: None,
             shown_filter: ModuleFilter::All,
@@ -332,25 +328,6 @@ impl LimenApp {
         }
     }
 
-    /// The `n` most-visited installed modules that aren't already open as tabs.
-    fn frequent_modules(&self, n: usize) -> Vec<String> {
-        let mut v: Vec<(&String, u32)> = self
-            .visits
-            .iter()
-            .filter(|(name, c)| {
-                **c > 0
-                    && self.modules.iter().any(|m| &m.name == *name)
-                    && !self.tabs.iter().any(|t| *t == Tab::Module((*name).clone()))
-            })
-            .map(|(name, c)| (name, *c))
-            .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        v.into_iter()
-            .take(n)
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
     /// Persist the current UI scale to settings.json (without clobbering others).
     fn save_ui_scale(&self) {
         if let Ok(mut cfg) = limen_core::Config::load() {
@@ -373,20 +350,6 @@ impl LimenApp {
         limen_proto::locale::set(self.language.code());
         if let Ok(mut cfg) = limen_core::Config::load() {
             cfg.language = Some(self.language.code().to_string());
-            let _ = cfg.save();
-        }
-    }
-
-    /// Pin or unpin a module, then persist the pin list to settings.json.
-    fn toggle_pin(&mut self, name: &str) {
-        if let Some(i) = self.pinned.iter().position(|n| n == name) {
-            self.pinned.remove(i);
-        } else {
-            self.pinned.push(name.to_string());
-        }
-        // Persist without clobbering other settings.
-        if let Ok(mut cfg) = limen_core::Config::load() {
-            cfg.pinned_modules = self.pinned.clone();
             let _ = cfg.save();
         }
     }
@@ -582,7 +545,6 @@ impl LimenApp {
 
     fn select_module(&mut self, name: String) {
         self.open_tab(Tab::Module(name.clone()));
-        *self.visits.entry(name.clone()).or_insert(0) += 1;
         self.view = None;
         self.view_error = None;
         self.inputs.clear();
@@ -894,9 +856,8 @@ impl eframe::App for LimenApp {
                 });
             });
 
-        // Tab strip: open tabs with close buttons; plus "frequent" quick-open
-        // chips on the right.
-        let frequent = self.frequent_modules(4);
+        // Tab strip: open tabs, each with a close button. A tab *is* the
+        // module's session — closing it ends the session.
         egui::TopBottomPanel::top("tabstrip")
             .frame(
                 egui::Frame::none()
@@ -1089,19 +1050,6 @@ impl eframe::App for LimenApp {
                                     switch_to = Some(i);
                                 }
                             }
-                            // Frequently-visited modules trail the tabs (scroll with them).
-                            if !frequent.is_empty() {
-                                ui.add_space(8.0);
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                for name in frequent.iter() {
-                                    if ui::chip(ui, &format!("↗ {name}"), false)
-                                        .on_hover_text(i18n::t("tabstrip.frequent_hint"))
-                                        .clicked()
-                                    {
-                                        open_tab = Some(Tab::Module(name.clone()));
-                                    }
-                                }
-                            }
                         })
                     });
                     self.tab_scroll = out.state.offset.x;
@@ -1124,7 +1072,6 @@ impl eframe::App for LimenApp {
         let mut remove_module: Option<String> = None;
         let mut add_module: Option<String> = None;
         let mut update_module: Option<String> = None;
-        let mut toggle_pin: Option<String> = None;
         let mut do_update = false;
         let active_tab = self.active_tab();
         let update_info = self.update.clone();
@@ -1157,6 +1104,18 @@ impl eframe::App for LimenApp {
         } else {
             self.license_revealed_at = None;
         }
+        let module_reveal = match &active_tab {
+            Some(Tab::Module(n)) => {
+                if self.module_reveal.as_ref().map(|(m, _)| m.as_str()) != Some(n.as_str()) {
+                    self.module_reveal = Some((n.clone(), now_t));
+                }
+                self.module_reveal.as_ref().map_or(now_t, |&(_, t)| t)
+            }
+            _ => {
+                self.module_reveal = None;
+                now_t
+            }
+        };
         let about_reveal = self.about_revealed_at.unwrap_or(now_t);
         let settings_reveal = self.settings_revealed_at.unwrap_or(now_t);
         let license_reveal = self.license_revealed_at.unwrap_or(now_t);
@@ -1166,7 +1125,6 @@ impl eframe::App for LimenApp {
                 git_installed,
                 git_meta,
                 available_updates,
-                pinned,
                 view,
                 view_error,
                 inputs,
@@ -1234,7 +1192,6 @@ impl eframe::App for LimenApp {
                             git_installed,
                             git_meta,
                             available_updates,
-                            pinned,
                             remote,
                             *remote_loading,
                             remote_error,
@@ -1246,7 +1203,6 @@ impl eframe::App for LimenApp {
                             &mut remove_module,
                             &mut add_module,
                             &mut update_module,
-                            &mut toggle_pin,
                             &mut reload,
                             modules_revealed_at,
                             shown_filter,
@@ -1256,6 +1212,7 @@ impl eframe::App for LimenApp {
                         Some(Tab::Module(name)) => module_view(
                             ui,
                             &name,
+                            module_reveal,
                             view,
                             view_error,
                             inputs,
@@ -1402,9 +1359,6 @@ impl eframe::App for LimenApp {
             self.installing = Some(name.clone());
             self.status = format!("updating {name}…");
             self.worker.send(Command::UpdateModule(name));
-        }
-        if let Some(name) = toggle_pin {
-            self.toggle_pin(&name);
         }
         if reload {
             // Re-scan the module directories from disk: pick up newly-added
@@ -1949,11 +1903,11 @@ fn dev_console(
 fn prewarm_fonts(ctx: &egui::Context) {
     // Every glyph the host UI uses — the full Latin + Ukrainian-Cyrillic
     // alphabets, digits, punctuation, and the specific symbols/emoji (`• … ▸ ↗
-    // × — · “ ” ⚙ 📌 🛠`). Any glyph/size missing here would first appear on a
+    // × — · “ ” ⚙ 🛠`). Any glyph/size missing here would first appear on a
     // tab, forcing egui to rebuild + re-upload the whole atlas that frame — the
     // hitch that ate the entrance animation.
     const GLYPHS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 \
-        .,:;!?'\"“”-—·•…()[]{}<>%/@#&№×↗▸ ⚙📌🛠 \
+        .,:;!?'\"“”-—·•…()[]{}<>%/@#&№×↗▸ ⚙🛠 \
         АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯабвгґдеєжзиіїйклмнопрстуфхцчшщьюя";
     // Cover every size the UI renders text at, for both families.
     const SIZES: [f32; 11] = [
@@ -2021,7 +1975,6 @@ fn modules_page(
     git_installed: &HashSet<String>,
     git_meta: &HashMap<String, (String, String)>,
     available_updates: &HashMap<String, String>,
-    pinned: &[String],
     remote: &[RemoteModule],
     remote_loading: bool,
     remote_error: &Option<String>,
@@ -2033,7 +1986,6 @@ fn modules_page(
     remove: &mut Option<String>,
     add: &mut Option<String>,
     update: &mut Option<String>,
-    toggle_pin: &mut Option<String>,
     reload: &mut bool,
     modules_revealed_at: &mut Option<f64>,
     shown_filter: &mut ModuleFilter,
@@ -2091,28 +2043,25 @@ fn modules_page(
     ui.add_space(6.0);
     ui.separator();
 
-    let query = search.to_lowercase();
+    let terms = parse_query(search);
     let installed_names: HashSet<&str> = modules.iter().map(|m| m.name.as_str()).collect();
-    // A tag clicked on any card; applied to the search box once the list is done
-    // being drawn, since `search` is what the loop above is filtering on.
+    // A tag or dependency clicked on any card; applied to the search box once the
+    // list is done being drawn, since `search` is what the loop above filters on.
     let mut tag_click: Option<String> = None;
+    // Which installed module provides each capability, so a dependency can be
+    // shown as the module behind it rather than the raw capability string.
+    let providers: HashMap<&str, &ModuleSpec> = modules
+        .iter()
+        .flat_map(|m| m.capabilities.iter().map(move |c| (c.as_str(), m)))
+        .collect();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(4.0);
         let mut shown = 0;
         let animate = ui::animations_enabled();
 
-        // Installed modules — pinned first (in pin order), then the rest in their
-        // existing order (stable sort keeps non-pinned relative order).
-        let mut ordered: Vec<&ModuleSpec> = modules.iter().collect();
-        ordered.sort_by_key(|m| {
-            pinned
-                .iter()
-                .position(|n| n == &m.name)
-                .unwrap_or(usize::MAX)
-        });
-        for m in ordered {
-            if *filter == ModuleFilter::Available || !module_matches(m, &query) {
+        for m in modules.iter() {
+            if *filter == ModuleFilter::Available || !module_matches(m, &terms) {
                 continue;
             }
             let rt = match removing.get(m.name.as_str()) {
@@ -2120,7 +2069,6 @@ fn modules_page(
                 Some(&s) => (((now - s) / 0.34).clamp(0.0, 1.0)) as f32,
                 None => 0.0,
             };
-            let is_pinned = pinned.iter().any(|n| n == &m.name);
             let id = egui::Id::new(("modcard", m.name.as_str()));
             reveal_card(ui, id, shown, reveal_at, now, animate, rt, |ui| {
                 module_card(
@@ -2129,32 +2077,38 @@ fn modules_page(
                     git_installed.contains(&m.name),
                     git_meta.get(&m.name),
                     available_updates.get(&m.name).map(String::as_str),
-                    is_pinned,
                     installing,
                     installing_runtime,
                     open,
                     remove,
                     update,
-                    toggle_pin,
                     &mut tag_click,
+                    &providers,
                 );
             });
             shown += 1;
         }
 
-        // Available in the org (not already installed). They stream in from
-        // GitHub in parallel, so each card animates from its own arrival time
-        // (falling back to the tab-reveal for ones already present).
+        // Available in the org (not already installed). These stream in from
+        // GitHub in parallel, so a card has two possible entrances and takes
+        // whichever is newer: it either lands *after* the page revealed, and
+        // pops in alone the moment it arrives, or it was already listed and
+        // joins the page's cascade at its position. Keying only off arrival —
+        // as this did — meant a card fetched minutes ago had a long-past start
+        // time and snapped in without animating whenever the tab was reopened.
         for r in remote {
             if *filter == ModuleFilter::Installed
                 || installed_names.contains(r.name.as_str())
-                || !remote_matches(r, &query)
+                || !remote_matches(r, &terms)
             {
                 continue;
             }
             let id = egui::Id::new(("availcard", r.name.as_str()));
-            let arrival = remote_arrivals.get(&r.name).copied().unwrap_or(reveal_at);
-            reveal_card(ui, id, 0, arrival, now, animate, 0.0, |ui| {
+            let (start, k) = match remote_arrivals.get(&r.name) {
+                Some(&a) if a > reveal_at => (a, 0),
+                _ => (reveal_at, shown),
+            };
+            reveal_card(ui, id, k, start, now, animate, 0.0, |ui| {
                 available_card(ui, r, installing, add, &mut tag_click);
             });
             shown += 1;
@@ -2185,29 +2139,76 @@ fn modules_page(
     }
 }
 
-fn module_matches(m: &ModuleSpec, query: &str) -> bool {
-    query.is_empty()
-        || m.name.to_lowercase().contains(query)
-        || m.description
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase()
-            .contains(query)
-        || m.capabilities
-            .iter()
-            .any(|c| c.to_lowercase().contains(query))
-        || m.tags.iter().any(|t| t.to_lowercase().contains(query))
+/// Which part of a module a search term looks at.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Field {
+    /// The default: identifier and display name only, so a bare word stays
+    /// precise instead of matching half the list through its description.
+    Name,
+    Tag,
+    Description,
+    Capability,
 }
 
-fn remote_matches(r: &RemoteModule, query: &str) -> bool {
-    query.is_empty()
-        || r.name.to_lowercase().contains(query)
-        || r.description
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase()
-            .contains(query)
-        || r.tags.iter().any(|t| t.to_lowercase().contains(query))
+/// One term of a search query: `programs` (name), or `tag:ua` / `description:banned`
+/// / `cap:programs.local` for a specific field.
+#[derive(Clone, PartialEq, Debug)]
+struct Term {
+    field: Field,
+    text: String,
+}
+
+/// Split a query into terms, resolving `field:value` prefixes.
+///
+/// Terms are ANDed, so `tag:ua programs` means "tagged ua *and* named programs".
+/// An unrecognised prefix is not a field — `foo:bar` is searched literally as a
+/// name, so a colon in a name never silently matches nothing.
+fn parse_query(query: &str) -> Vec<Term> {
+    query
+        .split_whitespace()
+        .filter_map(|tok| {
+            let (field, text) = match tok.split_once(':') {
+                Some((k, v)) => match k.to_lowercase().as_str() {
+                    "name" => (Field::Name, v),
+                    "tag" | "tags" => (Field::Tag, v),
+                    "desc" | "description" => (Field::Description, v),
+                    "cap" | "capability" | "capabilities" => (Field::Capability, v),
+                    _ => (Field::Name, tok),
+                },
+                None => (Field::Name, tok),
+            };
+            let text = text.trim().to_lowercase();
+            (!text.is_empty()).then_some(Term { field, text })
+        })
+        .collect()
+}
+
+/// Does any of `haystack` contain `needle`?
+fn any_contains<'a>(haystack: impl IntoIterator<Item = &'a str>, needle: &str) -> bool {
+    haystack
+        .into_iter()
+        .any(|h| h.to_lowercase().contains(needle))
+}
+
+fn module_matches(m: &ModuleSpec, terms: &[Term]) -> bool {
+    terms.iter().all(|t| match t.field {
+        Field::Name => any_contains(
+            [m.name.as_str(), m.display_name.as_deref().unwrap_or("")],
+            &t.text,
+        ),
+        Field::Tag => any_contains(m.tags.iter().map(String::as_str), &t.text),
+        Field::Description => any_contains([m.description.as_deref().unwrap_or("")], &t.text),
+        Field::Capability => any_contains(m.capabilities.iter().map(String::as_str), &t.text),
+    })
+}
+
+fn remote_matches(r: &RemoteModule, terms: &[Term]) -> bool {
+    terms.iter().all(|t| match t.field {
+        Field::Name => any_contains([r.name.as_str(), r.title.as_deref().unwrap_or("")], &t.text),
+        Field::Tag => any_contains(r.tags.iter().map(String::as_str), &t.text),
+        Field::Description => any_contains([r.description.as_deref().unwrap_or("")], &t.text),
+        Field::Capability => any_contains(r.capabilities.iter().map(String::as_str), &t.text),
+    })
 }
 
 /// A single installed-module card, in its own rounded box. `from_git` shows the
@@ -2289,14 +2290,13 @@ fn module_card(
     from_git: bool,
     git_meta: Option<&(String, String)>,
     latest: Option<&str>,
-    pinned: bool,
     installing: &Option<String>,
     installing_runtime: &Option<String>,
     open: &mut Option<String>,
     remove: &mut Option<String>,
     update: &mut Option<String>,
-    toggle_pin: &mut Option<String>,
     tag_click: &mut Option<String>,
+    providers: &HashMap<&str, &ModuleSpec>,
 ) {
     // This card is mid-update; another install/update is running somewhere.
     let this_busy = installing.as_deref() == Some(m.name.as_str());
@@ -2352,7 +2352,7 @@ fn module_card(
                             ui.horizontal_wrapped(|ui| {
                                 for t in &m.tags {
                                     if tag_chip(ui, t).clicked() {
-                                        *tag_click = Some(t.clone());
+                                        *tag_click = Some(format!("tag:{t}"));
                                     }
                                 }
                             });
@@ -2405,26 +2405,24 @@ fn module_card(
                         // integrations (extra features when a provider is loaded).
                         if !m.requires.is_empty() {
                             ui.add_space(6.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} {}",
-                                    i18n::t("modules.requires"),
-                                    m.requires.keys().cloned().collect::<Vec<_>>().join(", ")
-                                ))
-                                .small()
-                                .color(ui::color::TEXT_MUTED),
+                            dep_row(
+                                ui,
+                                &i18n::t("modules.requires"),
+                                ui::color::TEXT_MUTED,
+                                m.requires.keys(),
+                                providers,
+                                tag_click,
                             );
                         }
                         if !m.optional.is_empty() {
                             ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} {}",
-                                    i18n::t("modules.optional"),
-                                    m.optional.keys().cloned().collect::<Vec<_>>().join(", ")
-                                ))
-                                .small()
-                                .color(ui::color::ACCENT),
+                            dep_row(
+                                ui,
+                                &i18n::t("modules.optional"),
+                                ui::color::ACCENT,
+                                m.optional.keys(),
+                                providers,
+                                tag_click,
                             );
                         }
                     },
@@ -2443,14 +2441,6 @@ fn module_card(
                         // Resolve each label once so the width measurement and the
                         // buttons use exactly the same (localized) text.
                         let open_lbl = i18n::t("modules.open");
-                        let pin_lbl = format!(
-                            "📌 {}",
-                            if pinned {
-                                i18n::t("modules.unpin")
-                            } else {
-                                i18n::t("modules.pin")
-                            }
-                        );
                         let remove_lbl = i18n::t("modules.remove");
                         let github_lbl = i18n::t("modules.github");
                         let update_lbl = (from_git && latest.is_some()).then(|| match latest {
@@ -2462,7 +2452,6 @@ fn module_card(
                         if let Some(u) = &update_lbl {
                             labels.push(u);
                         }
-                        labels.push(&pin_lbl);
                         labels.push(&remove_lbl);
                         if from_git && m.repo.is_some() {
                             labels.push(&github_lbl);
@@ -2529,9 +2518,6 @@ fn module_card(
                             if clicked {
                                 *update = Some(m.name.clone());
                             }
-                        }
-                        if ui::outline_button(ui, &pin_lbl, bw).clicked() {
-                            *toggle_pin = Some(m.name.clone());
                         }
                         if ui::outline_button(ui, &remove_lbl, bw).clicked() {
                             *remove = Some(m.name.clone());
@@ -2607,7 +2593,7 @@ fn available_card(
                             ui.horizontal_wrapped(|ui| {
                                 for t in &r.tags {
                                     if tag_chip(ui, t).clicked() {
-                                        *tag_click = Some(t.clone());
+                                        *tag_click = Some(format!("tag:{t}"));
                                     }
                                 }
                             });
@@ -2706,6 +2692,63 @@ fn repo_url(repo: &str) -> String {
     } else {
         format!("https://github.com/{repo}")
     }
+}
+
+/// A dependency row: `Requires: programs`, naming the *modules* that provide the
+/// capabilities rather than the capability strings — `programs`, not
+/// `programs.local`.
+///
+/// A name is clickable when something installed provides it; clicking searches
+/// for that module so its card comes into view. When nothing provides it, the
+/// capability string is shown as plain text instead — still visible, but there
+/// is nothing to jump to.
+fn dep_row<'a>(
+    ui: &mut egui::Ui,
+    prefix: &str,
+    prefix_color: egui::Color32,
+    caps: impl Iterator<Item = &'a String>,
+    providers: &HashMap<&str, &ModuleSpec>,
+    find: &mut Option<String>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        ui.label(egui::RichText::new(prefix).small().color(prefix_color));
+        for (i, cap) in caps.enumerate() {
+            if i > 0 {
+                ui.label(
+                    egui::RichText::new("·")
+                        .small()
+                        .color(ui::color::TEXT_MUTED),
+                );
+            }
+            match providers.get(cap.as_str()) {
+                Some(p) => {
+                    let clicked = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(&p.name)
+                                    .small()
+                                    .underline()
+                                    .color(ui::color::ACCENT),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked();
+                    if clicked {
+                        *find = Some(p.name.clone());
+                    }
+                }
+                None => {
+                    ui.label(
+                        egui::RichText::new(cap)
+                            .small()
+                            .color(ui::color::TEXT_MUTED),
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// A small rounded pill, like Zed's category tags.
@@ -3404,7 +3447,8 @@ fn detail_view(
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if let Some(a) = ui::render_view(ui, v, &mut tab.inputs, None) {
+                    // Dev UI-kit preview: no entrance animation.
+                    if let Some(a) = ui::render_view(ui, v, &mut tab.inputs, None, 0.0) {
                         *action = Some(a);
                     }
                 });
@@ -3422,6 +3466,7 @@ fn detail_view(
 fn module_view(
     ui: &mut egui::Ui,
     name: &str,
+    reveal_at: f64,
     view: &Option<ui::View>,
     view_error: &Option<String>,
     inputs: &mut HashMap<String, String>,
@@ -3439,7 +3484,7 @@ fn module_view(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     // The in-flight button shows a spinner (via busy_action).
-                    if let Some(a) = ui::render_view(ui, v, inputs, busy_action) {
+                    if let Some(a) = ui::render_view(ui, v, inputs, busy_action, reveal_at) {
                         *action = Some(a);
                     }
 
@@ -3470,6 +3515,76 @@ fn module_view(
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    /// The remote and installed matchers share their term logic, so the simpler
+    /// struct exercises both. `RemoteModule` needs no launch/permission setup.
+    fn spec() -> RemoteModule {
+        RemoteModule {
+            name: "programs-banlist-ua".into(),
+            title: Some("Banned Programs in Ukraine".into()),
+            repo: "CRC-BARRACUDA/limen-programs-banlist-ua".into(),
+            description: Some("Flags installed software banned in Ukraine.".into()),
+            url: String::new(),
+            version: Some("0.1.0".into()),
+            capabilities: vec!["banlist.ua".into()],
+            tags: ["ua", "programs", "ssscip.banlist"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            branch: None,
+            commit: None,
+        }
+    }
+
+    #[test]
+    fn a_bare_word_searches_names_only() {
+        // "banned" is in the display name -> hit.
+        assert!(remote_matches(&spec(), &parse_query("banned")));
+        // "software" appears only in the description -> miss, by design.
+        assert!(!remote_matches(&spec(), &parse_query("software")));
+    }
+
+    #[test]
+    fn qualifiers_target_their_field() {
+        let m = spec();
+        assert!(remote_matches(&m, &parse_query("tag:ua")));
+        assert!(remote_matches(&m, &parse_query("description:software")));
+        assert!(remote_matches(&m, &parse_query("cap:banlist")));
+        assert!(!remote_matches(&m, &parse_query("tag:windows")));
+        // A tag value is not a name, and vice versa.
+        assert!(!remote_matches(&m, &parse_query("name:ssscip")));
+        assert!(remote_matches(&m, &parse_query("tag:ssscip")));
+    }
+
+    #[test]
+    fn terms_are_anded_and_shorthands_work() {
+        let m = spec();
+        assert!(remote_matches(&m, &parse_query("tag:ua programs")));
+        // Second term fails -> whole query fails.
+        assert!(!remote_matches(&m, &parse_query("tag:ua nonsense")));
+        assert!(remote_matches(&m, &parse_query("desc:banned")));
+    }
+
+    #[test]
+    fn an_empty_query_matches_everything() {
+        assert!(parse_query("   ").is_empty());
+        assert!(remote_matches(&spec(), &[]));
+    }
+
+    /// An unknown prefix must not be read as a field, or it would silently match
+    /// nothing instead of being searched literally.
+    #[test]
+    fn an_unknown_prefix_is_searched_literally() {
+        let terms = parse_query("weird:thing");
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].field, Field::Name);
+        assert_eq!(terms[0].text, "weird:thing");
     }
 }
 
