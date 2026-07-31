@@ -35,6 +35,21 @@ class Text(Widget):
         password: bool = ...,
     ) -> None: ...
 
+class File(Widget):
+    """A filesystem path input keyed by `id` (path returned in the method params).
+    Typed, dropped onto, or chosen from the OS picker via Browse. `directory`
+    picks a folder and accepts only folders; `browse` labels the button, so the
+    module can translate it with the rest of its view."""
+    def __init__(
+        self,
+        id: str,
+        label: str = ...,
+        placeholder: str = ...,
+        default: str = ...,
+        directory: bool = ...,
+        browse: str = ...,
+    ) -> None: ...
+
 class Select(Widget):
     """A dropdown keyed by `id`; `options` are the choices, selection returned in
     the method params."""

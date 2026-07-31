@@ -178,6 +178,18 @@ function M.Text(id, opts)
              multiline = opts.multiline or false, default = opts.default or "" }
   end)
 end
+-- A filesystem path input keyed by `id` (the chosen path comes back in the
+-- method params, like Text). Typed, dropped onto, or chosen via Browse.
+-- `directory` picks a folder and accepts only folders; `browse` labels the
+-- button, so the module can translate it with the rest of its view.
+function M.File(id, opts)
+  opts = opts or {}
+  return widget(function()
+    return { kind = "file", id = id, label = opts.label or "", placeholder = opts.placeholder or "",
+             default = opts.default or "", directory = opts.directory or false,
+             browse = opts.browse or "" }
+  end)
+end
 function M.Select(id, options, opts)
   opts = opts or {}
   return widget(function()

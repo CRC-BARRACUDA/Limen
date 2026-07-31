@@ -37,6 +37,16 @@ function Text(id, opts = {}) {
     multiline: !!opts.multiline, default: opts.default || "",
   }) };
 }
+// A filesystem path input keyed by `id` (the chosen path comes back in the
+// method params, like Text). Typed, dropped onto, or chosen via Browse.
+// `directory` picks a folder and accepts only folders; `browse` labels the
+// button, so the module can translate it with the rest of its view.
+function File(id, opts = {}) {
+  return { toSpec: () => ({
+    kind: "file", id, label: opts.label || "", placeholder: opts.placeholder || "",
+    default: opts.default || "", directory: !!opts.directory, browse: opts.browse || "",
+  }) };
+}
 function Select(id, options, opts = {}) {
   return { toSpec: () => ({
     kind: "select", id, options: options.slice(), label: opts.label || "", default: opts.default || "",
@@ -216,4 +226,4 @@ class Module {
   }
 }
 
-module.exports = { Module, Host, Window, Label, Text, Select, Button, Row, Separator };
+module.exports = { Module, Host, Window, Label, Text, File, Select, Button, Row, Separator };

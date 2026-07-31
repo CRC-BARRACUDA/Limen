@@ -74,6 +74,29 @@ class Text(Widget):
         }
 
 
+class File(Widget):
+    """A filesystem path input keyed by `id` (the chosen path comes back in the
+    method params, exactly like `Text`).
+
+    The user can type a path, drag a file or folder onto the field, or press
+    Browse for the OS picker. `directory=True` picks a folder instead of a file
+    and only accepts folders when dropped. `browse` is the button's label — it
+    lives here, rather than in the host, so a module can translate it alongside
+    the rest of its view."""
+
+    def __init__(self, id, label="", placeholder="", default="", directory=False,
+                 browse=""):
+        self.id, self.label, self.placeholder = id, label, placeholder
+        self.default, self.directory, self.browse = default, bool(directory), browse
+
+    def to_spec(self):
+        return {
+            "kind": "file", "id": self.id, "label": self.label,
+            "placeholder": self.placeholder, "default": self.default,
+            "directory": self.directory, "browse": self.browse,
+        }
+
+
 class Select(Widget):
     """A dropdown keyed by `id`; `options` are the choices and the selection comes
     back in the method params."""
