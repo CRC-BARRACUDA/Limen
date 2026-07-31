@@ -1,19 +1,18 @@
 # Limen
 
-**A modular tool for security and analysis.**
+*English · [Українська](README.ua.md)*
 
-Limen is a modular security &amp; analysis toolkit — a portable host that turns
-small, single-purpose modules into a unified console. Instead of one monolithic
-tool, you compose *capabilities* (endpoint queries, host operations, …), each
-shipped as an independent module in whatever language fits.
+**A modular tool for security, analysis and audit.**
+
+Limen is a modular security, analysis &amp; audit toolkit — a portable core that
+turns small, single-purpose modules into a unified console. Instead of one
+monolithic tool, you compose *capabilities* (endpoint queries, system
+operations, …), each shipped as an independent module in whatever language fits.
 Limen discovers them, brokers calls between them over one contract, manages their
 install and trust from GitHub, and renders the UI each module draws for itself.
-It's a Rust rewrite of the original Python Limen — a native `egui` app with a
-proper package manager underneath.
 
-> ⚠️ **Development-branch software** — APIs and on-disk formats may change. Free
-> software under the **GNU GPL v3 or later** (which carries its own no-warranty
-> terms).
+Put very simply: Limen is an engine that brings modules together in one place and
+lets them interact with one another.
 
 ---
 
@@ -30,10 +29,10 @@ proper package manager underneath.
      / `.dylib` for Rust / C / Go.
 - **Capability broker.** Modules declare the capabilities they *provide* and
   *require* in a `limen.toml` manifest. A module calls
-  `host.call(capability, method, params)` and the host routes it to whichever
-  module provides that capability. The host builds a semver dependency DAG,
+  `host.call(capability, method, params)` and the core routes it to whichever
+  module provides that capability. The core builds a semver dependency DAG,
   topo-sorts it, and rejects cycles.
-- **GitHub package manager.** `limen add owner/repo@version` reads the manifest
+- **GitHub package manager.** `limen-cli add owner/repo@version` reads the manifest
   from a tagged release, resolves the cross-repo dependency graph, downloads,
   verifies a sha256 digest against a lockfile, and installs. Native modules pull
   a prebuilt platform binary from the release assets.
@@ -42,13 +41,16 @@ proper package manager underneath.
   for consent at invocation time; granted trust is digest-pinned in `trust.json`.
 - **Self-update.** On launch the app checks GitHub releases in the background and
   offers an in-app update if a newer version is published.
+- **Multi-language UI.** The app ships in English and Ukrainian — taken from the
+  OS locale on first run, switchable in Settings. Modules translate their own
+  views through the SDK, so their text follows the same setting.
 
 ## Layout
 
 ```
 src/
   limen-proto      the JSON-RPC contract + manifest types
-  limen-host       runtime, module loader, capability broker, host services
+  limen-host       runtime, module loader, capability broker, services for modules
   limen-core       the engine + on-disk conventions (paths, config, setup, update)
   limen-registry   GitHub package manager (install / lock / trust / verify)
   limen-cli        command-line frontend   (binary: limen-cli)
@@ -100,37 +102,63 @@ silently.
 
 `limen-cli` does all the same work with no GPU at all, and is unaffected.
 
-### Release + packaging (Linux)
+### Release + packaging
+
+Both scripts read the version from `[workspace.package]` in `Cargo.toml`, build
+`Limen` + `limen-cli` in release, and write to `dist/` for the build machine's
+architecture.
+
+**Linux**
 
 ```bash
 ./scripts/package-linux.sh
 ```
 
-Produces, in `dist/`, for the host architecture:
+| Artifact | What |
+|---|---|
+| `Limen-<ver>-linux-<arch>.tar.gz` | Distribution tarball — `Limen`, `limen-cli`, `LICENSE`, `JetBrainsMono-OFL.txt` (stripped) |
+| `Limen-<ver>-linux-<arch>.tar.gz.sha256` | Checksum |
+
+**Windows**
+
+```powershell
+.\scripts\package-windows.ps1
+```
+
+Needs 7-Zip (`winget install 7zip.7zip`) — on `PATH`, in a usual install
+location, or registered in `HKLM\SOFTWARE\7-Zip`. There is no strip step:
+Windows keeps debug info in a separate `.pdb`, so the release `.exe` is already
+lean.
 
 | Artifact | What |
 |---|---|
-| `Limen-<ver>-linux-<arch>.tar.gz` | Distribution tarball — `Limen`, `limen-cli`, `LICENSE` (stripped) |
-| `Limen-<ver>-linux-<arch>.tar.gz.sha256` | Checksum |
+| `Limen-<ver>-windows-<arch>.7z` | Distribution archive — `Limen.exe`, `limen-cli.exe`, `LICENSE`, `JetBrainsMono-OFL.txt` |
+| `Limen-<ver>-windows-<arch>.7z.sha256` | Checksum |
+| `Limen-<ver>-windows-<arch>.exe` | Raw GUI binary, for the in-app self-update |
 
-> The in-app self-update needs a **raw binary** release asset (it renames the
-> download directly over the running executable) — a `.tar.gz` is for manual
-> download only.
+> **Naming release assets matters.** The self-updater picks the first asset whose
+> filename contains **both** the OS and arch tokens (`linux`/`windows`,
+> `x86_64`/`aarch64`). It prefers a raw binary — renamed straight over the
+> running executable — and otherwise falls back to an archive it extracts the
+> executable from (`.tar.gz` / `.tgz` / `.tar` / `.zip` / `.7z`). Keep the
+> `<ver>-<os>-<arch>` stem: a bare `Limen.exe` carries no tokens and is
+> invisible to the updater.
 
 ## CLI
 
 ```
-limen-cli modules              list installed modules
-limen-cli describe <cap>       describe a capability / its methods
-limen-cli run <cap> <method>   invoke a capability method
-limen-cli add <owner/repo>     install a module (and its dependencies)
-limen-cli list                 list modules available in the configured org
-limen-cli update <name>        update an installed module
+limen-cli modules              list installed modules and their capabilities
+limen-cli describe <cap>       show a capability provider's self-description
+limen-cli run <cap> <method>   invoke a capability method (--params JSON, --target ID)
+limen-cli add <ref>            install a module + deps (owner/repo[@ver], or a local path)
+limen-cli list                 list installed modules from the lockfile
+limen-cli update [name]        re-fetch and reinstall modules (all, or one by name)
 limen-cli remove <name>        uninstall a module
-limen-cli permissions <name>   show a module's declared permissions
-limen-cli trust <name>         approve a module (digest-pinned)
+limen-cli permissions          show every module's declared permissions and trust status
+limen-cli trust <name>         approve a module (pins its current content digest)
 limen-cli untrust <name>       revoke approval
 limen-cli verify               sha256 tamper-check installed modules vs the lockfile
+limen-cli demo                 run the built-in cross-language, cross-transport demo
 ```
 
 ## Writing a module
@@ -140,18 +168,32 @@ manifest:
 
 ```toml
 [module]
-name = "local-devices"
+name = "local-devices"                # the identifier other modules resolve
+display_name = "Local Devices"        # pretty name on the card (falls back to name)
+description = "Enumerates locally attached devices."
 version = "0.1.0"
 language = "native"          # or "python" | "js" | "lua"
 entry = "local_devices"      # binary/script/lib entry
+abi = "rpc"                  # rpc (default, over stdio) | native (in-process C-ABI)
+repo = "CRC-BARRACUDA/limen-local-devices"
 
 [provides]
 capabilities = ["devices.local"]
 
 [permissions]
 subprocess = true
+```
 
-repo = "CRC-BARRACUDA/limen-local-devices"
+`display_name` and `description` are what the module card shows, in the installed
+list and in the available-modules list alike. Both are the **English defaults** —
+add a `locales/<lang>.toml` next to the manifest with `[module] title` /
+`description` to override them per language:
+
+```toml
+# locales/uk.toml
+[module]
+title = "Локальні пристрої"
+description = "Перелічує локально під'єднані пристрої."
 ```
 
 Modules get an SDK injected at spawn time (Python / JS / Lua) or link the Rust

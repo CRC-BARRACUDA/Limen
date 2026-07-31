@@ -197,6 +197,13 @@ pub struct LimenApp {
     /// How many startup frames have pre-warmed the font atlas so far (warmed for
     /// the first several, after zoom/DPI settles, then stops).
     fonts_warm_frames: u32,
+    /// Tab strip horizontal scroll state (single row; overflow → arrows + wheel).
+    /// `scroll` is the current offset; `content_w`/`view_w` (from last frame) drive
+    /// arrow visibility/enablement; `scroll_to` is a pending offset from an arrow.
+    tab_scroll: f32,
+    tab_content_w: f32,
+    tab_view_w: f32,
+    tab_scroll_to: Option<f32>,
 }
 
 impl LimenApp {
@@ -285,6 +292,10 @@ impl LimenApp {
             splash_done: false,
             window_shown: false,
             fonts_warm_frames: 0,
+            tab_scroll: 0.0,
+            tab_content_w: 0.0,
+            tab_view_w: 0.0,
+            tab_scroll_to: None,
         }
     }
 
@@ -792,7 +803,8 @@ impl eframe::App for LimenApp {
                 );
                 if bar.double_clicked() {
                     let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
                 }
                 if bar.drag_started_by(egui::PointerButton::Primary) {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -807,8 +819,7 @@ impl eframe::App for LimenApp {
                     if ui::chip(ui, &i18n::t("nav.about"), active == Some(Tab::About)).clicked() {
                         open_tab = Some(Tab::About);
                     }
-                    if ui::chip(ui, &i18n::t("nav.modules"), active == Some(Tab::Modules))
-                        .clicked()
+                    if ui::chip(ui, &i18n::t("nav.modules"), active == Some(Tab::Modules)).clicked()
                     {
                         open_tab = Some(Tab::Modules);
                     }
@@ -852,14 +863,16 @@ impl eframe::App for LimenApp {
                                 (ui::WinBtn::Maximize, i18n::t("win.maximize"))
                             };
                             if ui::window_button(ui, mbtn).on_hover_text(tip).clicked() {
-                                ui.ctx()
-                                    .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                                    !maximized,
+                                ));
                             }
                             if ui::window_button(ui, ui::WinBtn::Minimize)
                                 .on_hover_text(i18n::t("win.minimize"))
                                 .clicked()
                             {
-                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         }
                         ui.add_space(6.0);
@@ -891,130 +904,216 @@ impl eframe::App for LimenApp {
                     .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
             )
             .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    let font_id = egui::TextStyle::Button.resolve(ui.style());
-                    for (i, tab) in self.tabs.iter().enumerate() {
-                        let selected = i == self.active;
-                        let text = match tab {
-                            Tab::Detail { id } => self
-                                .detail_tabs
-                                .get(id)
-                                .map(|d| d.title.clone())
-                                .filter(|t| !t.is_empty())
-                                .unwrap_or_else(|| "Details".into()),
-                            _ => tab.title(),
-                        };
-
-                        // Zed-style tab: stable width (the close slot is always
-                        // reserved), the × only shows on hover or when active.
-                        let pad = 10.0;
-                        let close_w = 16.0;
-                        let gap = 6.0;
-                        let galley =
-                            ui.painter()
-                                .layout_no_wrap(text, font_id.clone(), ui::color::TEXT);
-                        let w = pad + galley.size().x + gap + close_w + pad;
+                ui.horizontal(|ui| {
+                    // A single-row, horizontally-scrollable tab strip. When the
+                    // tabs overflow, nav arrows (« ‹ › ») appear and the mouse
+                    // wheel scrolls it.
+                    let arrow = |ui: &mut egui::Ui, glyph: &str, enabled: bool| -> bool {
                         let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
-                        // Use the pointer position, not `resp.hovered()`: the close
-                        // button below is drawn on top and would otherwise steal the
-                        // hover, making the tab flicker as the × shows/hides.
-                        let hovered = ui.rect_contains_pointer(rect);
-
-                        // Smoothly fade the hover fill in, and grow the active
-                        // underline out from the tab's centre toward its edges.
-                        let hover_t =
-                            ui::anim_bool(ui, resp.id.with("hover"), hovered && !selected, 0.14);
-                        let active_t = ui::anim_bool(ui, resp.id.with("active"), selected, 0.05);
-
-                        // Active tab adopts the panel colour; hover fades in.
-                        let fill = if selected {
-                            ui::color::BG
+                            ui.allocate_exact_size(egui::vec2(20.0, 26.0), egui::Sense::click());
+                        let col = if !enabled {
+                            ui::with_alpha(ui::color::TEXT_MUTED, 0.3)
+                        } else if resp.hovered() {
+                            ui::color::ACCENT
                         } else {
-                            let e = ui::color::BG_ELEVATED;
-                            egui::Color32::from_rgba_unmultiplied(
-                                e.r(),
-                                e.g(),
-                                e.b(),
-                                (255.0 * hover_t) as u8,
-                            )
+                            ui::color::TEXT_MUTED
                         };
-                        ui.painter().rect_filled(
-                            rect,
-                            egui::Rounding {
-                                nw: 5.0,
-                                ne: 5.0,
-                                sw: 0.0,
-                                se: 0.0,
-                            },
-                            fill,
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            glyph,
+                            egui::FontId::proportional(15.0),
+                            col,
                         );
-                        if active_t > 0.0 {
-                            let half = rect.width() / 2.0 * active_t;
-                            let cx = rect.center().x;
-                            ui.painter().hline(
-                                (cx - half)..=(cx + half),
-                                rect.bottom() - 1.0,
-                                egui::Stroke::new(2.0_f32, ui::color::ACCENT),
-                            );
+                        enabled && resp.clicked()
+                    };
+                    const STEP: f32 = 220.0;
+                    let max_off = (self.tab_content_w - self.tab_view_w).max(0.0);
+                    let overflow = max_off > 1.0;
+                    let can_left = self.tab_scroll > 0.5;
+                    let can_right = self.tab_scroll + 0.5 < max_off;
+                    if overflow {
+                        if arrow(ui, "«", can_left) {
+                            self.tab_scroll_to = Some(0.0);
                         }
-
-                        let text_t = if selected { 1.0 } else { hover_t };
-                        let tcol = ui::lerp_color(ui::color::TEXT_MUTED, ui::color::TEXT, text_t);
-                        let tpos =
-                            egui::pos2(rect.left() + pad, rect.center().y - galley.size().y / 2.0);
-                        ui.painter().galley(tpos, galley, tcol);
-
-                        // Close affordance — only when active or hovered.
-                        let mut close_clicked = false;
-                        if selected || hovered {
-                            let cc =
-                                egui::pos2(rect.right() - pad - close_w / 2.0, rect.center().y);
-                            let crect =
-                                egui::Rect::from_center_size(cc, egui::vec2(close_w, close_w));
-                            let cresp =
-                                ui.interact(crect, resp.id.with("close"), egui::Sense::click());
-                            if cresp.hovered() {
-                                ui.painter().rect_filled(
-                                    crect,
-                                    egui::Rounding::same(3.0),
-                                    ui::color::BG_HOVER,
-                                );
-                            }
-                            ui.painter().text(
-                                cc,
-                                egui::Align2::CENTER_CENTER,
-                                "×",
-                                egui::FontId::proportional(15.0),
-                                if cresp.hovered() {
-                                    ui::color::TEXT
-                                } else {
-                                    ui::color::TEXT_MUTED
-                                },
-                            );
-                            if cresp.clicked() {
-                                close_idx = Some(i);
-                                close_clicked = true;
-                            }
-                        }
-                        if resp.clicked() && !close_clicked {
-                            switch_to = Some(i);
+                        if arrow(ui, "‹", can_left) {
+                            self.tab_scroll_to = Some((self.tab_scroll - STEP).max(0.0));
                         }
                     }
-                    // Frequently-visited modules not already open.
-                    if !frequent.is_empty() {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            for name in frequent.iter().rev() {
-                                if ui::chip(ui, &format!("↗ {name}"), false)
-                                    .on_hover_text(i18n::t("tabstrip.frequent_hint"))
-                                    .clicked()
-                                {
-                                    open_tab = Some(Tab::Module(name.clone()));
+                    let right_reserve = if overflow { 40.0 } else { 0.0 };
+                    let sa_width = (ui.available_width() - right_reserve).max(80.0);
+                    let mut area = egui::ScrollArea::horizontal()
+                        .id_source("tabstrip_scroll")
+                        .auto_shrink([false, false])
+                        .max_width(sa_width)
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        );
+                    if let Some(x) = self.tab_scroll_to.take() {
+                        area = area.scroll_offset(egui::vec2(x, 0.0));
+                    }
+                    let out = area.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let font_id = egui::TextStyle::Button.resolve(ui.style());
+                            for (i, tab) in self.tabs.iter().enumerate() {
+                                let selected = i == self.active;
+                                let text = match tab {
+                                    Tab::Detail { id } => self
+                                        .detail_tabs
+                                        .get(id)
+                                        .map(|d| d.title.clone())
+                                        .filter(|t| !t.is_empty())
+                                        .unwrap_or_else(|| i18n::t("tab.details")),
+                                    // Show the module's localized display title, not its
+                                    // identifier.
+                                    Tab::Module(name) => self
+                                        .modules
+                                        .iter()
+                                        .find(|m| &m.name == name)
+                                        .map(|m| localized_name(ui, m))
+                                        .unwrap_or_else(|| name.clone()),
+                                    _ => tab.title(),
+                                };
+
+                                // Zed-style tab: stable width (the close slot is always
+                                // reserved), the × only shows on hover or when active.
+                                let pad = 10.0;
+                                let close_w = 16.0;
+                                let gap = 6.0;
+                                let galley = ui.painter().layout_no_wrap(
+                                    text,
+                                    font_id.clone(),
+                                    ui::color::TEXT,
+                                );
+                                let w = pad + galley.size().x + gap + close_w + pad;
+                                let (rect, resp) = ui
+                                    .allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
+                                // Use the pointer position, not `resp.hovered()`: the close
+                                // button below is drawn on top and would otherwise steal the
+                                // hover, making the tab flicker as the × shows/hides.
+                                let hovered = ui.rect_contains_pointer(rect);
+
+                                // Smoothly fade the hover fill in, and grow the active
+                                // underline out from the tab's centre toward its edges.
+                                let hover_t = ui::anim_bool(
+                                    ui,
+                                    resp.id.with("hover"),
+                                    hovered && !selected,
+                                    0.14,
+                                );
+                                let active_t =
+                                    ui::anim_bool(ui, resp.id.with("active"), selected, 0.05);
+
+                                // Active tab adopts the panel colour; hover fades in.
+                                let fill = if selected {
+                                    ui::color::BG
+                                } else {
+                                    let e = ui::color::BG_ELEVATED;
+                                    egui::Color32::from_rgba_unmultiplied(
+                                        e.r(),
+                                        e.g(),
+                                        e.b(),
+                                        (255.0 * hover_t) as u8,
+                                    )
+                                };
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::Rounding {
+                                        nw: 5.0,
+                                        ne: 5.0,
+                                        sw: 0.0,
+                                        se: 0.0,
+                                    },
+                                    fill,
+                                );
+                                if active_t > 0.0 {
+                                    let half = rect.width() / 2.0 * active_t;
+                                    let cx = rect.center().x;
+                                    ui.painter().hline(
+                                        (cx - half)..=(cx + half),
+                                        rect.bottom() - 1.0,
+                                        egui::Stroke::new(2.0_f32, ui::color::ACCENT),
+                                    );
+                                }
+
+                                let text_t = if selected { 1.0 } else { hover_t };
+                                let tcol =
+                                    ui::lerp_color(ui::color::TEXT_MUTED, ui::color::TEXT, text_t);
+                                let tpos = egui::pos2(
+                                    rect.left() + pad,
+                                    rect.center().y - galley.size().y / 2.0,
+                                );
+                                ui.painter().galley(tpos, galley, tcol);
+
+                                // Close affordance — only when active or hovered.
+                                let mut close_clicked = false;
+                                if selected || hovered {
+                                    let cc = egui::pos2(
+                                        rect.right() - pad - close_w / 2.0,
+                                        rect.center().y,
+                                    );
+                                    let crect = egui::Rect::from_center_size(
+                                        cc,
+                                        egui::vec2(close_w, close_w),
+                                    );
+                                    let cresp = ui.interact(
+                                        crect,
+                                        resp.id.with("close"),
+                                        egui::Sense::click(),
+                                    );
+                                    if cresp.hovered() {
+                                        ui.painter().rect_filled(
+                                            crect,
+                                            egui::Rounding::same(3.0),
+                                            ui::color::BG_HOVER,
+                                        );
+                                    }
+                                    ui.painter().text(
+                                        cc,
+                                        egui::Align2::CENTER_CENTER,
+                                        "×",
+                                        egui::FontId::proportional(15.0),
+                                        if cresp.hovered() {
+                                            ui::color::TEXT
+                                        } else {
+                                            ui::color::TEXT_MUTED
+                                        },
+                                    );
+                                    if cresp.clicked() {
+                                        close_idx = Some(i);
+                                        close_clicked = true;
+                                    }
+                                }
+                                if resp.clicked() && !close_clicked {
+                                    switch_to = Some(i);
                                 }
                             }
-                        });
+                            // Frequently-visited modules trail the tabs (scroll with them).
+                            if !frequent.is_empty() {
+                                ui.add_space(8.0);
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                for name in frequent.iter() {
+                                    if ui::chip(ui, &format!("↗ {name}"), false)
+                                        .on_hover_text(i18n::t("tabstrip.frequent_hint"))
+                                        .clicked()
+                                    {
+                                        open_tab = Some(Tab::Module(name.clone()));
+                                    }
+                                }
+                            }
+                        })
+                    });
+                    self.tab_scroll = out.state.offset.x;
+                    self.tab_content_w = out.content_size.x;
+                    self.tab_view_w = out.inner_rect.width();
+                    if overflow {
+                        if arrow(ui, "›", can_right) {
+                            self.tab_scroll_to = Some((self.tab_scroll + STEP).min(max_off));
+                        }
+                        if arrow(ui, "»", can_right) {
+                            self.tab_scroll_to = Some(max_off);
+                        }
                     }
                 });
             });
@@ -1225,6 +1324,14 @@ impl eframe::App for LimenApp {
         }
         if lang_changed {
             self.save_language();
+            // Re-play the current page's staggered entrance so it animates into
+            // the new language (clearing the timers re-arms them on the next
+            // frame; only the active page is non-None, so only it re-reveals).
+            self.about_revealed_at = None;
+            self.settings_revealed_at = None;
+            self.developer_revealed_at = None;
+            self.license_revealed_at = None;
+            self.modules_revealed_at = None;
             // Installed cards re-resolve their description in-place (localized_desc
             // reads the module's locales/ folder, cached per language) — no engine
             // reload. The org list, though, resolved its descriptions over the
@@ -1326,7 +1433,10 @@ impl eframe::App for LimenApp {
                 .show(ctx, |ui| {
                     ui.set_max_width(420.0);
                     let fallback = i18n::t("perm.this_module");
-                    let name = module.as_ref().map(|m| m.name.as_str()).unwrap_or(&fallback);
+                    let name = module
+                        .as_ref()
+                        .map(|m| m.name.as_str())
+                        .unwrap_or(&fallback);
                     ui.label(
                         egui::RichText::new(
                             i18n::t("perm.wants_to_run")
@@ -1567,10 +1677,22 @@ fn dev_mode_view(
         .spacing([10.0, 8.0])
         .show(ui, |ui| {
             ui.label(i18n::t("dev.limen_path"));
-            ui::text_field(ui, dev_limen_path, &i18n::t("dev.limen_path_hint"), 320.0, false);
+            ui::text_field(
+                ui,
+                dev_limen_path,
+                &i18n::t("dev.limen_path_hint"),
+                320.0,
+                false,
+            );
             ui.end_row();
             ui.label(i18n::t("dev.modules_path"));
-            ui::text_field(ui, dev_modules_path, &i18n::t("dev.modules_path_hint"), 320.0, false);
+            ui::text_field(
+                ui,
+                dev_modules_path,
+                &i18n::t("dev.modules_path_hint"),
+                320.0,
+                false,
+            );
             ui.end_row();
         });
     ui.add_space(8.0);
@@ -1590,7 +1712,9 @@ fn dev_mode_view(
             *dev_mode_on = true;
             *applied = true;
         }
-        if *dev_mode_on && ui::outline_button(ui, &i18n::t("dev.turn_off"), egui::Vec2::ZERO).clicked() {
+        if *dev_mode_on
+            && ui::outline_button(ui, &i18n::t("dev.turn_off"), egui::Vec2::ZERO).clicked()
+        {
             limen_core::set_update_dir(None);
             limen_registry::set_update_modules_dir(None);
             *dev_mode_on = false;
@@ -1738,7 +1862,13 @@ fn developer_view(
     shown_dev_tab: &mut DevTab,
 ) {
     ui.horizontal(|ui| {
-        if ui::chip(ui, &i18n::t("dev.tab_dev_mode"), *dev_tab == DevTab::DevMode).clicked() {
+        if ui::chip(
+            ui,
+            &i18n::t("dev.tab_dev_mode"),
+            *dev_tab == DevTab::DevMode,
+        )
+        .clicked()
+        {
             *dev_tab = DevTab::DevMode;
         }
         if ui::chip(ui, &i18n::t("dev.tab_ui_kit"), *dev_tab == DevTab::UiKit).clicked() {
@@ -1825,7 +1955,7 @@ fn prewarm_fonts(ctx: &egui::Context) {
     const GLYPHS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 \
         .,:;!?'\"“”-—·•…()[]{}<>%/@#&№×↗▸ ⚙📌🛠 \
         АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯабвгґдеєжзиіїйклмнопрстуфхцчшщьюя";
-    // Cover every size the UI renders text at, for both faces.
+    // Cover every size the UI renders text at, for both families.
     const SIZES: [f32; 11] = [
         10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 24.0, 30.0,
     ];
@@ -1861,6 +1991,25 @@ fn localized_desc(ui: &egui::Ui, m: &ModuleSpec) -> Option<String> {
         }
     };
     resolved.or_else(|| m.description.clone())
+}
+
+/// An installed module's display title, translated for the active UI language
+/// from its `locales/<lang>.toml` `[module] title`, else the manifest
+/// `display_name`, else the module's identifier `name`. Cached like `localized_desc`.
+fn localized_name(ui: &egui::Ui, m: &ModuleSpec) -> String {
+    let lang = i18n::locale();
+    let id = egui::Id::new(("modtitle", m.name.as_str(), lang.code()));
+    let resolved = match ui.data(|d| d.get_temp::<Option<String>>(id)) {
+        Some(v) => v,
+        None => {
+            let r = limen_proto::manifest::localized_title(&m.cwd, lang.code());
+            ui.data_mut(|d| d.insert_temp(id, r.clone()));
+            r
+        }
+    };
+    resolved
+        .or_else(|| m.display_name.clone())
+        .unwrap_or_else(|| m.name.clone())
 }
 
 /// The Modules page — a Zed-Extensions-style list: installed modules plus the
@@ -1903,7 +2052,13 @@ fn modules_page(
     ui.add_space(10.0);
 
     // One universal search across installed (local) and org (remote) modules.
-    ui::text_field(ui, search, &i18n::t("modules.search_hint"), f32::INFINITY, false);
+    ui::text_field(
+        ui,
+        search,
+        &i18n::t("modules.search_hint"),
+        f32::INFINITY,
+        false,
+    );
     ui.add_space(8.0);
 
     // Installed / Available filter.
@@ -2013,8 +2168,7 @@ fn modules_page(
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new(i18n::t("modules.none_match"))
-                        .color(ui::color::TEXT_MUTED),
+                    egui::RichText::new(i18n::t("modules.none_match")).color(ui::color::TEXT_MUTED),
                 );
             });
         }
@@ -2162,7 +2316,11 @@ fn module_card(
                         // to content width).
                         ui.set_min_width(left_w);
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(egui::RichText::new(&m.name).size(16.0).strong());
+                            ui.label(
+                                egui::RichText::new(localized_name(ui, m))
+                                    .size(16.0)
+                                    .strong(),
+                            );
                             ui.label(
                                 egui::RichText::new(format!("v{}", m.version))
                                     .monospace()
@@ -2399,7 +2557,11 @@ fn available_card(
                     |ui| {
                         ui.set_min_width(left_w);
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(egui::RichText::new(&r.name).size(16.0).strong());
+                            ui.label(
+                                egui::RichText::new(r.title.as_deref().unwrap_or(&r.name))
+                                    .size(16.0)
+                                    .strong(),
+                            );
                             if let Some(v) = &r.version {
                                 ui.label(
                                     egui::RichText::new(format!("v{v}"))
@@ -2806,7 +2968,6 @@ fn splash_screen(ctx: &egui::Context, t: f32, animated: bool) {
                     );
                 }
             }
-
         });
 }
 
@@ -3016,7 +3177,13 @@ fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32, show_tile: 
 
     // Position along the top-left → bottom-right diagonal, normalized to 0..1.
     let span = 2.0 * 88.0 * s;
-    let shade = |p: Pos2| fa(lerp_color(light, dark, ((p.x - c.x) + (p.y - c.y)) / span + 0.5));
+    let shade = |p: Pos2| {
+        fa(lerp_color(
+            light,
+            dark,
+            ((p.x - c.x) + (p.y - c.y)) / span + 0.5,
+        ))
+    };
 
     let mut mesh = Mesh::default();
     let mut quad = |pts: [Pos2; 4]| {
