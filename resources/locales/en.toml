@@ -33,7 +33,7 @@ no_tabs = "No open tabs — use the buttons above."
 [about]
 branch = "branch"
 commit = "commit"
-tagline = "A modular tool for security and analysis."
+tagline = "A modular tool for security, analysis and audit."
 view_license = "View license"
 github = "GitHub ↗"
 created_by = "Created by the CRC BARRACUDA"
