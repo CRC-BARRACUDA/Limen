@@ -2089,9 +2089,13 @@ fn modules_page(
             shown += 1;
         }
 
-        // Available in the org (not already installed). They stream in from
-        // GitHub in parallel, so each card animates from its own arrival time
-        // (falling back to the tab-reveal for ones already present).
+        // Available in the org (not already installed). These stream in from
+        // GitHub in parallel, so a card has two possible entrances and takes
+        // whichever is newer: it either lands *after* the page revealed, and
+        // pops in alone the moment it arrives, or it was already listed and
+        // joins the page's cascade at its position. Keying only off arrival —
+        // as this did — meant a card fetched minutes ago had a long-past start
+        // time and snapped in without animating whenever the tab was reopened.
         for r in remote {
             if *filter == ModuleFilter::Installed
                 || installed_names.contains(r.name.as_str())
@@ -2100,8 +2104,11 @@ fn modules_page(
                 continue;
             }
             let id = egui::Id::new(("availcard", r.name.as_str()));
-            let arrival = remote_arrivals.get(&r.name).copied().unwrap_or(reveal_at);
-            reveal_card(ui, id, 0, arrival, now, animate, 0.0, |ui| {
+            let (start, k) = match remote_arrivals.get(&r.name) {
+                Some(&a) if a > reveal_at => (a, 0),
+                _ => (reveal_at, shown),
+            };
+            reveal_card(ui, id, k, start, now, animate, 0.0, |ui| {
                 available_card(ui, r, installing, add, &mut tag_click);
             });
             shown += 1;
