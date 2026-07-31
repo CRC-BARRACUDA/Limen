@@ -653,6 +653,23 @@ pub fn window_resize_grips(ctx: &egui::Context) {
     let rect = ctx.screen_rect();
     let b = 6.0_f32; // edge thickness
     let c = 14.0_f32; // corner arm length
+
+    // Only put the grips up when the pointer is actually near an edge. They are
+    // foreground areas, so while they exist they sit above the central panel and
+    // take its pointer input — which cost the module list its wheel scrolling in
+    // a windowed frame, while a maximized one (grips disabled, above) scrolled
+    // fine. Nothing is lost by skipping them: they can only be grabbed at an
+    // edge anyway, and once a drag starts the OS owns the resize.
+    let Some(p) = ctx.input(|i| i.pointer.latest_pos()) else {
+        return; // no pointer on screen — nothing could grab a grip
+    };
+    let near_edge = p.x <= rect.left() + c
+        || p.x >= rect.right() - c
+        || p.y <= rect.top() + c
+        || p.y >= rect.bottom() - c;
+    if !near_edge {
+        return;
+    }
     let r = |x0: f32, y0: f32, x1: f32, y1: f32| {
         egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
     };
@@ -980,6 +997,25 @@ pub enum Widget {
         #[serde(default)]
         default: String,
     },
+    /// A filesystem path input. The user can type a path, drop a file or folder
+    /// onto it, or press Browse for the OS picker. Its `id` keys the chosen path
+    /// in params, exactly like [`Widget::Text`].
+    File {
+        id: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        placeholder: String,
+        #[serde(default)]
+        default: String,
+        /// Pick a directory rather than a file.
+        #[serde(default)]
+        directory: bool,
+        /// Label for the Browse button. Supplied by the module so it can be
+        /// localized alongside the rest of its view; `ui` stays i18n-free.
+        #[serde(default)]
+        browse: String,
+    },
     /// An animated on/off checkbox; its boolean state is returned in params.
     Checkbox {
         id: String,
@@ -1232,6 +1268,28 @@ fn render_widget(
             let value = inputs.entry(id.clone()).or_insert(initial);
             dropdown(ui, id.clone(), value, options);
         }
+        Widget::File {
+            id,
+            label,
+            placeholder,
+            default,
+            directory,
+            browse,
+        } => {
+            if !label.is_empty() {
+                ui.label(styled(label, LabelStyle::Weak));
+            }
+            let value = inputs.entry(id.clone()).or_insert_with(|| default.clone());
+            let mut path = value.clone();
+            let browse_label = if browse.is_empty() {
+                "Browse…"
+            } else {
+                browse
+            };
+            if file_field(ui, id, &mut path, placeholder, browse_label, *directory) {
+                *value = path;
+            }
+        }
         Widget::Checkbox { id, label, default } => {
             let entry = inputs
                 .entry(id.clone())
@@ -1392,6 +1450,191 @@ fn fmt_num(v: f64) -> String {
     } else {
         format!("{v:.2}")
     }
+}
+
+/// Where a [`Widget::File`] parks a pending Browse request: `(widget id, wants
+/// a directory)`. The app picks it up after rendering and runs the OS dialog on
+/// its own thread — the dialog blocks, and the UI thread only draws.
+pub fn browse_request_id() -> egui::Id {
+    egui::Id::new("limen_browse_request")
+}
+
+/// Marks the frame on which a dropped path was already taken by a field, so a
+/// single drop cannot land in two of them at once.
+fn drop_claim_id() -> egui::Id {
+    egui::Id::new("limen_drop_claimed")
+}
+
+/// Marks the frame on which a field already offered itself as the drop target,
+/// so only one opens even when several could accept what is being dragged.
+fn invite_claim_id() -> egui::Id {
+    egui::Id::new("limen_drop_invited")
+}
+
+/// The field that was armed on the last frame a drag hovered.
+///
+/// A drop arrives one frame *after* the hover ends — `dropped_files` is set on
+/// the same frame `hovered_files` empties — so by then there is no drag left to
+/// test against. This remembers the answer from while it was still visible.
+fn armed_field_id() -> egui::Id {
+    egui::Id::new("limen_drop_armed")
+}
+
+/// The path field the caret is in: `(widget id, wants a directory)`.
+///
+/// winit reports *that* files are hovering but never *where* — on Wayland at
+/// all, and on X11 the XDND coordinates are read and then discarded. With no
+/// cursor to test against, a view holding several fields of the same kind would
+/// always drop into the first. Focus is the tie-break: click the field you mean,
+/// then drop.
+fn focused_field_id() -> egui::Id {
+    egui::Id::new("limen_path_focus")
+}
+
+/// A path field: type it, drop a file or folder on it, or Browse for it.
+///
+/// Returns `true` when `path` changed. Drops are matched against this field's
+/// rect, so a view with several path inputs routes each drop to the one under
+/// the cursor.
+fn file_field(
+    ui: &mut egui::Ui,
+    id: &str,
+    path: &mut String,
+    placeholder: &str,
+    browse_label: &str,
+    directory: bool,
+) -> bool {
+    let ctx = ui.ctx().clone();
+    let frame = ctx.frame_nr();
+    // What is being dragged over the window: `Some(true)` a directory,
+    // `Some(false)` a file, `None` nothing (or a drag whose path the platform
+    // withheld, which we cannot classify and therefore do not invite).
+    let dragged_is_dir = ctx.input(|i| {
+        i.raw
+            .hovered_files
+            .iter()
+            .find_map(|f| f.path.as_ref())
+            .map(|p| p.is_dir())
+    });
+    // Every field that could take this thing opens, so all the valid targets are
+    // visible at once — dragging a file over a directory field still invites
+    // nothing, and vice versa.
+    let suits_me = dragged_is_dir == Some(directory);
+    // Where the pointer is, asked of the OS: winit reports the drag but never
+    // its position. `None` where that query is unavailable — a Wayland session,
+    // macOS — and the caret becomes the tie-break instead.
+    let drag_pos = suits_me.then(|| crate::cursor::drag_pos(&ctx)).flatten();
+    let mut changed = false;
+
+    let row = ui.horizontal(|ui| {
+        // Lay the button out first, right-aligned, and give the field whatever
+        // is left. `outline_button`'s size argument is only a *minimum*, so a
+        // long label — "Choose folder…", or any translation of it — grows the
+        // button; reserving a fixed width for it pushed the row off-screen.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if outline_button(ui, browse_label, egui::Vec2::ZERO).clicked() {
+                ctx.data_mut(|d| d.insert_temp(browse_request_id(), (id.to_string(), directory)));
+            }
+            let field_w = ui.available_width().max(80.0);
+            let before = path.clone();
+            let resp = text_field(ui, path, placeholder, field_w, false);
+            changed |= *path != before;
+
+            // Remember where the caret is, so a drag with no cursor to follow
+            // still knows which of several same-kind fields the user means.
+            if resp.has_focus() {
+                ctx.data_mut(|d| d.insert_temp(focused_field_id(), (id.to_string(), directory)));
+            }
+        });
+    });
+
+    // A collision box around the row, tested against the cursor: enter it and
+    // this field becomes the drop zone, leave and it goes back to being a text
+    // box. The box follows the zone as it grows — sized from *last* frame's
+    // openness — so moving down into the expanded area keeps it open instead of
+    // falling straight back out of the rect that opened it.
+    const GROW: f32 = 44.0;
+    let r = row.response.rect;
+    let was_open = ctx
+        .data(|d| d.get_temp::<f32>(egui::Id::new(("dropopen", id))))
+        .unwrap_or(0.0);
+    let hit = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), r.height() + GROW * was_open))
+        .expand(6.0);
+
+    // Only the field the cursor is actually in opens. Without a cursor to test
+    // — a Wayland session, macOS — fall back to showing every candidate and
+    // arming the focused one, since otherwise nothing would open at all.
+    let focused = ctx.data(|d| d.get_temp::<(String, bool)>(focused_field_id()));
+    let (want_open, want_armed) = match drag_pos {
+        Some(pos) => {
+            let inside = suits_me && hit.contains(pos);
+            (inside, inside)
+        }
+        None => {
+            let mine = focused.as_ref().is_some_and(|(f, _)| f == id);
+            let elsewhere = focused
+                .as_ref()
+                .is_some_and(|(f, dir)| f != id && *dir == directory);
+            let taken = ctx.data(|d| d.get_temp::<u64>(invite_claim_id())) == Some(frame);
+            (suits_me, suits_me && (mine || (!elsewhere && !taken)))
+        }
+    };
+    if want_armed {
+        ctx.data_mut(|d| {
+            d.insert_temp(invite_claim_id(), frame);
+            // The drop itself arrives a frame later, by which point
+            // `hovered_files` is empty and nothing can be recomputed — so
+            // remember who was armed while we still know.
+            d.insert_temp(armed_field_id(), id.to_string());
+        });
+    }
+    let open = anim_bool(ui, egui::Id::new(("dropzone", id)), want_open, 0.16);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(("dropopen", id)), open));
+
+    // While open, the field *is* the drop target: it grows downward and a cross
+    // marks the middle. Painted over the row rather than swapped for it, so the
+    // layout below eases apart instead of jumping.
+    if open > 0.0 {
+        let extra = GROW * open;
+        ui.add_space(extra);
+        let zone = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), r.height() + extra));
+        let armed = anim_bool(ui, egui::Id::new(("dropzonelit", id)), want_armed, 0.16);
+
+        let p = ui.painter();
+        let rounding = egui::Rounding::same(3.0);
+        // ACCENT is the only colour used — no tinted wash underneath it. Washing
+        // one amber over another is what muddied this into brown; the zone keeps
+        // the ordinary input background and speaks entirely through its outline.
+        let k = (0.4 + 0.6 * armed) * open;
+        // Opaque at full open, so the row underneath is covered rather than
+        // showing through the zone.
+        p.rect_filled(zone, rounding, with_alpha(color::BG_ELEVATED, open));
+        p.rect_stroke(
+            zone,
+            rounding,
+            egui::Stroke::new(1.0 + 0.5 * armed, with_alpha(color::ACCENT, k)),
+        );
+        // The cross, drawn rather than typed — no glyph to depend on.
+        let c = zone.center();
+        let arm = 13.0 * open;
+        let stroke = egui::Stroke::new(1.5 + 0.5 * armed, with_alpha(color::ACCENT, k));
+        p.line_segment([c - egui::vec2(arm, 0.0), c + egui::vec2(arm, 0.0)], stroke);
+        p.line_segment([c - egui::vec2(0.0, arm), c + egui::vec2(0.0, arm)], stroke);
+    }
+
+    // The drop lands a frame after the hover ends, so it cannot be matched
+    // against a live drag — the field armed on the last hovered frame takes it,
+    // provided the kind still agrees.
+    if let Some(dropped) = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone())) {
+        let armed_id = ctx.data(|d| d.get_temp::<String>(armed_field_id()));
+        let taken = ctx.data(|d| d.get_temp::<u64>(drop_claim_id())) == Some(frame);
+        if !taken && armed_id.as_deref() == Some(id) && dropped.is_dir() == directory {
+            *path = dropped.display().to_string();
+            changed = true;
+            ctx.data_mut(|d| d.insert_temp(drop_claim_id(), frame));
+        }
+    }
+    changed
 }
 
 /// Where [`render_view`] parks the current entrance's start time, for widgets
@@ -1846,7 +2089,7 @@ fn collect_ids(
 ) {
     for w in widgets {
         match w {
-            Widget::Text { id, .. } | Widget::Select { id, .. } => {
+            Widget::Text { id, .. } | Widget::Select { id, .. } | Widget::File { id, .. } => {
                 if let Some(v) = inputs.get(id) {
                     map.insert(id.clone(), Value::String(v.clone()));
                 }

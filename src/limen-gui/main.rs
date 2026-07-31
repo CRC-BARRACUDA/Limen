@@ -9,6 +9,7 @@
 //! is on a background thread — see [`worker`].
 
 mod app;
+mod cursor;
 mod i18n;
 mod ui;
 mod worker;
@@ -18,7 +19,30 @@ use std::path::PathBuf;
 use eframe::egui;
 use limen_core::Config;
 
+/// Run on X11 rather than Wayland, where both are available.
+///
+/// winit implements no file drag-and-drop on Wayland at all — the backend emits
+/// neither `HoveredFile` nor `DroppedFile` — so a path field could never be
+/// filled by dropping onto it there. Under X11 (including XWayland) the drop
+/// arrives, so we prefer it: winit picks X11 when `WAYLAND_DISPLAY` is unset.
+///
+/// Only when there is an X display to fall back to. On a Wayland session with no
+/// XWayland, forcing this would leave the app unable to open a window at all,
+/// which is a far worse trade than losing drag-and-drop.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn prefer_x11() {
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        // SAFETY: single-threaded here — this runs first thing in `main`, before
+        // any thread is spawned and before winit reads the environment.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn prefer_x11() {}
+
 fn main() -> eframe::Result<()> {
+    prefer_x11();
     let dirs = resolve_search_dirs();
 
     let mut viewport = egui::ViewportBuilder::default()

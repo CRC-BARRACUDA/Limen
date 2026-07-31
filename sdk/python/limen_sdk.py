@@ -74,6 +74,29 @@ class Text(Widget):
         }
 
 
+class File(Widget):
+    """A filesystem path input keyed by `id` (the chosen path comes back in the
+    method params, exactly like `Text`).
+
+    The user can type a path, drag a file or folder onto the field, or press
+    Browse for the OS picker. `directory=True` picks a folder instead of a file
+    and only accepts folders when dropped. `browse` is the button's label — it
+    lives here, rather than in the host, so a module can translate it alongside
+    the rest of its view."""
+
+    def __init__(self, id, label="", placeholder="", default="", directory=False,
+                 browse=""):
+        self.id, self.label, self.placeholder = id, label, placeholder
+        self.default, self.directory, self.browse = default, bool(directory), browse
+
+    def to_spec(self):
+        return {
+            "kind": "file", "id": self.id, "label": self.label,
+            "placeholder": self.placeholder, "default": self.default,
+            "directory": self.directory, "browse": self.browse,
+        }
+
+
 class Select(Widget):
     """A dropdown keyed by `id`; `options` are the choices and the selection comes
     back in the method params."""
@@ -379,10 +402,16 @@ class Module:
 
     # ---- dispatch --------------------------------------------------------- #
 
+    def _own_capability(self):
+        """The capability a Button defaults to. Set before *any* serialization —
+        a method that returns a new view is as common as the `ui` handler, and
+        buttons in it would otherwise carry an empty capability and do nothing."""
+        _CURRENT_CAPABILITY[0] = self.capabilities[0] if self.capabilities else ""
+
     def _view_spec(self):
         if self._ui is None:
             raise RuntimeError("this module has no UI")
-        _CURRENT_CAPABILITY[0] = self.capabilities[0] if self.capabilities else ""
+        self._own_capability()
         view = self._ui()
         return view.to_spec() if hasattr(view, "to_spec") else view
 
@@ -424,6 +453,7 @@ class Module:
             # A method may return a Window/Widget object directly (like the ui
             # handler); serialize it to its spec so it's JSON-encodable.
             if hasattr(result, "to_spec"):
+                self._own_capability()
                 result = result.to_spec()
             error = None
         except Exception as exc:  # noqa: BLE001

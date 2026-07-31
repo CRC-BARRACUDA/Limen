@@ -19,6 +19,19 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 eframe = { workspace = true }
 toml = { workspace = true }
+rfd = "0.17.2"
+
+# Ask the OS where the cursor is during a file drag — winit reports the drag but
+# never its position, on any backend. X11 only; a Wayland session simply gets
+# `None` and falls back to focus-based drop routing.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # Embed the app icon + version info into the .exe (Explorer / taskbar file icon).
 [target.'cfg(windows)'.build-dependencies]
