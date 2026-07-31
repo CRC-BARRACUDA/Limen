@@ -1225,6 +1225,14 @@ impl eframe::App for LimenApp {
         }
         if lang_changed {
             self.save_language();
+            // Re-play the current page's staggered entrance so it animates into
+            // the new language (clearing the timers re-arms them on the next
+            // frame; only the active page is non-None, so only it re-reveals).
+            self.about_revealed_at = None;
+            self.settings_revealed_at = None;
+            self.developer_revealed_at = None;
+            self.license_revealed_at = None;
+            self.modules_revealed_at = None;
             // Installed cards re-resolve their description in-place (localized_desc
             // reads the module's locales/ folder, cached per language) — no engine
             // reload. The org list, though, resolved its descriptions over the
