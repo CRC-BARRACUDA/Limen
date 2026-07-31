@@ -717,6 +717,17 @@ impl eframe::App for LimenApp {
         let now_t = ctx.input(|i| i.time);
         self.drain_events(now_t);
         self.drain_file_picks();
+        // Keep the screen→UI mapping current, so a file drag (during which the
+        // window system stops reporting the pointer) can still be located.
+        crate::cursor::calibrate(ctx);
+        // A file drag produces exactly one event — `HoveredFile` — and then
+        // silence: no cursor motion is reported for its duration. egui would go
+        // idle on the very next frame, freezing the cursor sample taken as the
+        // drag entered, so the drop zone would follow nothing. Keep asking for
+        // frames while one is in flight, and only then.
+        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            ctx.request_repaint();
+        }
 
         // Apply the global UI scale (set_zoom_factor no-ops if unchanged).
         ctx.set_zoom_factor(self.ui_scale / 100.0);
