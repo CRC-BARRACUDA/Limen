@@ -43,6 +43,8 @@ pub struct ModuleSpec {
     pub description: Option<String>,
     /// Module authors.
     pub authors: Vec<String>,
+    /// Free-form tags for grouping/filtering in the module manager.
+    pub tags: Vec<String>,
     /// GitHub repo (`owner/repo` or full URL), if the module has one.
     pub repo: Option<String>,
     pub capabilities: Vec<String>,
@@ -71,6 +73,7 @@ impl ModuleSpec {
             version: manifest.module.version,
             description: manifest.module.description,
             authors: manifest.module.authors,
+            tags: manifest.module.tags,
             repo: manifest.module.repo,
             capabilities: manifest.provides.capabilities,
             requires: manifest.requires.capabilities,
@@ -920,6 +923,7 @@ mod spec_tests {
             version: "0".into(),
             description: None,
             authors: vec![],
+            tags: vec![],
             repo: None,
             capabilities: vec![],
             requires: BTreeMap::new(),

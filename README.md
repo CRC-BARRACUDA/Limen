@@ -171,6 +171,7 @@ manifest:
 name = "local-devices"                # the identifier other modules resolve
 display_name = "Local Devices"        # pretty name on the card (falls back to name)
 description = "Enumerates locally attached devices."
+tags = ["hardware", "inventory"]       # grouping/filtering in the module manager
 version = "0.1.0"
 language = "native"          # or "python" | "js" | "lua"
 entry = "local_devices"      # binary/script/lib entry
@@ -185,7 +186,9 @@ subprocess = true
 ```
 
 `display_name` and `description` are what the module card shows, in the installed
-list and in the available-modules list alike. Both are the **English defaults** —
+list and in the available-modules list alike. `tags` renders as clickable `#chips`
+on the card — clicking one filters the list by it, and tags are matched by the
+search box too. Both are the **English defaults** —
 add a `locales/<lang>.toml` next to the manifest with `[module] title` /
 `description` to override them per language:
 

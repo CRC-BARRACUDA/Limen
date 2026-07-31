@@ -74,6 +74,12 @@ pub struct ModuleMeta {
     /// Module authors (shown in the module list).
     #[serde(default)]
     pub authors: Vec<String>,
+    /// Free-form tags for grouping and filtering in the module manager, e.g.
+    /// `["security", "inventory", "ukraine"]`. Lowercase single words by
+    /// convention; the manager matches them in its search box and lets the user
+    /// click one to filter by it.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// The module's GitHub repo (`owner/repo` or a full URL), for the
     /// "view on GitHub" action in the module list.
     #[serde(default)]
@@ -285,6 +291,27 @@ mod tests {
         assert_eq!(m.requires.capabilities["crowdstrike.rtr"], ">=1.0");
         // No [permissions] table => nothing sensitive.
         assert!(!m.permissions.sensitive());
+        // Absent `tags` is an empty list, never an error — every manifest
+        // predating the field must still parse.
+        assert!(m.module.tags.is_empty());
+    }
+
+    /// Tags are optional metadata the module manager groups and filters by.
+    #[test]
+    fn parses_tags() {
+        let m = Manifest::from_toml_str(
+            r#"
+            [module]
+            name = "usb"
+            version = "0.1.0"
+            language = "python"
+            entry = "main.py"
+            tags = ["security", "inventory"]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(m.module.tags, vec!["security", "inventory"]);
     }
 
     #[test]

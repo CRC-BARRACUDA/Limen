@@ -2093,6 +2093,9 @@ fn modules_page(
 
     let query = search.to_lowercase();
     let installed_names: HashSet<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+    // A tag clicked on any card; applied to the search box once the list is done
+    // being drawn, since `search` is what the loop above is filtering on.
+    let mut tag_click: Option<String> = None;
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(4.0);
@@ -2133,6 +2136,7 @@ fn modules_page(
                     remove,
                     update,
                     toggle_pin,
+                    &mut tag_click,
                 );
             });
             shown += 1;
@@ -2151,7 +2155,7 @@ fn modules_page(
             let id = egui::Id::new(("availcard", r.name.as_str()));
             let arrival = remote_arrivals.get(&r.name).copied().unwrap_or(reveal_at);
             reveal_card(ui, id, 0, arrival, now, animate, 0.0, |ui| {
-                available_card(ui, r, installing, add);
+                available_card(ui, r, installing, add, &mut tag_click);
             });
             shown += 1;
         }
@@ -2173,6 +2177,12 @@ fn modules_page(
             });
         }
     });
+
+    // Clicking a tag filters by it: drop it into the search box, which every
+    // card already matches against.
+    if let Some(t) = tag_click {
+        *search = t;
+    }
 }
 
 fn module_matches(m: &ModuleSpec, query: &str) -> bool {
@@ -2186,6 +2196,7 @@ fn module_matches(m: &ModuleSpec, query: &str) -> bool {
         || m.capabilities
             .iter()
             .any(|c| c.to_lowercase().contains(query))
+        || m.tags.iter().any(|t| t.to_lowercase().contains(query))
 }
 
 fn remote_matches(r: &RemoteModule, query: &str) -> bool {
@@ -2196,6 +2207,7 @@ fn remote_matches(r: &RemoteModule, query: &str) -> bool {
             .unwrap_or("")
             .to_lowercase()
             .contains(query)
+        || r.tags.iter().any(|t| t.to_lowercase().contains(query))
 }
 
 /// A single installed-module card, in its own rounded box. `from_git` shows the
@@ -2284,6 +2296,7 @@ fn module_card(
     remove: &mut Option<String>,
     update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
+    tag_click: &mut Option<String>,
 ) {
     // This card is mid-update; another install/update is running somewhere.
     let this_busy = installing.as_deref() == Some(m.name.as_str());
@@ -2333,6 +2346,16 @@ fn module_card(
                         if let Some(desc) = localized_desc(ui, m) {
                             ui.add_space(6.0);
                             ui.label(desc);
+                        }
+                        if !m.tags.is_empty() {
+                            ui.add_space(6.0);
+                            ui.horizontal_wrapped(|ui| {
+                                for t in &m.tags {
+                                    if tag_chip(ui, t).clicked() {
+                                        *tag_click = Some(t.clone());
+                                    }
+                                }
+                            });
                         }
                         // Host-privilege heads-up: some methods may need admin on
                         // this machine. Informational only — no listing, no prompt.
@@ -2534,6 +2557,7 @@ fn available_card(
     r: &RemoteModule,
     installing: &Option<String>,
     add: &mut Option<String>,
+    tag_click: &mut Option<String>,
 ) {
     // While any install runs, every Install button is disabled; the one being
     // installed shows a spinner in place of the button.
@@ -2577,6 +2601,16 @@ fn available_card(
                         if let Some(desc) = &r.description {
                             ui.add_space(6.0);
                             ui.label(desc);
+                        }
+                        if !r.tags.is_empty() {
+                            ui.add_space(6.0);
+                            ui.horizontal_wrapped(|ui| {
+                                for t in &r.tags {
+                                    if tag_chip(ui, t).clicked() {
+                                        *tag_click = Some(t.clone());
+                                    }
+                                }
+                            });
                         }
                         // Git status of what a fresh install would fetch — same
                         // shape as installed modules (branch / commit).
@@ -2675,6 +2709,57 @@ fn repo_url(repo: &str) -> String {
 }
 
 /// A small rounded pill, like Zed's category tags.
+/// A clickable tag chip, drawn as `#tag`.
+///
+/// Distinct from [`badge`] (capabilities), which is inert: a tag is the user's
+/// handle for filtering, so it reacts to hover and clicking one puts it in the
+/// search box. Laid out by measuring the galley first, so hover is correct on
+/// the same frame rather than a frame late.
+fn tag_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        format!("#{text}"),
+        egui::FontId::proportional(11.0),
+        ui::color::ACCENT,
+    );
+    let pad = egui::vec2(7.0, 2.5);
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hot = resp.hovered();
+        let p = ui.painter();
+        p.rect_filled(
+            rect,
+            egui::Rounding::same(4.0),
+            if hot {
+                ui::color::BG_HOVER
+            } else {
+                ui::color::BG_WIDGET
+            },
+        );
+        p.rect_stroke(
+            rect,
+            egui::Rounding::same(4.0),
+            egui::Stroke::new(
+                1.0_f32,
+                if hot {
+                    ui::color::ACCENT
+                } else {
+                    ui::color::BORDER
+                },
+            ),
+        );
+        p.galley(
+            rect.min + pad,
+            galley,
+            if hot {
+                ui::color::ACCENT_BRIGHT
+            } else {
+                ui::color::ACCENT
+            },
+        );
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn badge(ui: &mut egui::Ui, text: &str) {
     egui::Frame::none()
         .fill(ui::color::BG_WIDGET)

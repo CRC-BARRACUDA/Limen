@@ -123,10 +123,10 @@ fn load_cache() -> HashMap<String, CacheEntry> {
 }
 
 fn save_cache(cache: &HashMap<String, CacheEntry>) {
-    if let Some(p) = cache_path() {
-        if let Ok(s) = serde_json::to_string(cache) {
-            let _ = std::fs::write(p, s);
-        }
+    if let Some(p) = cache_path()
+        && let Ok(s) = serde_json::to_string(cache)
+    {
+        let _ = std::fs::write(p, s);
     }
 }
 
@@ -147,10 +147,10 @@ fn conditional_get(flags: &[&str], accept: Option<&str>, url: &str) -> Option<St
     if let Some(t) = TOKEN.read().unwrap().as_deref() {
         cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
     }
-    if let Some(p) = &prev {
-        if !p.etag.is_empty() {
-            cmd.arg("-H").arg(format!("If-None-Match: {}", p.etag));
-        }
+    if let Some(p) = &prev
+        && !p.etag.is_empty()
+    {
+        cmd.arg("-H").arg(format!("If-None-Match: {}", p.etag));
     }
     // Append `\n@@LIMEN_META@@ <status> <etag>` after the body (curl 7.84+ for
     // %header{}; older curl yields no etag → we simply don't cache).
@@ -198,6 +198,8 @@ pub struct RemoteModule {
     pub version: Option<String>,
     /// Capabilities the module provides (from the manifest).
     pub capabilities: Vec<String>,
+    /// Free-form tags from the manifest, for grouping/filtering in the manager.
+    pub tags: Vec<String>,
     /// The repo's default branch on GitHub.
     pub branch: Option<String>,
     /// Short commit of that branch's tip (what a fresh install would fetch).
@@ -311,6 +313,7 @@ pub fn fetch_remote_module(c: &RepoCandidate) -> Option<RemoteModule> {
         url: c.html_url.clone(),
         version: Some(m.module.version.clone()),
         capabilities: m.provides.capabilities.clone(),
+        tags: m.module.tags.clone(),
         commit: fetch_latest_commit(&c.org, &c.name, &c.default_branch),
         branch: Some(c.default_branch.clone()),
     })
