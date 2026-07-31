@@ -36,6 +36,8 @@ pub enum Launch {
 #[derive(Debug, Clone)]
 pub struct ModuleSpec {
     pub name: String,
+    /// Pretty display name for the module list (falls back to `name`).
+    pub display_name: Option<String>,
     pub version: String,
     /// One-line human description.
     pub description: Option<String>,
@@ -65,6 +67,7 @@ impl ModuleSpec {
         let launch = build_launch(dir, &manifest)?;
         Ok(Self {
             name: manifest.module.name,
+            display_name: manifest.module.display_name,
             version: manifest.module.version,
             description: manifest.module.description,
             authors: manifest.module.authors,
@@ -913,6 +916,7 @@ mod spec_tests {
     fn spec(launch: Launch) -> ModuleSpec {
         ModuleSpec {
             name: "m".into(),
+            display_name: None,
             version: "0".into(),
             description: None,
             authors: vec![],

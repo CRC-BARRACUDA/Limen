@@ -63,6 +63,11 @@ pub struct ModuleMeta {
     pub entry: String,
     #[serde(default)]
     pub abi: Abi,
+    /// A pretty display name for the module list (the default/English one;
+    /// localizable via `locales/<lang>.toml` `[module] title`). Falls back to
+    /// `name` (the identifier) when absent.
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// One-line human description (shown in the module list).
     #[serde(default)]
     pub description: Option<String>,
@@ -226,20 +231,28 @@ impl Manifest {
     }
 }
 
-/// A module's card description translated for `lang`, read from
-/// `<dir>/locales/<lang>.toml` (`[module] description = "…"`). `None` for `"en"`
-/// (the manifest's own language) or when no such file/key exists — the caller
-/// then keeps the manifest's default description.
-pub fn localized_description(dir: &Path, lang: &str) -> Option<String> {
+/// A `[module]` field (`title` / `description`) translated for `lang`, read from
+/// `<dir>/locales/<lang>.toml`. `None` for `"en"` (the manifest's own language)
+/// or when no such file/key exists — the caller then keeps the manifest default.
+fn localized_module_field(dir: &Path, lang: &str, field: &str) -> Option<String> {
     if lang == "en" {
         return None;
     }
     let text = std::fs::read_to_string(dir.join("locales").join(format!("{lang}.toml"))).ok()?;
     let val: toml::Value = toml::from_str(&text).ok()?;
-    val.get("module")?
-        .get("description")?
-        .as_str()
-        .map(str::to_string)
+    val.get("module")?.get(field)?.as_str().map(str::to_string)
+}
+
+/// A module's card **description** translated for `lang` (falls back to the
+/// manifest's default `description`).
+pub fn localized_description(dir: &Path, lang: &str) -> Option<String> {
+    localized_module_field(dir, lang, "description")
+}
+
+/// A module's card **display title** translated for `lang` (falls back to the
+/// manifest's `display_name`, then its `name`).
+pub fn localized_title(dir: &Path, lang: &str) -> Option<String> {
+    localized_module_field(dir, lang, "title")
 }
 
 #[cfg(test)]

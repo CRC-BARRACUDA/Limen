@@ -185,8 +185,10 @@ fn conditional_get(flags: &[&str], accept: Option<&str>, url: &str) -> Option<St
 /// repo's `limen.toml` on GitHub, so the manager can show it **before** install.
 #[derive(Debug, Clone)]
 pub struct RemoteModule {
-    /// Module name (repo name without the `limen-` prefix).
+    /// Module name (repo name without the `limen-` prefix) — the identifier.
     pub name: String,
+    /// Pretty display title for the card (localized), if the module supplies one.
+    pub title: Option<String>,
     /// `owner/repo`, for `limen add`.
     pub repo: String,
     pub description: Option<String>,
@@ -288,19 +290,22 @@ pub fn fetch_remote_module(c: &RepoCandidate) -> Option<RemoteModule> {
     if native && !crate::registry::native_release_ready(&repo) {
         return None;
     }
-    // Prefer a description translated for the active UI language, fetched from
-    // the repo's `locales/<lang>.toml`; fall back to the manifest's default (and
-    // then the GitHub repo blurb). English is the manifest's own language, so it
-    // needs no extra fetch.
+    // Prefer a title/description translated for the active UI language, fetched
+    // from the repo's `locales/<lang>.toml`; fall back to the manifest defaults
+    // (`display_name`/`description`, then the GitHub blurb). English is the
+    // manifest's own language, so it needs no extra fetch.
+    let manifest_title = m.module.display_name.clone();
     let manifest_desc = m.module.description.clone().or_else(|| c.description.clone());
     let lang = limen_proto::locale::current();
-    let description = if lang == "en" {
-        manifest_desc
+    let (title, description) = if lang == "en" {
+        (manifest_title, manifest_desc)
     } else {
-        fetch_locale_description(&c.org, &c.name, &c.default_branch, &lang).or(manifest_desc)
+        let (lt, ld) = fetch_locale_meta(&c.org, &c.name, &c.default_branch, &lang);
+        (lt.or(manifest_title), ld.or(manifest_desc))
     };
     Some(RemoteModule {
         name: c.name.strip_prefix("limen-").unwrap_or(&c.name).to_string(),
+        title,
         repo,
         description,
         url: c.html_url.clone(),
@@ -333,23 +338,30 @@ fn fetch_latest_commit(org: &str, repo: &str, branch: &str) -> Option<String> {
     Some(sha.chars().take(7).collect())
 }
 
-/// Fetch a module's translated card description from its repo's
-/// `locales/<lang>.toml` (`[module] description = "…"`). `None` if the module
-/// ships no such file (a 404 under `-f`) or it has no description key — the
-/// caller then falls back to the manifest default.
-fn fetch_locale_description(org: &str, repo: &str, branch: &str, lang: &str) -> Option<String> {
-    let url =
-        format!("https://raw.githubusercontent.com/{org}/{repo}/{branch}/locales/{lang}.toml");
-    let out = curl_get(&["-fsSL"], None, &url).ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(out.stdout).ok()?;
-    let val: toml::Value = toml::from_str(&text).ok()?;
-    val.get("module")?
-        .get("description")?
-        .as_str()
-        .map(String::from)
+/// Fetch a module's translated `(title, description)` from its repo's
+/// `locales/<lang>.toml` (`[module] title`/`description`) in a single request.
+/// Either element is `None` if the module ships no such file (a 404 under `-f`)
+/// or lacks that key — the caller then falls back to the manifest defaults.
+fn fetch_locale_meta(
+    org: &str,
+    repo: &str,
+    branch: &str,
+    lang: &str,
+) -> (Option<String>, Option<String>) {
+    let get = || -> Option<(Option<String>, Option<String>)> {
+        let url =
+            format!("https://raw.githubusercontent.com/{org}/{repo}/{branch}/locales/{lang}.toml");
+        let out = curl_get(&["-fsSL"], None, &url).ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(out.stdout).ok()?;
+        let val: toml::Value = toml::from_str(&text).ok()?;
+        let module = val.get("module")?;
+        let field = |k: &str| module.get(k).and_then(|v| v.as_str()).map(String::from);
+        Some((field("title"), field("description")))
+    };
+    get().unwrap_or((None, None))
 }
 
 /// Fetch and parse `org/repo`'s root `limen.toml` from its default branch.
