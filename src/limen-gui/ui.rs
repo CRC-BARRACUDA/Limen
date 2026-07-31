@@ -653,6 +653,23 @@ pub fn window_resize_grips(ctx: &egui::Context) {
     let rect = ctx.screen_rect();
     let b = 6.0_f32; // edge thickness
     let c = 14.0_f32; // corner arm length
+
+    // Only put the grips up when the pointer is actually near an edge. They are
+    // foreground areas, so while they exist they sit above the central panel and
+    // take its pointer input — which cost the module list its wheel scrolling in
+    // a windowed frame, while a maximized one (grips disabled, above) scrolled
+    // fine. Nothing is lost by skipping them: they can only be grabbed at an
+    // edge anyway, and once a drag starts the OS owns the resize.
+    let Some(p) = ctx.input(|i| i.pointer.latest_pos()) else {
+        return; // no pointer on screen — nothing could grab a grip
+    };
+    let near_edge = p.x <= rect.left() + c
+        || p.x >= rect.right() - c
+        || p.y <= rect.top() + c
+        || p.y >= rect.bottom() - c;
+    if !near_edge {
+        return;
+    }
     let r = |x0: f32, y0: f32, x1: f32, y1: f32| {
         egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
     };

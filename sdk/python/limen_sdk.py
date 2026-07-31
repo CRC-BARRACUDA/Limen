@@ -402,10 +402,16 @@ class Module:
 
     # ---- dispatch --------------------------------------------------------- #
 
+    def _own_capability(self):
+        """The capability a Button defaults to. Set before *any* serialization —
+        a method that returns a new view is as common as the `ui` handler, and
+        buttons in it would otherwise carry an empty capability and do nothing."""
+        _CURRENT_CAPABILITY[0] = self.capabilities[0] if self.capabilities else ""
+
     def _view_spec(self):
         if self._ui is None:
             raise RuntimeError("this module has no UI")
-        _CURRENT_CAPABILITY[0] = self.capabilities[0] if self.capabilities else ""
+        self._own_capability()
         view = self._ui()
         return view.to_spec() if hasattr(view, "to_spec") else view
 
@@ -447,6 +453,7 @@ class Module:
             # A method may return a Window/Widget object directly (like the ui
             # handler); serialize it to its spec so it's JSON-encodable.
             if hasattr(result, "to_spec"):
+                self._own_capability()
                 result = result.to_spec()
             error = None
         except Exception as exc:  # noqa: BLE001

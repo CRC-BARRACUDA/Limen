@@ -112,6 +112,14 @@ pub fn drag_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
         return None;
     }
     let screen = screen_pos()?;
+    // Where the query is live, take it at once. The probe below guards against a
+    // *stale* answer, which Windows never gives; running it there only withholds
+    // a correct position until the cursor has moved a couple of pixels, and for
+    // those frames every candidate field opens by focus rather than by cursor —
+    // a zone lighting up away from the pointer at the start of each drag.
+    if imp::POSITION_IS_LIVE {
+        return to_ui_space(ctx, screen);
+    }
     let (first, moved) = ctx
         .data(|d| d.get_temp::<(egui::Pos2, bool)>(drag_probe_id()))
         .unwrap_or((screen, false));
@@ -157,6 +165,11 @@ mod imp {
         CONN.get_or_init(|| x11rb::connect(None).ok()).as_ref()
     }
 
+    /// `QueryPointer` keeps answering under XWayland even when the compositor
+    /// holds the pointer grab — a fixed, plausible, wrong position. The caller
+    /// must watch for movement before believing it.
+    pub const POSITION_IS_LIVE: bool = false;
+
     pub fn screen_pos() -> Option<egui::Pos2> {
         let (c, screen_num) = conn()?;
         let root = c.setup().roots.get(*screen_num)?.root;
@@ -171,6 +184,10 @@ mod imp {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+    /// `GetCursorPos` tracks the cursor throughout an OLE drag, so its answer
+    /// can be used the moment a drag starts.
+    pub const POSITION_IS_LIVE: bool = true;
+
     pub fn screen_pos() -> Option<egui::Pos2> {
         let mut p = POINT { x: 0, y: 0 };
         // SAFETY: `GetCursorPos` only writes the POINT we hand it, and reports
@@ -183,6 +200,9 @@ mod imp {
 #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
 mod imp {
     use eframe::egui;
+
+    /// Never consulted — there is no position to be live.
+    pub const POSITION_IS_LIVE: bool = false;
 
     pub fn screen_pos() -> Option<egui::Pos2> {
         None

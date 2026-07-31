@@ -2123,7 +2123,12 @@ fn modules_page(
         .flat_map(|m| m.capabilities.iter().map(move |c| (c.as_str(), m)))
         .collect();
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    // `auto_shrink` off is what makes the wheel work here, not just a layout
+    // tweak: a shrunk scroll area is only as wide as its widest card, and the
+    // wheel is ignored anywhere outside it — so scrolling did nothing over the
+    // empty space beside the list. Filling the panel makes the whole page take
+    // the wheel.
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(4.0);
         let mut shown = 0;
         let animate = ui::animations_enabled();
