@@ -1,8 +1,0 @@
-[module]
-name = "greeter"
-version = "1.0.0"
-language = "python"
-entry = "main.py"
-
-[provides]
-capabilities = ["greet.hello"]
