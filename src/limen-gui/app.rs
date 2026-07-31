@@ -2091,11 +2091,17 @@ fn modules_page(
     ui.add_space(6.0);
     ui.separator();
 
-    let query = search.to_lowercase();
+    let terms = parse_query(search);
     let installed_names: HashSet<&str> = modules.iter().map(|m| m.name.as_str()).collect();
-    // A tag clicked on any card; applied to the search box once the list is done
-    // being drawn, since `search` is what the loop above is filtering on.
+    // A tag or dependency clicked on any card; applied to the search box once the
+    // list is done being drawn, since `search` is what the loop above filters on.
     let mut tag_click: Option<String> = None;
+    // Which installed module provides each capability, so a dependency can be
+    // shown as the module behind it rather than the raw capability string.
+    let providers: HashMap<&str, &ModuleSpec> = modules
+        .iter()
+        .flat_map(|m| m.capabilities.iter().map(move |c| (c.as_str(), m)))
+        .collect();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(4.0);
@@ -2112,7 +2118,7 @@ fn modules_page(
                 .unwrap_or(usize::MAX)
         });
         for m in ordered {
-            if *filter == ModuleFilter::Available || !module_matches(m, &query) {
+            if *filter == ModuleFilter::Available || !module_matches(m, &terms) {
                 continue;
             }
             let rt = match removing.get(m.name.as_str()) {
@@ -2137,6 +2143,7 @@ fn modules_page(
                     update,
                     toggle_pin,
                     &mut tag_click,
+                    &providers,
                 );
             });
             shown += 1;
@@ -2148,7 +2155,7 @@ fn modules_page(
         for r in remote {
             if *filter == ModuleFilter::Installed
                 || installed_names.contains(r.name.as_str())
-                || !remote_matches(r, &query)
+                || !remote_matches(r, &terms)
             {
                 continue;
             }
@@ -2185,29 +2192,76 @@ fn modules_page(
     }
 }
 
-fn module_matches(m: &ModuleSpec, query: &str) -> bool {
-    query.is_empty()
-        || m.name.to_lowercase().contains(query)
-        || m.description
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase()
-            .contains(query)
-        || m.capabilities
-            .iter()
-            .any(|c| c.to_lowercase().contains(query))
-        || m.tags.iter().any(|t| t.to_lowercase().contains(query))
+/// Which part of a module a search term looks at.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Field {
+    /// The default: identifier and display name only, so a bare word stays
+    /// precise instead of matching half the list through its description.
+    Name,
+    Tag,
+    Description,
+    Capability,
 }
 
-fn remote_matches(r: &RemoteModule, query: &str) -> bool {
-    query.is_empty()
-        || r.name.to_lowercase().contains(query)
-        || r.description
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase()
-            .contains(query)
-        || r.tags.iter().any(|t| t.to_lowercase().contains(query))
+/// One term of a search query: `programs` (name), or `tag:ua` / `description:banned`
+/// / `cap:programs.local` for a specific field.
+#[derive(Clone, PartialEq, Debug)]
+struct Term {
+    field: Field,
+    text: String,
+}
+
+/// Split a query into terms, resolving `field:value` prefixes.
+///
+/// Terms are ANDed, so `tag:ua programs` means "tagged ua *and* named programs".
+/// An unrecognised prefix is not a field — `foo:bar` is searched literally as a
+/// name, so a colon in a name never silently matches nothing.
+fn parse_query(query: &str) -> Vec<Term> {
+    query
+        .split_whitespace()
+        .filter_map(|tok| {
+            let (field, text) = match tok.split_once(':') {
+                Some((k, v)) => match k.to_lowercase().as_str() {
+                    "name" => (Field::Name, v),
+                    "tag" | "tags" => (Field::Tag, v),
+                    "desc" | "description" => (Field::Description, v),
+                    "cap" | "capability" | "capabilities" => (Field::Capability, v),
+                    _ => (Field::Name, tok),
+                },
+                None => (Field::Name, tok),
+            };
+            let text = text.trim().to_lowercase();
+            (!text.is_empty()).then_some(Term { field, text })
+        })
+        .collect()
+}
+
+/// Does any of `haystack` contain `needle`?
+fn any_contains<'a>(haystack: impl IntoIterator<Item = &'a str>, needle: &str) -> bool {
+    haystack
+        .into_iter()
+        .any(|h| h.to_lowercase().contains(needle))
+}
+
+fn module_matches(m: &ModuleSpec, terms: &[Term]) -> bool {
+    terms.iter().all(|t| match t.field {
+        Field::Name => any_contains(
+            [m.name.as_str(), m.display_name.as_deref().unwrap_or("")],
+            &t.text,
+        ),
+        Field::Tag => any_contains(m.tags.iter().map(String::as_str), &t.text),
+        Field::Description => any_contains([m.description.as_deref().unwrap_or("")], &t.text),
+        Field::Capability => any_contains(m.capabilities.iter().map(String::as_str), &t.text),
+    })
+}
+
+fn remote_matches(r: &RemoteModule, terms: &[Term]) -> bool {
+    terms.iter().all(|t| match t.field {
+        Field::Name => any_contains([r.name.as_str(), r.title.as_deref().unwrap_or("")], &t.text),
+        Field::Tag => any_contains(r.tags.iter().map(String::as_str), &t.text),
+        Field::Description => any_contains([r.description.as_deref().unwrap_or("")], &t.text),
+        Field::Capability => any_contains(r.capabilities.iter().map(String::as_str), &t.text),
+    })
 }
 
 /// A single installed-module card, in its own rounded box. `from_git` shows the
@@ -2297,6 +2351,7 @@ fn module_card(
     update: &mut Option<String>,
     toggle_pin: &mut Option<String>,
     tag_click: &mut Option<String>,
+    providers: &HashMap<&str, &ModuleSpec>,
 ) {
     // This card is mid-update; another install/update is running somewhere.
     let this_busy = installing.as_deref() == Some(m.name.as_str());
@@ -2352,7 +2407,7 @@ fn module_card(
                             ui.horizontal_wrapped(|ui| {
                                 for t in &m.tags {
                                     if tag_chip(ui, t).clicked() {
-                                        *tag_click = Some(t.clone());
+                                        *tag_click = Some(format!("tag:{t}"));
                                     }
                                 }
                             });
@@ -2405,26 +2460,24 @@ fn module_card(
                         // integrations (extra features when a provider is loaded).
                         if !m.requires.is_empty() {
                             ui.add_space(6.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} {}",
-                                    i18n::t("modules.requires"),
-                                    m.requires.keys().cloned().collect::<Vec<_>>().join(", ")
-                                ))
-                                .small()
-                                .color(ui::color::TEXT_MUTED),
+                            dep_row(
+                                ui,
+                                &i18n::t("modules.requires"),
+                                ui::color::TEXT_MUTED,
+                                m.requires.keys(),
+                                providers,
+                                tag_click,
                             );
                         }
                         if !m.optional.is_empty() {
                             ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} {}",
-                                    i18n::t("modules.optional"),
-                                    m.optional.keys().cloned().collect::<Vec<_>>().join(", ")
-                                ))
-                                .small()
-                                .color(ui::color::ACCENT),
+                            dep_row(
+                                ui,
+                                &i18n::t("modules.optional"),
+                                ui::color::ACCENT,
+                                m.optional.keys(),
+                                providers,
+                                tag_click,
                             );
                         }
                     },
@@ -2607,7 +2660,7 @@ fn available_card(
                             ui.horizontal_wrapped(|ui| {
                                 for t in &r.tags {
                                     if tag_chip(ui, t).clicked() {
-                                        *tag_click = Some(t.clone());
+                                        *tag_click = Some(format!("tag:{t}"));
                                     }
                                 }
                             });
@@ -2706,6 +2759,63 @@ fn repo_url(repo: &str) -> String {
     } else {
         format!("https://github.com/{repo}")
     }
+}
+
+/// A dependency row: `Requires: programs`, naming the *modules* that provide the
+/// capabilities rather than the capability strings — `programs`, not
+/// `programs.local`.
+///
+/// A name is clickable when something installed provides it; clicking searches
+/// for that module so its card comes into view. When nothing provides it, the
+/// capability string is shown as plain text instead — still visible, but there
+/// is nothing to jump to.
+fn dep_row<'a>(
+    ui: &mut egui::Ui,
+    prefix: &str,
+    prefix_color: egui::Color32,
+    caps: impl Iterator<Item = &'a String>,
+    providers: &HashMap<&str, &ModuleSpec>,
+    find: &mut Option<String>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        ui.label(egui::RichText::new(prefix).small().color(prefix_color));
+        for (i, cap) in caps.enumerate() {
+            if i > 0 {
+                ui.label(
+                    egui::RichText::new("·")
+                        .small()
+                        .color(ui::color::TEXT_MUTED),
+                );
+            }
+            match providers.get(cap.as_str()) {
+                Some(p) => {
+                    let clicked = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(&p.name)
+                                    .small()
+                                    .underline()
+                                    .color(ui::color::ACCENT),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked();
+                    if clicked {
+                        *find = Some(p.name.clone());
+                    }
+                }
+                None => {
+                    ui.label(
+                        egui::RichText::new(cap)
+                            .small()
+                            .color(ui::color::TEXT_MUTED),
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// A small rounded pill, like Zed's category tags.
@@ -3470,6 +3580,76 @@ fn module_view(
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    /// The remote and installed matchers share their term logic, so the simpler
+    /// struct exercises both. `RemoteModule` needs no launch/permission setup.
+    fn spec() -> RemoteModule {
+        RemoteModule {
+            name: "programs-banlist-ua".into(),
+            title: Some("Banned Programs in Ukraine".into()),
+            repo: "CRC-BARRACUDA/limen-programs-banlist-ua".into(),
+            description: Some("Flags installed software banned in Ukraine.".into()),
+            url: String::new(),
+            version: Some("0.1.0".into()),
+            capabilities: vec!["banlist.ua".into()],
+            tags: ["ua", "programs", "ssscip.banlist"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            branch: None,
+            commit: None,
+        }
+    }
+
+    #[test]
+    fn a_bare_word_searches_names_only() {
+        // "banned" is in the display name -> hit.
+        assert!(remote_matches(&spec(), &parse_query("banned")));
+        // "software" appears only in the description -> miss, by design.
+        assert!(!remote_matches(&spec(), &parse_query("software")));
+    }
+
+    #[test]
+    fn qualifiers_target_their_field() {
+        let m = spec();
+        assert!(remote_matches(&m, &parse_query("tag:ua")));
+        assert!(remote_matches(&m, &parse_query("description:software")));
+        assert!(remote_matches(&m, &parse_query("cap:banlist")));
+        assert!(!remote_matches(&m, &parse_query("tag:windows")));
+        // A tag value is not a name, and vice versa.
+        assert!(!remote_matches(&m, &parse_query("name:ssscip")));
+        assert!(remote_matches(&m, &parse_query("tag:ssscip")));
+    }
+
+    #[test]
+    fn terms_are_anded_and_shorthands_work() {
+        let m = spec();
+        assert!(remote_matches(&m, &parse_query("tag:ua programs")));
+        // Second term fails -> whole query fails.
+        assert!(!remote_matches(&m, &parse_query("tag:ua nonsense")));
+        assert!(remote_matches(&m, &parse_query("desc:banned")));
+    }
+
+    #[test]
+    fn an_empty_query_matches_everything() {
+        assert!(parse_query("   ").is_empty());
+        assert!(remote_matches(&spec(), &[]));
+    }
+
+    /// An unknown prefix must not be read as a field, or it would silently match
+    /// nothing instead of being searched literally.
+    #[test]
+    fn an_unknown_prefix_is_searched_literally() {
+        let terms = parse_query("weird:thing");
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].field, Field::Name);
+        assert_eq!(terms[0].text, "weird:thing");
     }
 }
 

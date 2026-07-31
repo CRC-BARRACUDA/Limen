@@ -51,7 +51,7 @@ animations_toggle = "Enable animations"
 [modules]
 title = "Modules"
 reload = "Reload"
-search_hint = "Search modules — local and in the org…"
+search_hint = "Search by name — or tag:ua, description:banned, cap:programs.local"
 open = "Open"
 pin = "Pin"
 unpin = "Unpin"
