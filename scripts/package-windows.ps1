@@ -4,7 +4,7 @@
 # Produces, for the host architecture:
 #   dist\Limen-<ver>-windows-<arch>.7z           distribution archive (GUI + CLI + LICENSE)
 #   dist\Limen-<ver>-windows-<arch>.7z.sha256    its checksum (sha256sum format)
-#   dist\Limen.exe                                raw GUI binary (for the in-app self-update)
+#   dist\Limen-<ver>-windows-<arch>.exe          raw GUI binary (for the in-app self-update)
 #
 # The in-app self-update renames a raw .exe over the running executable, so it
 # needs Limen.exe published as its own release asset - the .7z is for manual
@@ -71,6 +71,9 @@ Write-Host ">> staging artifacts"
 Copy-Item 'target\release\Limen.exe'     (Join-Path $stage 'Limen.exe')
 Copy-Item 'target\release\limen-cli.exe' (Join-Path $stage 'limen-cli.exe')
 Copy-Item 'LICENSE'                      (Join-Path $stage 'LICENSE')
+# JetBrains Mono is embedded in the GUI binary; the OFL requires its licence to
+# travel with any redistribution.
+Copy-Item 'resources\fonts\JetBrainsMono-OFL.txt' (Join-Path $stage 'JetBrainsMono-OFL.txt')
 
 Write-Host ">> writing $stem.7z"
 $archive = Join-Path $dist "$stem.7z"

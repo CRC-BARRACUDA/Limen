@@ -26,6 +26,9 @@ echo ">> staging artifacts"
 install -m755 target/release/Limen "$stage/Limen"
 install -m755 target/release/limen-cli "$stage/limen-cli"
 install -m644 LICENSE "$stage/LICENSE"
+# JetBrains Mono is embedded in the GUI binary; the OFL requires its licence to
+# travel with any redistribution.
+install -m644 resources/fonts/JetBrainsMono-OFL.txt "$stage/JetBrainsMono-OFL.txt"
 
 # Strip to shrink the download (keep the originals in target/ intact).
 strip "$stage/Limen" "$stage/limen-cli" 2>/dev/null || true

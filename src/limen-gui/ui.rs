@@ -683,38 +683,34 @@ pub fn window_resize_grips(ctx: &egui::Context) {
     }
 }
 
-/// Install the Barracuda brand fonts: **Orbitron** (display / proportional) and
-/// **Share Tech Mono** (monospace), matching the platform ui-kit. Both are
-/// Latin-only, so they're inserted at the *front* of each family with egui's
-/// bundled faces kept behind them as fallback — Cyrillic (e.g. the Ukrainian
-/// software-banlist) and emoji still render via those.
+/// Install **JetBrains Mono** as the app's single face, for both the
+/// proportional and the monospace family.
+///
+/// It carries Latin *and* Cyrillic in one file (1363 codepoints), so English and
+/// Ukrainian render in the same typeface. The previous brand pair — Orbitron and
+/// Share Tech Mono — had **zero** Cyrillic glyphs between them, so every
+/// Ukrainian string silently dropped through to egui's bundled Ubuntu-Light,
+/// leaving mixed typefaces on any line that mixed the two alphabets.
+///
+/// It's inserted at the *front* of each family, with egui's bundled faces kept
+/// behind it as fallback — emoji (and the `⚙` it lacks) still resolve there.
 fn install_fonts(ctx: &egui::Context) {
     use egui::{FontData, FontDefinitions, FontFamily};
 
     let mut fonts = FontDefinitions::default();
-    // A static instance (weight 400) of Orbitron — a *variable* font is markedly
-    // slower to lay out and rasterize per glyph, which showed up as a first-render
-    // hitch on text-heavy pages. Same look, much cheaper.
     fonts.font_data.insert(
-        "Orbitron".to_owned(),
-        FontData::from_static(include_bytes!("../../resources/fonts/Orbitron-Static.ttf")),
-    );
-    fonts.font_data.insert(
-        "ShareTechMono".to_owned(),
+        "JetBrainsMono".to_owned(),
         FontData::from_static(include_bytes!(
-            "../../resources/fonts/ShareTechMono-Regular.ttf"
+            "../../resources/fonts/JetBrainsMono-Regular.ttf"
         )),
     );
-    fonts
-        .families
-        .entry(FontFamily::Proportional)
-        .or_default()
-        .insert(0, "Orbitron".to_owned());
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .insert(0, "ShareTechMono".to_owned());
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .insert(0, "JetBrainsMono".to_owned());
+    }
     ctx.set_fonts(fonts);
 }
 
@@ -1887,19 +1883,20 @@ pub fn render_demo_ui(ui: &mut egui::Ui, inputs: &mut HashMap<String, String>) {
 mod tests {
     use super::*;
 
-    /// The brand fonts must actually parse and lay out — egui panics on a
-    /// malformed face when it builds the atlas, so running one headless frame
-    /// with Latin + Cyrillic text (Cyrillic exercises the fallback face) proves
-    /// Orbitron (variable) and Share Tech Mono both load.
+    /// The UI font must actually parse and lay out — egui panics on a malformed
+    /// face when it builds the atlas, so one headless frame covering both
+    /// alphabets and both families proves JetBrains Mono loads and serves them.
+    /// Unlike the Latin-only faces it replaced, the Cyrillic here comes from the
+    /// font itself rather than egui's bundled fallback.
     #[test]
-    fn brand_fonts_load_and_lay_out() {
+    fn ui_font_loads_and_lays_out_both_alphabets() {
         let ctx = egui::Context::default();
         install_fonts(&ctx);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.label("Limen HUD 0123");
                 ui.monospace("path/to/mod.rs");
-                ui.label("Заборонене ПЗ"); // Cyrillic → fallback face
+                ui.label("Заборонене ПЗ — Встановлені модулі");
             });
         });
     }
