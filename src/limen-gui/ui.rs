@@ -1048,14 +1048,32 @@ pub enum Widget {
 
 /// Render a view; returns the action of a clicked button, if any. `busy` is the
 /// action currently in flight (its button shows a spinner).
+/// Draw a module's view.
+///
+/// `reveal_at` is when this view's entrance begins: top-level widgets fade in
+/// one after another from that moment, so switching to a module plays the same
+/// staggered entrance the module cards use. Pass `0.0` for "already revealed" —
+/// the elapsed time is then effectively infinite and everything draws at full
+/// opacity immediately.
 pub fn render_view(
     ui: &mut egui::Ui,
     view: &View,
     inputs: &mut HashMap<String, String>,
     busy: Option<&Action>,
+    reveal_at: f64,
 ) -> Option<Invoke> {
     let mut clicked = None;
-    render_widgets(ui, &view.widgets, inputs, busy, &mut clicked);
+    let now = ui.input(|i| i.time);
+    // Publish this entrance so widgets nested deeper — tables, which clock
+    // themselves — can join it instead of snapping in.
+    ui.data_mut(|d| d.insert_temp(view_reveal_id(), reveal_at));
+    for (i, w) in view.widgets.iter().enumerate() {
+        let t = reveal_t(ui, i, reveal_at, now, 0.04, 0.22);
+        ui.scope(|ui| {
+            ui.set_opacity(t);
+            render_widget(ui, w, inputs, busy, &mut clicked);
+        });
+    }
     clicked
 }
 
@@ -1376,6 +1394,38 @@ fn fmt_num(v: f64) -> String {
     }
 }
 
+/// Where [`render_view`] parks the current entrance's start time, for widgets
+/// that clock themselves rather than taking a stagger index from the top level.
+fn view_reveal_id() -> egui::Id {
+    egui::Id::new("limen_view_reveal")
+}
+
+/// When this table's entrance started, and how far row `r` is into it.
+///
+/// The clock lives in egui memory keyed by the table's shape, so a table whose
+/// row count changes (results arriving, a page turned) is a *new* id and
+/// restarts — while a view that merely refreshes in place, like a progress list
+/// ticking through its steps, keeps its clock and does not re-animate.
+///
+/// The stagger index is capped: a 500-row table staggered per row would take
+/// half a minute to finish appearing. Past the cap every remaining row shares
+/// the last slot, so it reads as a cascade without ever outstaying it.
+fn row_reveal(ui: &mut egui::Ui, cols: &[String], nrows: usize, r: usize) -> f32 {
+    const CAP: usize = 18;
+    let id = egui::Id::new(("tablereveal", cols.len(), cols.first().cloned(), nrows));
+    let now = ui.input(|i| i.time);
+    // When this table's shape was first seen...
+    let shape = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || now));
+    // ...and when the view around it last began an entrance. The later of the
+    // two wins, so the table replays both when its contents change *and* when
+    // you switch back to a tab that was already open — but sits still while a
+    // view merely refreshes in place.
+    let view = ui
+        .data(|d| d.get_temp::<f64>(view_reveal_id()))
+        .unwrap_or(0.0);
+    reveal_t(ui, r.min(CAP), shape.max(view), now, 0.018, 0.22)
+}
+
 /// Render a [`Widget::Table`]. A plain data table is a striped grid; when the
 /// module attaches a `menu` or `on_activate`, rows become interactive — the
 /// whole row (full width, not just its text) is clickable, highlights on hover,
@@ -1428,9 +1478,13 @@ fn render_plain_table(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<String>
                     ui.label(egui::RichText::new(c).strong());
                 }
                 ui.end_row();
-                for row in rows {
+                for (r, row) in rows.iter().enumerate() {
+                    let t = row_reveal(ui, columns, rows.len(), r);
                     for cell in row {
-                        ui.label(cell);
+                        ui.scope(|ui| {
+                            ui.set_opacity(t);
+                            ui.label(cell);
+                        });
                     }
                     ui.end_row();
                 }
@@ -1510,6 +1564,11 @@ fn render_interactive_table(
             let (rect, resp) =
                 ui.allocate_exact_size(egui::vec2(table_w, row_h), egui::Sense::click());
             let it = interact(ui, &resp);
+            // Fade this row in on its slot of the table's entrance. Set on the
+            // Ui so the painted chrome (zebra, hover, separators) and the cell
+            // text below both pick it up.
+            let row_t = row_reveal(ui, columns, rows.len(), r);
+            ui.set_opacity(row_t);
 
             // Zebra base, then a hover highlight faded in by the eased factor,
             // with a small accent bar on the leading edge and a press tint.

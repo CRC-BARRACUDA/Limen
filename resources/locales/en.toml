@@ -53,8 +53,6 @@ title = "Modules"
 reload = "Reload"
 search_hint = "Search by name — or tag:ua, description:banned, cap:programs.local"
 open = "Open"
-pin = "Pin"
-unpin = "Unpin"
 remove = "Remove"
 github = "GitHub ↗"
 update = "Update"
@@ -75,7 +73,6 @@ installed = "Installed"
 available = "Available"
 
 [tabstrip]
-frequent_hint = "Frequently used — open"
 
 [perm]
 this_module = "This module"
