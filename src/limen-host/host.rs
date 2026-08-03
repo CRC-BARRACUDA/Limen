@@ -521,15 +521,63 @@ fn notify_native(title: &str, body: &str, _urgency: &str) {
         .spawn();
 }
 
+/// Give Windows an app identity of our own, so notifications are attributed to
+/// **Limen** rather than to whatever process happened to raise them.
+///
+/// A toast from an *unregistered* AUMID is accepted and then silently dropped —
+/// which is why borrowing PowerShell's registered id works at all, at the cost
+/// of every module notification reading "Windows PowerShell". Registering ours
+/// costs one HKCU key and makes the attribution honest. No elevation: this is
+/// the user's own hive.
+///
+/// Done once per process, and idempotent besides. `IconUri` is only set when the
+/// icon has actually been extracted (`limen-core` writes it on the app's first
+/// notification); a missing file would just render no icon. Note the icon —
+/// unlike the name — appears from the next sign-in, because `WpnUserService`
+/// caches an app's display data when it starts.
+#[cfg(target_os = "windows")]
+fn ensure_app_id() {
+    use limen_proto::proc::NoConsole;
+    use std::sync::OnceLock;
+    static DONE: OnceLock<()> = OnceLock::new();
+    DONE.get_or_init(|| {
+        const KEY: &str = r"HKCU\Software\Classes\AppUserModelId\Limen";
+        let mut values = vec![("DisplayName", APP_ID.to_string())];
+        if let Some(icon) = icon_file() {
+            values.push(("IconUri", icon.to_string_lossy().into_owned()));
+            values.push(("IconBackgroundColor", "00000000".to_string()));
+        }
+        for (name, value) in values {
+            // `.output()` rather than `.status()`: reg's "The operation completed
+            // successfully." would otherwise land in the debug build's console.
+            let _ = std::process::Command::new("reg")
+                .args(["add", KEY, "/v", name, "/t", "REG_SZ", "/d", &value, "/f"])
+                .no_console()
+                .output();
+        }
+    });
+}
+
+/// The app id Windows attributes Limen's toasts to. Matches the one
+/// `limen-core` registers for update notifications, so both speak as one app.
+#[cfg(target_os = "windows")]
+const APP_ID: &str = "Limen";
+
+/// The extracted app icon, if it is there. `limen-core` unpacks it to
+/// `<base>/state/icon.png` at startup; the host only ever reads it, so a missing
+/// file is not an error — it just means a toast without a picture.
+#[cfg(target_os = "windows")]
+fn icon_file() -> Option<std::path::PathBuf> {
+    let path = limen_home().join("state").join("icon.png");
+    path.is_file().then_some(path)
+}
+
 #[cfg(target_os = "windows")]
 fn notify_native(title: &str, body: &str, _urgency: &str) {
     use limen_proto::proc::NoConsole;
-    // A WinRT ToastGeneric shown through PowerShell's own registered AUMID: an
-    // unregistered app id is accepted and then silently dropped, so the toast
-    // simply never appears. (The toast therefore reads "Windows PowerShell";
-    // a custom name needs a registered app id of our own.)
-    const AUMID: &str =
-        "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+    // A WinRT ToastGeneric shown through our own registered AUMID — registered
+    // first, since an unregistered id is accepted and then silently dropped.
+    ensure_app_id();
     // The text lands inside an XML document inside a single-quoted PowerShell
     // string, so it has to survive both: XML entities first, then PowerShell's
     // doubled-quote escape.
@@ -539,10 +587,23 @@ fn notify_native(title: &str, body: &str, _urgency: &str) {
     fn ps(s: &str) -> String {
         s.replace('\'', "''")
     }
+    // `appLogoOverride` is the thumbnail *beside the text*. It is separate from
+    // the small icon in the header, which comes from the AUMID's `IconUri` and
+    // only refreshes when `WpnUserService` restarts — this one is per-toast, so
+    // it shows immediately. A `file:///` src needs forward slashes.
+    let logo = icon_file()
+        .map(|p| {
+            format!(
+                "<image placement=\"appLogoOverride\" src=\"file:///{}\"/>",
+                xml(&p.to_string_lossy().replace('\\', "/"))
+            )
+        })
+        .unwrap_or_default();
     let doc = format!(
-        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text>{}</binding></visual></toast>",
         xml(title),
-        xml(body)
+        xml(body),
+        logo
     );
     let script = format!(
         "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];\
@@ -551,7 +612,7 @@ fn notify_native(title: &str, body: &str, _urgency: &str) {
          [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{}')\
          .Show((New-Object Windows.UI.Notifications.ToastNotification $x))",
         ps(&doc),
-        AUMID
+        APP_ID
     );
     let _ = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
