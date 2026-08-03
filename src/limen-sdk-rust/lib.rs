@@ -99,6 +99,19 @@ impl Host {
         let _ = self.raw("host.open", json!({ "target": target, "value": value }));
     }
 
+    /// Raise a desktop notification on the machine running Limen.
+    ///
+    /// For work the user is not watching — a long scan finishing, an install
+    /// landing. `urgency` is `"low"`, `"normal"` or `"critical"`; anything else
+    /// is treated as `"normal"`. Best-effort: a session with no notification
+    /// daemon simply shows nothing, and that is not an error.
+    pub fn notify(&self, title: &str, body: &str, urgency: &str) {
+        let _ = self.raw(
+            "host.notify",
+            json!({ "title": title, "body": body, "urgency": urgency }),
+        );
+    }
+
     /// Show a native "open file" dialog on the host; returns the chosen path, or
     /// `None` if the user cancelled.
     pub fn pick_file(&self) -> Option<String> {

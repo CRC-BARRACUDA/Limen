@@ -324,6 +324,14 @@ class Host:
         registry and device_manager are Windows-only."""
         self._m._request("host.open", {"target": target, "value": value})
 
+    def notify(self, title, body="", urgency="normal"):
+        """Raise a desktop notification on the machine running Limen — for work
+        the user is not watching, like a long scan finishing. `urgency` is
+        "low" | "normal" | "critical". Best-effort: a session with no
+        notification daemon shows nothing, which is not an error."""
+        self._m._request("host.notify",
+                         {"title": str(title), "body": str(body), "urgency": urgency})
+
     def pick_file(self):
         """Show a native 'open file' dialog on the host; returns the chosen path,
         or None if the user cancelled."""

@@ -459,6 +459,7 @@ fn host_handler(
         "host.capabilities" => Ok(json!(broker.capabilities())),
         "host.locale" => Ok(json!(limen_proto::locale::current())),
         "host.open" => host_open(params),
+        "host.notify" => host_notify(params),
         "host.pick_file" => Ok(host_pick_file()),
         "host.log" => {
             let msg = params.as_str().map(str::to_string).unwrap_or_else(|| params.to_string());
@@ -470,6 +471,92 @@ fn host_handler(
             format!("unknown host method {other}"),
         )),
     }
+}
+
+/// Raise a desktop notification on the machine running Limen, for work the user
+/// is not sitting and watching — a scan that has finished, an install that has
+/// landed. `params`:
+/// `{ "title": "...", "body": "...", "urgency": "low"|"normal"|"critical" }`.
+///
+/// Best-effort and fire-and-forget, like [`host_open`]: a desktop with no
+/// notification daemon, or a locked-down session, is not a module error. Going
+/// through the host rather than each module shelling out for itself means one
+/// implementation to keep working per platform, and one place to put policy.
+fn host_notify(params: Value) -> std::result::Result<Value, RpcError> {
+    let title = params.get("title").and_then(Value::as_str).unwrap_or("Limen");
+    let body = params.get("body").and_then(Value::as_str).unwrap_or("");
+    let urgency = params
+        .get("urgency")
+        .and_then(Value::as_str)
+        .filter(|u| matches!(*u, "low" | "normal" | "critical"))
+        .unwrap_or("normal");
+    notify_native(title, body, urgency);
+    Ok(Value::Null)
+}
+
+#[cfg(target_os = "linux")]
+fn notify_native(title: &str, body: &str, urgency: &str) {
+    // Arguments go straight to execve — no shell, so nothing in `title`/`body`
+    // can be read as syntax however it is spelled.
+    let _ = std::process::Command::new("notify-send")
+        .args(["-a", "Limen", "-u", urgency, title, body])
+        .spawn();
+}
+
+#[cfg(target_os = "macos")]
+fn notify_native(title: &str, body: &str, _urgency: &str) {
+    // `osascript -e` takes AppleScript *source*, so the text is escaped rather
+    // than merely quoted — a stray `"` would otherwise end the literal and the
+    // rest would be executed as script.
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        esc(body),
+        esc(title)
+    );
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn();
+}
+
+#[cfg(target_os = "windows")]
+fn notify_native(title: &str, body: &str, _urgency: &str) {
+    use limen_proto::proc::NoConsole;
+    // A WinRT ToastGeneric shown through PowerShell's own registered AUMID: an
+    // unregistered app id is accepted and then silently dropped, so the toast
+    // simply never appears. (The toast therefore reads "Windows PowerShell";
+    // a custom name needs a registered app id of our own.)
+    const AUMID: &str =
+        "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+    // The text lands inside an XML document inside a single-quoted PowerShell
+    // string, so it has to survive both: XML entities first, then PowerShell's
+    // doubled-quote escape.
+    fn xml(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+    fn ps(s: &str) -> String {
+        s.replace('\'', "''")
+    }
+    let doc = format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        xml(title),
+        xml(body)
+    );
+    let script = format!(
+        "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];\
+         [void][Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom,ContentType=WindowsRuntime];\
+         $x=New-Object Windows.Data.Xml.Dom.XmlDocument;$x.LoadXml('{}');\
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{}')\
+         .Show((New-Object Windows.UI.Notifications.ToastNotification $x))",
+        ps(&doc),
+        AUMID
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .no_console()
+        .spawn();
 }
 
 /// Show a native "open file" dialog on the host and return the chosen path as

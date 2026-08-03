@@ -87,6 +87,12 @@ class Host {
     // { os, arch, family, hostname, limen_version, base_dir }
     return this._m._request("host.about", {});
   }
+  // Raise a desktop notification on the machine running Limen, for work the
+  // user is not watching. `urgency` is "low" | "normal" | "critical".
+  // Best-effort: a session with no notification daemon shows nothing.
+  notify(title, body = "", urgency = "normal") {
+    this._m._request("host.notify", { title: String(title), body: String(body), urgency });
+  }
   log(message) {
     this._m._request("host.log", String(message));
   }

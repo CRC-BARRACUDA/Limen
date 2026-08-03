@@ -253,6 +253,13 @@ function M.Module(name, capabilities)
     log = function(_, message)
       self:_request("host.log", tostring(message))
     end,
+    -- Raise a desktop notification on the machine running Limen, for work the
+    -- user is not watching. `urgency` is "low" | "normal" | "critical".
+    -- Best-effort: a session with no notification daemon shows nothing.
+    notify = function(_, title, body, urgency)
+      self:_request("host.notify", { title = tostring(title), body = tostring(body or ""),
+                                     urgency = urgency or "normal" })
+    end,
   }
   return self
 end
