@@ -54,15 +54,29 @@ impl Widget {
 
     // ---- input options ---------------------------------------------------- //
     /// A field label (for `text` / `select`).
-    /// For a [`file`] widget: pick a directory rather than a file.
+    /// For a [`file`] widget: take a directory rather than a file.
     pub fn directory(self) -> Self {
-        self.set("directory", json!(true))
+        self.set("accepts", json!("dir"))
+    }
+
+    /// For a [`file`] widget: take *either* a file or a directory.
+    ///
+    /// The OS has no dialog that picks either, so such a field shows two Browse
+    /// buttons; give the second one a label with [`Widget::browse_dir`].
+    pub fn files_or_dirs(self) -> Self {
+        self.set("accepts", json!("file|dir"))
     }
 
     /// For a [`file`] widget: the Browse button's label, so the module can
     /// localize it alongside the rest of its view.
     pub fn browse(self, text: impl Into<String>) -> Self {
         self.set("browse", json!(text.into()))
+    }
+
+    /// For a [`files_or_dirs`](Widget::files_or_dirs) widget: the label of the
+    /// second button, the one that opens a folder chooser.
+    pub fn browse_dir(self, text: impl Into<String>) -> Self {
+        self.set("browse_dir", json!(text.into()))
     }
 
     pub fn label(self, text: impl Into<String>) -> Self {

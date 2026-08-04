@@ -1008,13 +1008,26 @@ pub enum Widget {
         placeholder: String,
         #[serde(default)]
         default: String,
-        /// Pick a directory rather than a file.
+        /// What this field takes: `"file"`, `"dir"`, or `"file|dir"` for either.
+        /// Empty falls back to `directory`, so a module built before this field
+        /// existed keeps behaving as it did.
+        #[serde(default)]
+        accepts: String,
+        /// Superseded by `accepts`. Kept so a module compiled against an earlier
+        /// SDK still gets a directory picker rather than silently becoming a
+        /// file picker.
         #[serde(default)]
         directory: bool,
         /// Label for the Browse button. Supplied by the module so it can be
         /// localized alongside the rest of its view; `ui` stays i18n-free.
         #[serde(default)]
         browse: String,
+        /// Label for the *folder* button on a field that takes either kind.
+        /// The OS has no "pick a file or a folder" dialog — GTK, the XDG portal
+        /// and Windows all treat them as separate — so a dual field offers both.
+        /// Left empty, only the file button shows and folders arrive by drag.
+        #[serde(default)]
+        browse_dir: String,
     },
     /// An animated on/off checkbox; its boolean state is returned in params.
     Checkbox {
@@ -1100,15 +1113,48 @@ pub fn render_view(
 ) -> Option<Invoke> {
     let mut clicked = None;
     let now = ui.input(|i| i.time);
+
+    // A module that swaps one screen for another — Basic to Advanced, settings
+    // to results — gets the entrance again, so the change reads as a change
+    // rather than the view blinking into a different arrangement. Keyed on the
+    // shape, so a view that merely refreshes in place keeps its clock.
+    let shape = view_shape(view);
+    let id = ui.id().with("limen_view_shape");
+    let changed_at = ui.data_mut(|d| {
+        let seen = d.get_temp::<(u64, f64)>(id);
+        match seen {
+            Some((s, at)) if s == shape => at,
+            _ => {
+                d.insert_temp(id, (shape, now));
+                now
+            }
+        }
+    });
+    // Whichever entrance is newer: the tab's, or this screen's own.
+    let reveal_at = reveal_at.max(changed_at);
+
     // Publish this entrance so widgets nested deeper — tables, which clock
     // themselves — can join it instead of snapping in.
     ui.data_mut(|d| d.insert_temp(view_reveal_id(), reveal_at));
     for (i, w) in view.widgets.iter().enumerate() {
-        let t = reveal_t(ui, i, reveal_at, now, 0.04, 0.22);
-        ui.scope(|ui| {
-            ui.set_opacity(t);
-            render_widget(ui, w, inputs, busy, &mut clicked);
-        });
+        let t = reveal_t(ui, i, reveal_at, now, 0.02, 0.13);
+        // Slide as well as fade. A fade alone is easy to miss on a screen that
+        // swaps for a similar one — Basic to Advanced keeps the same header and
+        // target field — so the motion is what reads as "this changed".
+        //
+        // The offset is a frame margin, not a `horizontal` wrapper: wrapping
+        // turns the child into a *row*, which stands separators on end and puts
+        // every label beside its field instead of above it.
+        let dx = (1.0 - t) * 18.0;
+        egui::Frame::none()
+            .outer_margin(egui::Margin {
+                left: dx,
+                ..Default::default()
+            })
+            .show(ui, |ui| {
+                ui.set_opacity(t);
+                render_widget(ui, w, inputs, busy, &mut clicked);
+            });
     }
     clicked
 }
@@ -1273,8 +1319,10 @@ fn render_widget(
             label,
             placeholder,
             default,
+            accepts,
             directory,
             browse,
+            browse_dir,
         } => {
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
@@ -1286,7 +1334,15 @@ fn render_widget(
             } else {
                 browse
             };
-            if file_field(ui, id, &mut path, placeholder, browse_label, *directory) {
+            if file_field(
+                ui,
+                id,
+                &mut path,
+                placeholder,
+                browse_label,
+                browse_dir,
+                Accepts::of(accepts, *directory),
+            ) {
                 *value = path;
             }
         }
@@ -1491,18 +1547,153 @@ fn focused_field_id() -> egui::Id {
     egui::Id::new("limen_path_focus")
 }
 
+/// What a [`Widget::File`] will take.
+#[derive(Clone, Copy, PartialEq)]
+enum Accepts {
+    File,
+    Dir,
+    Either,
+}
+
+impl Accepts {
+    /// Read the spec, falling back to the older `directory` flag when `accepts`
+    /// is absent. Anything unrecognised means a file — the narrower reading, so
+    /// a typo cannot quietly widen what a field will swallow.
+    fn of(accepts: &str, directory: bool) -> Self {
+        let a = accepts.trim().to_lowercase();
+        if a.is_empty() {
+            return if directory {
+                Accepts::Dir
+            } else {
+                Accepts::File
+            };
+        }
+        match (a.contains("file"), a.contains("dir")) {
+            (true, true) => Accepts::Either,
+            (false, true) => Accepts::Dir,
+            _ => Accepts::File,
+        }
+    }
+
+    /// Whether a dropped path of this kind belongs here.
+    fn takes(self, is_dir: bool) -> bool {
+        match self {
+            Accepts::Either => true,
+            Accepts::Dir => is_dir,
+            Accepts::File => !is_dir,
+        }
+    }
+}
+
+/// A modal "are you sure?" over the app.
+///
+/// Call it every frame with `open`; it animates itself in and out, so the caller
+/// keeps whatever it is holding until the answer comes back. Returns
+/// `Some(true)` on confirm, `Some(false)` on cancel, `None` while it is open,
+/// closing, or absent.
+///
+/// This is the engine's own dialog, not something a module can raise: the host
+/// decides which of *its* actions deserve a question, so the answer cannot be
+/// skipped by a module that would rather not ask.
+///
+/// `subject` is what the action will happen *to* — drawn in its own frame, so
+/// the thing at stake is unmistakable rather than something to skim past inside
+/// a sentence. Keep passing it while the dialog closes, or it will blink empty
+/// on the way out.
+pub fn confirm_dialog(
+    ctx: &egui::Context,
+    open: bool,
+    title: &str,
+    subject: Option<&str>,
+    confirm_label: &str,
+    cancel_label: &str,
+) -> Option<bool> {
+    let id = egui::Id::new("limen_confirm");
+    let t = if animations_enabled() {
+        ctx.animate_bool_with_time(id, open, 0.13)
+    } else {
+        open as u8 as f32
+    };
+    if t <= 0.002 {
+        return None;
+    }
+
+    // A veil across the whole window: it dims what is behind and, because it
+    // senses clicks over the full screen at a higher order than the panels,
+    // swallows them — so the app underneath is inert while the question stands.
+    let screen = ctx.screen_rect();
+    egui::Area::new(id.with("veil"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+            ui.painter()
+                .rect_filled(rect, egui::Rounding::ZERO, with_alpha(color::BG, 0.72 * t));
+        });
+
+    let mut answer = None;
+    egui::Area::new(id.with("box"))
+        .order(egui::Order::Foreground)
+        // Rises the last few pixels as it arrives, and sinks as it leaves.
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, (1.0 - t) * 12.0])
+        .show(ctx, |ui| {
+            ui.set_opacity(t);
+            egui::Frame::none()
+                .fill(color::BG_ELEVATED)
+                .stroke(egui::Stroke::new(1.0_f32, color::BORDER))
+                .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                .show(ui, |ui| {
+                    ui.set_max_width(420.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new(title).size(17.0).strong());
+                        if let Some(s) = subject {
+                            ui.add_space(14.0);
+                            egui::Frame::none()
+                                .fill(color::BG_WIDGET)
+                                .stroke(egui::Stroke::new(1.0_f32, color::BORDER))
+                                .inner_margin(egui::Margin::symmetric(16.0, 9.0))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new(s).strong());
+                                });
+                        }
+                        ui.add_space(18.0);
+
+                        // Both buttons the same width, so the pair can be
+                        // centred by arithmetic rather than by hoping a layout
+                        // does it.
+                        const BW: f32 = 150.0;
+                        let gap = ui.spacing().item_spacing.x;
+                        let pair = BW * 2.0 + gap;
+                        ui.horizontal(|ui| {
+                            ui.add_space(((ui.available_width() - pair) / 2.0).max(0.0));
+                            if outline_button(ui, confirm_label, egui::vec2(BW, 0.0)).clicked() {
+                                answer = Some(true);
+                            }
+                            if primary_button(ui, cancel_label, egui::vec2(BW, 0.0)).clicked() {
+                                answer = Some(false);
+                            }
+                        });
+                    });
+                });
+        });
+    // Only a live dialog can be answered; a closing one is just an animation.
+    open.then_some(answer).flatten()
+}
+
 /// A path field: type it, drop a file or folder on it, or Browse for it.
 ///
 /// Returns `true` when `path` changed. Drops are matched against this field's
 /// rect, so a view with several path inputs routes each drop to the one under
 /// the cursor.
+#[allow(clippy::too_many_arguments)]
 fn file_field(
     ui: &mut egui::Ui,
     id: &str,
     path: &mut String,
     placeholder: &str,
     browse_label: &str,
-    directory: bool,
+    browse_dir_label: &str,
+    accepts: Accepts,
 ) -> bool {
     let ctx = ui.ctx().clone();
     let frame = ctx.frame_nr();
@@ -1519,7 +1710,7 @@ fn file_field(
     // Every field that could take this thing opens, so all the valid targets are
     // visible at once — dragging a file over a directory field still invites
     // nothing, and vice versa.
-    let suits_me = dragged_is_dir == Some(directory);
+    let suits_me = dragged_is_dir.is_some_and(|d| accepts.takes(d));
     // Where the pointer is, asked of the OS: winit reports the drag but never
     // its position. `None` where that query is unavailable — a Wayland session,
     // macOS — and the caret becomes the tie-break instead.
@@ -1532,8 +1723,18 @@ fn file_field(
         // long label — "Choose folder…", or any translation of it — grows the
         // button; reserving a fixed width for it pushed the row off-screen.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // A field that takes either kind offers both dialogs, because the
+            // OS has no single one that picks a file *or* a folder. Rendered
+            // right-to-left, so the folder button sits outermost.
+            if matches!(accepts, Accepts::Either)
+                && !browse_dir_label.is_empty()
+                && outline_button(ui, browse_dir_label, egui::Vec2::ZERO).clicked()
+            {
+                ctx.data_mut(|d| d.insert_temp(browse_request_id(), (id.to_string(), true)));
+            }
+            let wants_dir = matches!(accepts, Accepts::Dir);
             if outline_button(ui, browse_label, egui::Vec2::ZERO).clicked() {
-                ctx.data_mut(|d| d.insert_temp(browse_request_id(), (id.to_string(), directory)));
+                ctx.data_mut(|d| d.insert_temp(browse_request_id(), (id.to_string(), wants_dir)));
             }
             let field_w = ui.available_width().max(80.0);
             let before = path.clone();
@@ -1543,7 +1744,12 @@ fn file_field(
             // Remember where the caret is, so a drag with no cursor to follow
             // still knows which of several same-kind fields the user means.
             if resp.has_focus() {
-                ctx.data_mut(|d| d.insert_temp(focused_field_id(), (id.to_string(), directory)));
+                ctx.data_mut(|d| {
+                    d.insert_temp(
+                        focused_field_id(),
+                        (id.to_string(), matches!(accepts, Accepts::Dir)),
+                    )
+                });
             }
         });
     });
@@ -1574,7 +1780,7 @@ fn file_field(
             let mine = focused.as_ref().is_some_and(|(f, _)| f == id);
             let elsewhere = focused
                 .as_ref()
-                .is_some_and(|(f, dir)| f != id && *dir == directory);
+                .is_some_and(|(f, dir)| f != id && accepts.takes(*dir));
             let taken = ctx.data(|d| d.get_temp::<u64>(invite_claim_id())) == Some(frame);
             (suits_me, suits_me && (mine || (!elsewhere && !taken)))
         }
@@ -1628,13 +1834,32 @@ fn file_field(
     if let Some(dropped) = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone())) {
         let armed_id = ctx.data(|d| d.get_temp::<String>(armed_field_id()));
         let taken = ctx.data(|d| d.get_temp::<u64>(drop_claim_id())) == Some(frame);
-        if !taken && armed_id.as_deref() == Some(id) && dropped.is_dir() == directory {
+        if !taken && armed_id.as_deref() == Some(id) && accepts.takes(dropped.is_dir()) {
             *path = dropped.display().to_string();
             changed = true;
             ctx.data_mut(|d| d.insert_temp(drop_claim_id(), frame));
         }
     }
     changed
+}
+
+/// A fingerprint of a view's *shape* — its title and the kinds of widget it is
+/// made of, not their contents.
+///
+/// This is what decides whether a view has become a different screen or merely
+/// refreshed. Switching a module between Basic and Advanced adds controls and so
+/// changes the shape; a progress checklist ticking through its steps swaps a
+/// label's text and keeps it, which must not count, or the screen would restart
+/// its entrance on every tick and strobe.
+fn view_shape(view: &View) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    view.title.hash(&mut h);
+    view.widgets.len().hash(&mut h);
+    for w in &view.widgets {
+        std::mem::discriminant(w).hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Where [`render_view`] parks the current entrance's start time, for widgets
@@ -1666,7 +1891,7 @@ fn row_reveal(ui: &mut egui::Ui, cols: &[String], nrows: usize, r: usize) -> f32
     let view = ui
         .data(|d| d.get_temp::<f64>(view_reveal_id()))
         .unwrap_or(0.0);
-    reveal_t(ui, r.min(CAP), shape.max(view), now, 0.018, 0.22)
+    reveal_t(ui, r.min(CAP), shape.max(view), now, 0.010, 0.14)
 }
 
 /// Render a [`Widget::Table`]. A plain data table is a striped grid; when the
@@ -2201,6 +2426,80 @@ mod tests {
                 ui.label("Заборонене ПЗ — Встановлені модулі");
             });
         });
+    }
+
+    /// What a path field takes, and the fallback for modules built before
+    /// `accepts` existed.
+    #[test]
+    fn accepts_reads_the_spec_and_the_legacy_flag() {
+        // The new spelling.
+        assert!(Accepts::of("file", false) == Accepts::File);
+        assert!(Accepts::of("dir", false) == Accepts::Dir);
+        assert!(Accepts::of("file|dir", false) == Accepts::Either);
+        assert!(Accepts::of("dir|file", false) == Accepts::Either);
+        assert!(Accepts::of(" FILE|DIR ", false) == Accepts::Either);
+
+        // Absent: fall back to `directory`, so an older module is unchanged.
+        assert!(Accepts::of("", true) == Accepts::Dir);
+        assert!(Accepts::of("", false) == Accepts::File);
+        // `accepts` wins when both are given.
+        assert!(Accepts::of("file", true) == Accepts::File);
+
+        // Nonsense narrows rather than widens — a typo must not make a field
+        // swallow anything at all.
+        assert!(Accepts::of("folder", false) == Accepts::File);
+        assert!(Accepts::of("anything", false) == Accepts::File);
+    }
+
+    #[test]
+    fn a_dual_field_takes_both_and_the_others_take_one() {
+        for (a, file_ok, dir_ok) in [
+            (Accepts::File, true, false),
+            (Accepts::Dir, false, true),
+            (Accepts::Either, true, true),
+        ] {
+            assert_eq!(a.takes(false), file_ok, "file into {a:?}", a = a as u8);
+            assert_eq!(a.takes(true), dir_ok, "dir into {a:?}", a = a as u8);
+        }
+    }
+
+    /// Swapping a module's screen must count as a change; refreshing one in
+    /// place must not, or a progress checklist would restart its entrance on
+    /// every tick.
+    #[test]
+    fn view_shape_tracks_the_screen_not_its_contents() {
+        let parse = |s: &str| -> View { serde_json::from_str(s).unwrap() };
+
+        let basic = parse(
+            r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
+        );
+        // Same screen, different text — a progress step advancing.
+        let ticked = parse(
+            r#"{"title":"S","widgets":[{"kind":"label","text":"b"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
+        );
+        assert_eq!(
+            view_shape(&basic),
+            view_shape(&ticked),
+            "text changes must not restart the entrance"
+        );
+
+        // A control appears — Basic becoming Advanced.
+        let advanced = parse(
+            r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"checkbox","id":"x"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
+        );
+        assert_ne!(view_shape(&basic), view_shape(&advanced));
+
+        // A different screen entirely.
+        let other = parse(
+            r#"{"title":"Other","widgets":[{"kind":"label","text":"a"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
+        );
+        assert_ne!(view_shape(&basic), view_shape(&other));
+
+        // Same kinds, different order still counts — the arrangement changed.
+        let reordered = parse(
+            r#"{"title":"S","widgets":[{"kind":"button","text":"go","action":{"capability":"c","method":"m"}},{"kind":"label","text":"a"}]}"#,
+        );
+        assert_ne!(view_shape(&basic), view_shape(&reordered));
     }
 
     #[test]

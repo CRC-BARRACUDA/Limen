@@ -110,6 +110,12 @@ pub struct LimenApp {
     trusted: HashSet<String>,
     /// An elevated action awaiting the user's consent (shown as a dialog).
     pending_action: Option<ui::Invoke>,
+    /// A module the user asked to remove, held until they confirm. Removal
+    /// deletes the module's directory — including anything it had fetched into
+    /// `tools/` — so it is not something to do on a stray click.
+    pending_remove: Option<String>,
+    /// The name shown in the confirmation, kept while it animates closed.
+    confirm_subject: Option<String>,
 
     /// Open detail tabs (from row actions), keyed by the id in `Tab::Detail`.
     detail_tabs: HashMap<u64, DetailTab>,
@@ -248,6 +254,8 @@ impl LimenApp {
             failed: HashMap::new(),
             trusted: HashSet::new(),
             pending_action: None,
+            pending_remove: None,
+            confirm_subject: None,
             detail_tabs: HashMap::new(),
             next_detail_id: 0,
             tabs: vec![Tab::About, Tab::Modules],
@@ -406,6 +414,42 @@ impl LimenApp {
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// Draw the removal confirmation and report the name once the user agrees.
+    ///
+    /// Called every frame, not only while something is pending: the dialog
+    /// animates itself out, and it can only do that if it is still being drawn
+    /// after the answer. `confirm_subject` holds the name for those last frames,
+    /// or the box would blink empty as it leaves.
+    fn confirmed_removal(&mut self, ctx: &egui::Context) -> Option<String> {
+        // Show what the user recognises — the module's display name, localized —
+        // rather than the identifier they never chose.
+        if let Some(name) = &self.pending_remove {
+            let shown = self
+                .modules
+                .iter()
+                .find(|m| &m.name == name)
+                .map(|m| localized_name(ctx, m))
+                .unwrap_or_else(|| name.clone());
+            self.confirm_subject = Some(shown);
+        }
+        let answer = ui::confirm_dialog(
+            ctx,
+            self.pending_remove.is_some(),
+            &i18n::t("confirm.remove_title"),
+            self.confirm_subject.as_deref(),
+            &i18n::t("confirm.remove_yes"),
+            &i18n::t("confirm.cancel"),
+        );
+        match answer {
+            Some(true) => self.pending_remove.take(),
+            Some(false) => {
+                self.pending_remove = None;
+                None
+            }
+            None => None,
+        }
     }
 
     /// Recompute which sensitive modules the user has granted (trusted at their
@@ -998,7 +1042,7 @@ impl eframe::App for LimenApp {
                                         .modules
                                         .iter()
                                         .find(|m| &m.name == name)
-                                        .map(|m| localized_name(ui, m))
+                                        .map(|m| localized_name(ui.ctx(), m))
                                         .unwrap_or_else(|| name.clone()),
                                     _ => tab.title(),
                                 };
@@ -1374,7 +1418,12 @@ impl eframe::App for LimenApp {
         if let Some(name) = open_module {
             self.select_module(name);
         }
+        // Ask before removing. The confirmed name is applied further down, so
+        // both paths run exactly the same removal.
         if let Some(name) = remove_module {
+            self.pending_remove = Some(name);
+        }
+        if let Some(name) = self.confirmed_removal(ctx) {
             self.status = format!("removing {name}…");
             if self.animations {
                 // Play the exit animation first; the actual removal fires when it
@@ -2018,14 +2067,14 @@ fn localized_desc(ui: &egui::Ui, m: &ModuleSpec) -> Option<String> {
 /// An installed module's display title, translated for the active UI language
 /// from its `locales/<lang>.toml` `[module] title`, else the manifest
 /// `display_name`, else the module's identifier `name`. Cached like `localized_desc`.
-fn localized_name(ui: &egui::Ui, m: &ModuleSpec) -> String {
+fn localized_name(ctx: &egui::Context, m: &ModuleSpec) -> String {
     let lang = i18n::locale();
     let id = egui::Id::new(("modtitle", m.name.as_str(), lang.code()));
-    let resolved = match ui.data(|d| d.get_temp::<Option<String>>(id)) {
+    let resolved = match ctx.data(|d| d.get_temp::<Option<String>>(id)) {
         Some(v) => v,
         None => {
             let r = limen_proto::manifest::localized_title(&m.cwd, lang.code());
-            ui.data_mut(|d| d.insert_temp(id, r.clone()));
+            ctx.data_mut(|d| d.insert_temp(id, r.clone()));
             r
         }
     };
@@ -2312,7 +2361,7 @@ fn reveal_card(
     // Staggered entrance (replays when the reveal timer resets: tab shown or
     // filter changed) and a smoothstep exit so the fade, slide, and — most
     // importantly — the height collapse all progress steadily.
-    let enter = ui::reveal_t(ui, k, reveal_at, now, 0.05, 0.30);
+    let enter = ui::reveal_t(ui, k, reveal_at, now, 0.03, 0.18);
     let exit = ui::smoothstep(remove_t);
 
     let dx = (1.0 - enter) * 28.0 + exit * 28.0;
@@ -2403,7 +2452,7 @@ fn module_card(
                         ui.set_min_width(left_w);
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
-                                egui::RichText::new(localized_name(ui, m))
+                                egui::RichText::new(localized_name(ui.ctx(), m))
                                     .size(16.0)
                                     .strong(),
                             );
@@ -2905,7 +2954,7 @@ fn reveal_item(
         draw(ui);
         return;
     }
-    let t = ui::reveal_t(ui, k, reveal_at, now, 0.035, 0.18);
+    let t = ui::reveal_t(ui, k, reveal_at, now, 0.02, 0.12);
     ui.scope(|ui| {
         ui.set_opacity(t);
         draw(ui);
