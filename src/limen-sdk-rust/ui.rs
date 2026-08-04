@@ -98,6 +98,10 @@ impl Widget {
     pub fn primary(self) -> Self {
         self.set("style", json!("primary"))
     }
+    /// Draw a button in red: the action destroys something.
+    pub fn danger(self) -> Self {
+        self.set("style", json!("danger"))
+    }
     /// Start a `checkbox` checked.
     pub fn checked(self) -> Self {
         self.set("default", json!(true))

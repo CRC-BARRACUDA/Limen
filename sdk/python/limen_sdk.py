@@ -130,16 +130,18 @@ class Checkbox(Widget):
 class Button(Widget):
     """A button. `calls` names a method on THIS module; the SDK fills in the
     capability. Use `capability=`/`method=` to target another module instead.
-    `primary=True` is the filled accent button, otherwise an outline button; both
+    `primary=True` is the filled accent button and `danger=True` the red one for
+    an action that destroys something; otherwise an outline button. Both
     animate on hover/press on the host."""
 
     def __init__(self, text, calls=None, capability=None, method=None, primary=False,
+                 danger=False,
                  enabled=True, args=None, open_in_tab=False):
         self.text = text
         self.calls = calls
         self.capability = capability
         self.method = method
-        self.primary = primary
+        self.primary, self.danger = primary, danger
         self.enabled = enabled
         self.args = args
         self.open_in_tab = open_in_tab
@@ -149,7 +151,7 @@ class Button(Widget):
         meth = self.method or self.calls
         spec = {
             "kind": "button", "text": self.text,
-            "style": "primary" if self.primary else "default",
+            "style": "danger" if self.danger else ("primary" if self.primary else "default"),
             "enabled": self.enabled,
             "action": {"capability": cap, "method": meth},
         }

@@ -41,6 +41,9 @@ pub(crate) mod color {
     pub const SUCCESS: Color32 = Color32::from_rgb(0x4a, 0xde, 0x80); // done / OK green
     pub const WARNING: Color32 = Color32::from_rgb(0xfb, 0xbf, 0x24); // warning amber-yellow
     pub const ERROR: Color32 = Color32::from_rgb(0xf8, 0x71, 0x71); // error red
+    // The destructive outline's accent. Same red the error text already uses, so
+    // "this destroys something" reads the same wherever it appears.
+    pub const DANGER_BRIGHT: Color32 = Color32::from_rgb(0xf8, 0x71, 0x71); // red — destructive
 }
 
 // --------------------------------------------------------------------------- //
@@ -359,6 +362,20 @@ fn chamfer_pts(rect: egui::Rect, ch: f32) -> [egui::Pos2; 6] {
 /// a thin orange border, its label upper-cased. Brightens on hover, dips on
 /// press. `min` is a minimum size (`Vec2::ZERO` to size to the text).
 pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
+    filled_button(ui, text, min, RAMP_PRIMARY)
+}
+
+/// A filled CTA's four gradient stops, dark to light.
+type Ramp = [egui::Color32; 4];
+
+const RAMP_PRIMARY: Ramp = [
+    egui::Color32::from_rgb(0xc2, 0x41, 0x0c),
+    egui::Color32::from_rgb(0xea, 0x58, 0x0c),
+    color::ORANGE,
+    color::ORANGE_BRIGHT,
+];
+
+fn filled_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2, ramp: Ramp) -> egui::Response {
     use egui::{Color32, Mesh, Pos2, Shape};
 
     let font = egui::TextStyle::Button.resolve(ui.style());
@@ -376,15 +393,10 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
     let ch = (draw.height() * 0.5).min(draw.width() * 0.5).min(18.0);
     let pts = chamfer_pts(draw, ch);
 
-    // Four-stop orange gradient (kit: #c2410c → #ea580c → #f97316 → #fb923c),
+    // Four-stop gradient (the orange kit ramp, or the red one for danger),
     // shifted brighter on hover and darker on press.
     let shift = 0.18 * a.hover - 0.12 * a.press;
-    let stops = [
-        Color32::from_rgb(0xc2, 0x41, 0x0c),
-        Color32::from_rgb(0xea, 0x58, 0x0c),
-        color::ORANGE,
-        color::ORANGE_BRIGHT,
-    ];
+    let stops = ramp;
     let grad = |t: f32| -> Color32 {
         let t = (t + shift).clamp(0.0, 1.0) * 3.0; // into 0..3 across 4 stops
         let i = (t.floor() as usize).min(2);
@@ -411,7 +423,7 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
         let alpha = (0.03 + 0.06 * a.hover) / i as f32;
         painter.add(Shape::convex_polygon(
             expand_poly(e),
-            with_alpha(color::ORANGE, alpha),
+            with_alpha(stops[2], alpha),
             egui::Stroke::NONE,
         ));
     }
@@ -430,11 +442,11 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
     // Thin orange border + a brighter lit top edge.
     painter.add(Shape::closed_line(
         pts.to_vec(),
-        egui::Stroke::new(1.0_f32, with_alpha(color::ORANGE, 0.55)),
+        egui::Stroke::new(1.0_f32, with_alpha(stops[2], 0.55)),
     ));
     painter.line_segment(
         [pts[0], pts[1]],
-        egui::Stroke::new(1.0_f32, with_alpha(Color32::from_rgb(0xfd, 0xba, 0x74), 0.7)),
+        egui::Stroke::new(1.0_f32, with_alpha(lerp_color(stops[3], Color32::WHITE, 0.35), 0.7)),
     );
     painter.galley(
         draw.center() - galley.size() * 0.5,
@@ -449,11 +461,65 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
 /// text. On hover the border and text brighten to `ACCENT` and a faint amber
 /// wash fades in; it dips on press. `min` is a minimum size.
 pub fn outline_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
+    outlined_button(
+        ui,
+        text,
+        min,
+        OutlineTint {
+            border: color::BORDER,
+            label: color::TEXT_MUTED,
+            hot: color::ACCENT,
+            hot_label: color::TEXT,
+        },
+    )
+}
+
+/// The same outline button in red, for an action that destroys something.
+///
+/// An outline rather than a fill: a destructive action should not be the most
+/// eye-catching thing on the screen, and a filled red button competes with the
+/// primary one for attention it does not deserve. It says "careful", not "start
+/// here".
+///
+/// Red at rest, not only on hover — the warning is the whole point, and a button
+/// that only reveals what it is once the pointer is over it has told you too
+/// late. Muted at rest and full red on hover, so it still has somewhere to go.
+pub fn danger_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::Response {
+    outlined_button(
+        ui,
+        text,
+        min,
+        OutlineTint {
+            border: lerp_color(color::BORDER, color::DANGER_BRIGHT, 0.55),
+            label: lerp_color(color::TEXT_MUTED, color::DANGER_BRIGHT, 0.70),
+            hot: color::DANGER_BRIGHT,
+            hot_label: color::DANGER_BRIGHT,
+        },
+    )
+}
+
+/// An outline button's four colours: border and label at rest, and the pair they
+/// ease to on hover.
+struct OutlineTint {
+    border: egui::Color32,
+    label: egui::Color32,
+    hot: egui::Color32,
+    hot_label: egui::Color32,
+}
+
+/// A transparent chamfered outline that eases from its resting colours to its
+/// hover ones.
+fn outlined_button(
+    ui: &mut egui::Ui,
+    text: &str,
+    min: egui::Vec2,
+    tint: OutlineTint,
+) -> egui::Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let label = text.to_uppercase();
     let galley = ui
         .painter()
-        .layout_no_wrap(label, font, color::TEXT_MUTED);
+        .layout_no_wrap(label, font, tint.label);
     // Vertical padding matches `primary_button` so the two never differ in height
     // when placed side by side.
     let padding = egui::vec2(16.0, 9.0);
@@ -469,18 +535,18 @@ pub fn outline_button(ui: &mut egui::Ui, text: &str, min: egui::Vec2) -> egui::R
     // Transparent at rest; a faint amber wash fades in on hover.
     painter.add(egui::Shape::convex_polygon(
         pts.to_vec(),
-        with_alpha(color::ACCENT, 0.08 * a.hover),
+        with_alpha(tint.hot, 0.08 * a.hover),
         egui::Stroke::NONE,
     ));
     // Border eases amber-dim → bright amber on hover.
     painter.add(egui::Shape::closed_line(
         pts.to_vec(),
-        egui::Stroke::new(1.0_f32, lerp_color(color::BORDER, color::ACCENT, a.hover)),
+        egui::Stroke::new(1.0_f32, lerp_color(tint.border, tint.hot, a.hover)),
     ));
     painter.galley(
         draw.center() - galley.size() * 0.5,
         galley,
-        lerp_color(color::TEXT_MUTED, color::TEXT, a.hover),
+        lerp_color(tint.label, tint.hot_label, a.hover),
     );
     resp
 }
@@ -959,6 +1025,10 @@ pub enum ButtonStyle {
     #[default]
     Default,
     Primary,
+    /// Red: the action destroys something. Available to modules too — a module
+    /// that deletes, revokes or wipes should be able to say so in the same
+    /// language the host uses for its own destructive actions.
+    Danger,
 }
 
 /// Serde default for `#[serde(default = "default_true")]` bool fields.
@@ -1381,6 +1451,7 @@ fn render_widget(
                 let resp = ui
                     .add_enabled_ui(*enabled, |ui| match style {
                         ButtonStyle::Primary => primary_button(ui, text, egui::Vec2::ZERO),
+                        ButtonStyle::Danger => danger_button(ui, text, egui::Vec2::ZERO),
                         ButtonStyle::Default => outline_button(ui, text, egui::Vec2::ZERO),
                     })
                     .inner;
@@ -1666,7 +1737,7 @@ pub fn confirm_dialog(
                         let pair = BW * 2.0 + gap;
                         ui.horizontal(|ui| {
                             ui.add_space(((ui.available_width() - pair) / 2.0).max(0.0));
-                            if outline_button(ui, confirm_label, egui::vec2(BW, 0.0)).clicked() {
+                            if danger_button(ui, confirm_label, egui::vec2(BW, 0.0)).clicked() {
                                 answer = Some(true);
                             }
                             if primary_button(ui, cancel_label, egui::vec2(BW, 0.0)).clicked() {

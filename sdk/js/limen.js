@@ -59,7 +59,9 @@ function Select(id, options, opts = {}) {
 }
 function Button(text, opts = {}) {
   return { toSpec: () => ({
-    kind: "button", text, style: opts.primary ? "primary" : "default",
+    kind: "button", text,
+    // `danger` is the red one, for an action that destroys something.
+    style: opts.danger ? "danger" : (opts.primary ? "primary" : "default"),
     action: { capability: opts.capability || _currentCapability, method: opts.method || opts.calls },
   }) };
 }

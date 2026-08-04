@@ -202,7 +202,10 @@ end
 function M.Button(text, opts)
   opts = opts or {}
   return widget(function()
-    return { kind = "button", text = text, style = opts.primary and "primary" or "default",
+    -- `danger` is the red one, for an action that destroys something.
+    local style = "default"
+    if opts.danger then style = "danger" elseif opts.primary then style = "primary" end
+    return { kind = "button", text = text, style = style,
              action = { capability = opts.capability or current_capability, method = opts.method or opts.calls } }
   end)
 end

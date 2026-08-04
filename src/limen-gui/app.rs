@@ -2641,7 +2641,8 @@ fn module_card(
                                 *update = Some(m.name.clone());
                             }
                         }
-                        if ui::outline_button(ui, &remove_lbl, bw).clicked() {
+                        // Red: this one deletes the module and everything under it.
+                        if ui::danger_button(ui, &remove_lbl, bw).clicked() {
                             *remove = Some(m.name.clone());
                         }
                         // GitHub only for git-installed modules.
