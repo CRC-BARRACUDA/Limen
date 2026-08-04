@@ -99,6 +99,21 @@ impl Host {
         let _ = self.raw("host.open", json!({ "target": target, "value": value }));
     }
 
+    /// This module's own directory on disk.
+    ///
+    /// A module that manages content of its own — a downloaded scanner, a rule
+    /// set — keeps it under `tools/` in here. That subdirectory is deliberately
+    /// excluded from the module's trust digest, so filling it does not revoke
+    /// the module's approval; it is also removed with the module, and wiped when
+    /// the module updates, so a new module version starts from a clean slate and
+    /// can require a different tool version.
+    pub fn module_dir(&self) -> Option<String> {
+        self.raw("host.module_dir", Value::Null)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .filter(|s| !s.is_empty())
+    }
+
     /// Raise a desktop notification on the machine running Limen.
     ///
     /// For work the user is not watching — a long scan finishing, an install

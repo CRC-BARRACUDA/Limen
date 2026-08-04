@@ -185,9 +185,12 @@ end
 function M.File(id, opts)
   opts = opts or {}
   return widget(function()
+    -- `directory = true` is the older spelling of `accepts = "dir"`.
+    local accepts = opts.accepts or "file"
+    if opts.directory then accepts = "dir" end
     return { kind = "file", id = id, label = opts.label or "", placeholder = opts.placeholder or "",
-             default = opts.default or "", directory = opts.directory or false,
-             browse = opts.browse or "" }
+             default = opts.default or "", accepts = accepts,
+             browse = opts.browse or "", browse_dir = opts.browse_dir or "" }
   end)
 end
 function M.Select(id, options, opts)
@@ -252,6 +255,14 @@ function M.Module(name, capabilities)
     end,
     log = function(_, message)
       self:_request("host.log", tostring(message))
+    end,
+    -- This module's own directory on disk. Content the module fetches for
+    -- itself belongs under `tools/` in here: excluded from the trust digest,
+    -- removed with the module, wiped when the module updates.
+    module_dir = function(_)
+      local r = self:_request("host.module_dir", {})
+      if type(r) == "string" and r ~= "" then return r end
+      return nil
     end,
     -- Raise a desktop notification on the machine running Limen, for work the
     -- user is not watching. `urgency` is "low" | "normal" | "critical".

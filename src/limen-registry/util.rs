@@ -5,11 +5,20 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-/// Directories excluded from copying and digesting: version-control metadata and
-/// build/cache output. Skipping these keeps installs small and — crucially —
-/// keeps a module's digest stable across rebuilds (build artifacts aren't part
-/// of the module's identity), and avoids hashing hundreds of MB of `target/`.
-const SKIP_DIRS: &[&str] = &["target", ".git", "node_modules", "__pycache__"];
+/// Directories excluded from copying and digesting: version-control metadata,
+/// build/cache output, and `tools/`. Skipping these keeps installs small and —
+/// crucially — keeps a module's digest stable across rebuilds (build artifacts
+/// aren't part of the module's identity), and avoids hashing hundreds of MB of
+/// `target/`.
+///
+/// `tools/` is where a module keeps content it fetches for itself: a scanner
+/// binary, a rule set, anything too large or too licence-encumbered to ship. It
+/// is excluded for the same reason as build output — it is not part of what the
+/// module *is*, and it carries its own integrity check (a module downloading a
+/// tool verifies its checksum before use). Were it hashed, a module would revoke
+/// its own trust approval the moment it installed the tool it exists to drive,
+/// and `verify` would report it as tampered.
+const SKIP_DIRS: &[&str] = &["target", ".git", "node_modules", "__pycache__", "tools"];
 
 fn is_skipped(name: &std::ffi::OsStr) -> bool {
     SKIP_DIRS.iter().any(|s| name == *s)
@@ -70,4 +79,40 @@ fn collect_files(base: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// A module that downloads a tool into `tools/` must not thereby change its
+    /// own identity. The digest pins trust approvals, so if fetched content were
+    /// hashed, a module would revoke its own approval the moment it installed the
+    /// tool it exists to drive — and `verify` would call it tampered.
+    #[test]
+    fn fetched_tools_do_not_change_a_modules_digest() {
+        let root = std::env::temp_dir().join(format!("limen-digest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write(&root.join("limen.toml"), "[module]\nname = \"m\"\n");
+        write(&root.join("lib.rs"), "fn main() {}\n");
+        let before = digest_dir(&root).unwrap();
+
+        // The module fetches a 'binary' for itself.
+        write(&root.join("tools/loki-2.12.0/loki"), "ELF...");
+        let after = digest_dir(&root).unwrap();
+        assert_eq!(
+            before, after,
+            "tools/ must be outside the module's identity"
+        );
+
+        // ...while its actual content still is.
+        write(&root.join("lib.rs"), "fn main() { changed() }\n");
+        assert_ne!(before, digest_dir(&root).unwrap(), "real edits must show");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -333,6 +333,20 @@ impl Host {
         handler: &Arc<IncomingHandler>,
         logger: &Logger,
     ) -> Result<()> {
+        // Give this module a handler that knows where the module lives. The
+        // shared dispatcher is one closure for every module and so has no idea
+        // who is calling; a module that manages content of its own — a fetched
+        // tool under `tools/` — has to be able to find its own directory.
+        let handler: Arc<IncomingHandler> = {
+            let shared = handler.clone();
+            let dir = spec.cwd.clone();
+            Arc::new(move |method: &str, params: Value| match method {
+                "host.module_dir" => Ok(json!(dir.to_string_lossy())),
+                _ => shared(method, params),
+            })
+        };
+        let handler = &handler;
+
         let conn: Arc<dyn Module> = match &spec.launch {
             Launch::Script { runtime, script } => {
                 // Resolve the interpreter now; if missing, skip the module

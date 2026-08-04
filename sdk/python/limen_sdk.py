@@ -79,21 +79,25 @@ class File(Widget):
     method params, exactly like `Text`).
 
     The user can type a path, drag a file or folder onto the field, or press
-    Browse for the OS picker. `directory=True` picks a folder instead of a file
-    and only accepts folders when dropped. `browse` is the button's label — it
-    lives here, rather than in the host, so a module can translate it alongside
-    the rest of its view."""
+    Browse for the OS picker. `accepts` is "file", "dir", or "file|dir" for
+    either; a dual field shows two Browse buttons, since no OS offers a dialog
+    that picks either — label the second with `browse_dir`. `browse` and
+    `browse_dir` live here rather than in the host so a module can translate them
+    alongside the rest of its view."""
 
-    def __init__(self, id, label="", placeholder="", default="", directory=False,
-                 browse=""):
+    def __init__(self, id, label="", placeholder="", default="", accepts="file",
+                 browse="", browse_dir="", directory=False):
         self.id, self.label, self.placeholder = id, label, placeholder
-        self.default, self.directory, self.browse = default, bool(directory), browse
+        self.default, self.browse, self.browse_dir = default, browse, browse_dir
+        # `directory=True` is the older spelling of `accepts="dir"`.
+        self.accepts = "dir" if directory else accepts
 
     def to_spec(self):
         return {
             "kind": "file", "id": self.id, "label": self.label,
             "placeholder": self.placeholder, "default": self.default,
-            "directory": self.directory, "browse": self.browse,
+            "accepts": self.accepts, "browse": self.browse,
+            "browse_dir": self.browse_dir,
         }
 
 
@@ -323,6 +327,14 @@ class Host:
         the path / URL / registry key (ignored for device_manager). Best-effort;
         registry and device_manager are Windows-only."""
         self._m._request("host.open", {"target": target, "value": value})
+
+    def module_dir(self):
+        """This module's own directory on disk. Content the module fetches for
+        itself belongs under `tools/` in here: that subdirectory is excluded from
+        the module's trust digest, is removed with the module, and is wiped when
+        the module updates."""
+        r = self._m._request("host.module_dir", None)
+        return r if isinstance(r, str) and r else None
 
     def notify(self, title, body="", urgency="normal"):
         """Raise a desktop notification on the machine running Limen — for work
