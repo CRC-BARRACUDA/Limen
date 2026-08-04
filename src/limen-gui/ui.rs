@@ -929,6 +929,20 @@ pub struct View {
     /// one.
     #[serde(default)]
     pub auto: Option<AutoAction>,
+    /// Show this view as a pop-up over whatever is already on screen, instead of
+    /// replacing it. The value is the pop-up's identity.
+    ///
+    /// The view underneath stays visible and stops responding, so a module can
+    /// put settings or a sub-form in front of the user without losing the screen
+    /// they came from. Pop-ups stack: one can open another, and the last one
+    /// opened is the live one.
+    ///
+    /// The identity is what lets a pop-up redraw itself. A view whose id is
+    /// already open replaces that pop-up in place; a new id opens over it. Without
+    /// it, a form that refreshes after every edit — adding a file to a list, say —
+    /// would pile up a new pop-up per keystroke.
+    #[serde(default)]
+    pub modal: Option<String>,
 }
 
 /// The capability + method a button invokes.
@@ -952,6 +966,7 @@ impl AutoAction {
     /// The [`Invoke`] this auto-action dispatches (always in the same tab).
     pub fn into_invoke(self) -> Invoke {
         Invoke {
+            dismiss: false,
             action: Action {
                 capability: self.capability,
                 method: self.method,
@@ -997,6 +1012,10 @@ pub struct Invoke {
     pub action: Action,
     pub args: serde_json::Map<String, Value>,
     pub open_in_tab: bool,
+    /// Close the top pop-up instead of calling the module. Set by a button the
+    /// module marked `dismiss` — a Cancel that has nothing to cancel remotely,
+    /// so it is answered here rather than by a round trip.
+    pub dismiss: bool,
 }
 
 /// One bar in a [`Widget::Chart`].
@@ -1129,6 +1148,9 @@ pub enum Widget {
         /// Open the result view in a new tab instead of replacing this one.
         #[serde(default)]
         open_in_tab: bool,
+        /// Close the pop-up this button is in, without calling the module.
+        #[serde(default)]
+        dismiss: bool,
     },
     Separator,
     Row {
@@ -1443,6 +1465,7 @@ fn render_widget(
             enabled,
             args,
             open_in_tab,
+            dismiss,
         } => {
             let running = busy == Some(action);
             ui.horizontal(|ui| {
@@ -1460,6 +1483,7 @@ fn render_widget(
                         action: action.clone(),
                         args: args.clone(),
                         open_in_tab: *open_in_tab,
+                        dismiss: *dismiss,
                     });
                 }
                 if running {
@@ -1654,6 +1678,122 @@ impl Accepts {
             Accepts::File => !is_dir,
         }
     }
+}
+
+/// What a frame of the pop-up layer produced.
+#[derive(Default)]
+pub struct ModalOutcome {
+    /// A button inside the pop-up was clicked.
+    pub invoke: Option<Invoke>,
+    /// The pop-up asked to close — Esc, the close cross, or a `dismiss` button.
+    pub dismissed: bool,
+    /// The closing animation has finished, so the caller can drop what it kept
+    /// only so the pop-up had something to draw on the way out.
+    pub closed: bool,
+}
+
+/// Draw the module pop-up layer: a module view shown over the screen it came
+/// from.
+///
+/// Unlike [`confirm_dialog`], the content here is a module's own view, so this
+/// draws whatever widgets it sent. `view` is the one on top — or, once the stack
+/// is empty, the one still animating away, which is why the caller keeps it a
+/// moment longer than the stack does.
+///
+/// `depth` keys the entrance animation, so opening a second pop-up over the
+/// first animates rather than snapping in.
+pub fn modal_layer(
+    ctx: &egui::Context,
+    view: Option<&View>,
+    open: bool,
+    depth: usize,
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+) -> ModalOutcome {
+    let id = egui::Id::new("limen_modal");
+    let t = if animations_enabled() {
+        ctx.animate_bool_with_time(id, open, 0.13)
+    } else {
+        open as u8 as f32
+    };
+    let mut out = ModalOutcome::default();
+    if t <= 0.002 {
+        // Fully gone: tell the caller it can let go of the view it was holding
+        // open purely for the animation.
+        out.closed = !open;
+        return out;
+    }
+    let Some(view) = view else {
+        return out;
+    };
+
+    // The veil dims the screen behind and, sensing clicks across all of it at a
+    // higher order than the panels, swallows them — so the view underneath is
+    // inert while the pop-up stands.
+    let screen = ctx.screen_rect();
+    egui::Area::new(id.with("veil"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+            ui.painter()
+                .rect_filled(rect, egui::Rounding::ZERO, with_alpha(color::BG, 0.72 * t));
+        });
+
+    // Esc closes the top one, always — a pop-up you cannot get out of is a trap,
+    // and a module should not be able to build one.
+    if open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        out.dismissed = true;
+    }
+
+    egui::Area::new(id.with("box"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, (1.0 - t) * 12.0])
+        .show(ctx, |ui| {
+            ui.set_opacity(t);
+            egui::Frame::none()
+                .fill(color::BG_ELEVATED)
+                .stroke(egui::Stroke::new(1.0_f32, color::BORDER))
+                .inner_margin(egui::Margin::symmetric(22.0, 18.0))
+                .show(ui, |ui| {
+                    ui.set_max_width(520.0);
+                    // A tall form must scroll inside the pop-up rather than run
+                    // off the bottom of the screen.
+                    let max_h = (screen.height() - 140.0).max(220.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&view.title).size(16.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(egui::Button::new(egui::RichText::new("✕").size(15.0)).frame(false))
+                                .on_hover_text("Esc")
+                                .clicked()
+                            {
+                                out.dismissed = true;
+                            }
+                        });
+                    });
+                    ui.add_space(10.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(max_h)
+                        .show(ui, |ui| {
+                            // Depth keys the entrance so a second pop-up over the
+                            // first animates in as its own arrival.
+                            // Read the clock *before* taking the data lock:
+                            // `input` and `data_mut` lock the same Context, so
+                            // nesting them deadlocks the moment a pop-up opens.
+                            let now = ui.input(|i| i.time);
+                            let key = id.with("reveal").with(depth);
+                            let reveal =
+                                ui.data_mut(|d| *d.get_temp_mut_or_insert_with(key, || now));
+                            if let Some(inv) =
+                                render_view(ui, view, inputs, busy, reveal)
+                            {
+                                out.invoke = Some(inv);
+                            }
+                        });
+                });
+        });
+    out
 }
 
 /// A modal "are you sure?" over the app.
@@ -2162,6 +2302,7 @@ fn render_interactive_table(
                 let mut args = serde_json::Map::new();
                 args.insert("id".into(), Value::String(row_id.clone()));
                 *clicked = Some(Invoke {
+                    dismiss: false,
                     action: act.action.clone(),
                     args,
                     open_in_tab: act.open_in_tab,
@@ -2189,6 +2330,7 @@ fn render_row_menu(ui: &mut egui::Ui, items: &[MenuItem], row_id: &str, out: &mu
                 let mut args = item.args.clone();
                 args.insert("id".into(), Value::String(row_id.to_string()));
                 *out = Some(Invoke {
+                    dismiss: false,
                     action: action.clone(),
                     args,
                     open_in_tab: item.open_in_tab,
@@ -2378,6 +2520,30 @@ pub fn collect_params(view: &View, inputs: &HashMap<String, String>) -> Value {
     Value::Object(map)
 }
 
+/// Every input id a view declares.
+///
+/// A widget's `default` only seeds its entry the first time it is drawn, so a
+/// pop-up whose fields are left behind when it closes would reopen showing what
+/// was typed and abandoned — a Cancel that cancels nothing. The caller forgets
+/// these when the pop-up goes, and the next open takes the module's values again.
+pub fn widget_ids(view: &View) -> Vec<String> {
+    fn walk(widgets: &[Widget], out: &mut Vec<String>) {
+        for w in widgets {
+            match w {
+                Widget::Text { id, .. }
+                | Widget::Select { id, .. }
+                | Widget::File { id, .. }
+                | Widget::Checkbox { id, .. } => out.push(id.clone()),
+                Widget::Row { children } => walk(children, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&view.widgets, &mut out);
+    out
+}
+
 fn collect_ids(
     widgets: &[Widget],
     inputs: &HashMap<String, String>,
@@ -2497,6 +2663,159 @@ mod tests {
                 ui.label("Заборонене ПЗ — Встановлені модулі");
             });
         });
+    }
+
+    /// `modal` and `dismiss` are opt-in: every view built before they existed
+    /// must keep replacing the screen and calling the module, as it always did.
+    #[test]
+    fn views_are_not_pop_ups_unless_they_say_so() {
+        let plain: View = serde_json::from_str(r#"{"title":"S","widgets":[]}"#).unwrap();
+        assert!(plain.modal.is_none());
+
+        let popup: View =
+            serde_json::from_str(r#"{"title":"S","widgets":[],"modal":"settings"}"#).unwrap();
+        assert_eq!(popup.modal.as_deref(), Some("settings"));
+
+        let btn: Widget = serde_json::from_str(
+            r#"{"kind":"button","text":"Cancel","action":{"capability":"c","method":"m"},"dismiss":true}"#,
+        )
+        .unwrap();
+        match btn {
+            Widget::Button { dismiss, .. } => assert!(dismiss),
+            _ => panic!("expected a button"),
+        }
+        let old: Widget = serde_json::from_str(
+            r#"{"kind":"button","text":"Go","action":{"capability":"c","method":"m"}}"#,
+        )
+        .unwrap();
+        match old {
+            Widget::Button { dismiss, .. } => assert!(!dismiss, "a plain button still calls out"),
+            _ => panic!("expected a button"),
+        }
+    }
+
+    /// Control for the pop-up test below: the shipped confirm dialog uses the
+    /// same screen-sized veil, so if this hangs too the harness is at fault
+    /// rather than the layer being tested.
+    #[test]
+    fn control_the_shipped_confirm_dialog_renders_headlessly() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label("behind");
+            });
+            let _ = confirm_dialog(ctx, true, "Remove module?", Some("loki"), "Remove", "Cancel");
+        });
+    }
+
+    /// The pop-up layer has to survive a real frame — it allocates a
+    /// screen-sized veil, nests a scroll area and renders arbitrary module
+    /// widgets, any of which can panic on a bad layout rather than fail a
+    /// deserialize.
+    #[test]
+    fn the_pop_up_layer_renders_a_module_view() {
+        let view: View = serde_json::from_str(
+            r#"{"title":"Scan settings","modal":"settings","widgets":[
+                {"kind":"label","text":"Scanning"},
+                {"kind":"checkbox","id":"procs","label":"Process memory"},
+                {"kind":"row","children":[
+                    {"kind":"select","id":"cpu","options":["100","80"],"label":"CPU"},
+                    {"kind":"text","id":"alert","label":"Alert"}]},
+                {"kind":"separator"},
+                {"kind":"button","text":"Cancel","action":{"capability":"c","method":"m"},"dismiss":true}]}"#,
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let mut inputs = HashMap::new();
+        // A real frame always has a screen rect, and the veil is allocated at
+        // exactly that size — without one there is nothing bounding the layout.
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        for open in [true, false] {
+            let _ = ctx.run(input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.label("behind");
+                });
+                // Open, then closing — the closing frame still has to draw.
+                let _ = modal_layer(ctx, Some(&view), open, 0, &mut inputs, None);
+            });
+        }
+    }
+
+    /// Cancel has to actually cancel. A widget's default seeds its entry only
+    /// on first draw, so unless the abandoned values are forgotten the pop-up
+    /// reopens showing the very edits it was meant to discard.
+    #[test]
+    fn a_closed_pop_up_takes_its_abandoned_edits_with_it() {
+        let popup: View = serde_json::from_str(
+            r#"{"title":"Settings","modal":"s","widgets":[
+                {"kind":"select","id":"cpu","options":["100"]},
+                {"kind":"row","children":[{"kind":"text","id":"alert"}]},
+                {"kind":"checkbox","id":"procs"}]}"#,
+        )
+        .unwrap();
+        let mut ids = widget_ids(&popup);
+        ids.sort();
+        assert_eq!(ids, vec!["alert", "cpu", "procs"], "including nested rows");
+
+        let mut inputs: HashMap<String, String> = [
+            ("cpu".to_string(), "40".to_string()),
+            ("target".to_string(), "/srv".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        for id in widget_ids(&popup) {
+            inputs.remove(&id);
+        }
+        assert!(!inputs.contains_key("cpu"), "the abandoned edit is gone");
+        assert!(
+            inputs.contains_key("target"),
+            "the screen behind keeps its own fields"
+        );
+    }
+
+    /// A pop-up's fields have to reach the module, and where the pop-up and the
+    /// screen behind it name the same field, the one in front wins — that is the
+    /// one the user just typed into.
+    #[test]
+    fn pop_up_fields_are_collected_over_the_screen_behind() {
+        let base: View = serde_json::from_str(
+            r#"{"title":"S","widgets":[{"kind":"text","id":"target"},{"kind":"text","id":"depth"}]}"#,
+        )
+        .unwrap();
+        let popup: View = serde_json::from_str(
+            r#"{"title":"Settings","widgets":[{"kind":"text","id":"depth"}],"modal":"settings"}"#,
+        )
+        .unwrap();
+        let inputs: HashMap<String, String> = [
+            ("target".to_string(), "/srv".to_string()),
+            ("depth".to_string(), "9".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let mut m = serde_json::Map::new();
+        for v in [&base, &popup] {
+            if let Value::Object(o) = collect_params(v, &inputs) {
+                m.extend(o);
+            }
+        }
+        assert_eq!(m.get("target").and_then(Value::as_str), Some("/srv"));
+        assert_eq!(m.get("depth").and_then(Value::as_str), Some("9"));
     }
 
     /// What a path field takes, and the fallback for modules built before

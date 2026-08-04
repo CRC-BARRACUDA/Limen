@@ -115,6 +115,11 @@ impl Widget {
     pub fn open_in_tab(self) -> Self {
         self.set("open_in_tab", json!(true))
     }
+    /// Close the pop-up this button is in, without calling the module. For the
+    /// Cancel of a [`window_modal`], which has nothing to cancel remotely.
+    pub fn dismiss(self) -> Self {
+        self.set("dismiss", json!(true))
+    }
 
     // ---- table interactivity ---------------------------------------------- //
     /// Per-row identity (parallel to the table's `rows`); the row's id is sent
@@ -289,6 +294,28 @@ pub fn chart(title: impl Into<String>, data: Vec<(String, f64)>) -> Widget {
 pub fn window(title: impl Into<String>, widgets: Vec<Widget>) -> Value {
     let ws: Vec<Value> = widgets.into_iter().map(Widget::into_value).collect();
     json!({ "title": title.into(), "widgets": ws })
+}
+
+/// A view shown as a pop-up over the screen it came from, instead of replacing
+/// it.
+///
+/// The view underneath stays visible and stops responding, so settings or a
+/// sub-form can be put in front of the user without losing their place. Pop-ups
+/// stack — one can open another — and Esc always closes the top one, so give
+/// every pop-up a way out that the user would think to press.
+/// `id` is the pop-up's identity: returning a view with an id that is already
+/// open redraws that pop-up in place instead of opening another over it, so a
+/// form can refresh itself after every edit.
+pub fn window_modal(
+    title: impl Into<String>,
+    id: impl Into<String>,
+    widgets: Vec<Widget>,
+) -> Value {
+    let mut v = window(title, widgets);
+    if let Value::Object(m) = &mut v {
+        m.insert("modal".into(), json!(id.into()));
+    }
+    v
 }
 
 /// A view that auto-invokes `capability`.`method` once, right after it renders

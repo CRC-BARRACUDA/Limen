@@ -128,6 +128,12 @@ pub struct LimenApp {
 
     view: Option<ui::View>,
     view_error: Option<String>,
+    /// Module pop-ups, innermost last. A view that arrives with `modal` set is
+    /// pushed here instead of replacing the screen behind it.
+    modal_stack: Vec<ui::View>,
+    /// The pop-up that was just closed, kept only until it has finished
+    /// animating away — otherwise it would vanish instead of leaving.
+    modal_closing: Option<ui::View>,
     inputs: HashMap<String, String>,
     output: String,
     busy: bool,
@@ -262,6 +268,8 @@ impl LimenApp {
             active: 0,
             view: None,
             view_error: None,
+            modal_stack: Vec::new(),
+            modal_closing: None,
             inputs: HashMap::new(),
             output: String::new(),
             busy: false,
@@ -544,8 +552,7 @@ impl LimenApp {
                                 Ok(v) => match serde_json::from_value::<ui::View>(v) {
                                     Ok(view) => {
                                         let auto = view.auto.clone();
-                                        self.view = Some(view);
-                                        self.view_error = None;
+                                        self.accept_view(view);
                                         // Chain the next step, if the view asked for one.
                                         if let Some(a) = auto {
                                             self.dispatch(a.into_invoke());
@@ -576,8 +583,7 @@ impl LimenApp {
                                 match serde_json::from_value::<ui::View>(v) {
                                     Ok(view) => {
                                         let auto = view.auto.clone();
-                                        self.view = Some(view);
-                                        self.view_error = None;
+                                        self.accept_view(view);
                                         self.output.clear();
                                         // Chain the next step, if the view asked for one.
                                         if let Some(a) = auto {
@@ -645,6 +651,10 @@ impl LimenApp {
         self.open_tab(Tab::Module(name.clone()));
         self.view = None;
         self.view_error = None;
+        // A pop-up belongs to the screen that raised it; moving to another
+        // module must not leave one hanging over the new one.
+        self.modal_stack.clear();
+        self.modal_closing = None;
         self.inputs.clear();
         self.output.clear();
         // A module that failed to start has no live connection — show why, here,
@@ -667,19 +677,80 @@ impl LimenApp {
         }
     }
 
+    /// Take a view a module returned for the module page.
+    ///
+    /// A `modal` view opens over what is already there; anything else replaces
+    /// the screen and closes whatever pop-ups were open — a module that returns
+    /// a fresh screen has moved on, so leaving a pop-up floating over it would
+    /// strand the user on a form belonging to the previous one.
+    fn accept_view(&mut self, view: ui::View) {
+        if let Some(id) = view.modal.clone() {
+            // Already open: redraw that pop-up where it stands, and close
+            // anything that was opened over it — going back to a form means
+            // leaving what it led to.
+            if let Some(at) = self
+                .modal_stack
+                .iter()
+                .position(|v| v.modal.as_deref() == Some(id.as_str()))
+            {
+                for v in self.modal_stack.split_off(at) {
+                    self.forget_inputs(&v);
+                }
+            }
+            // A module in a loop could otherwise stack pop-ups without end.
+            const MAX_DEPTH: usize = 8;
+            if self.modal_stack.len() < MAX_DEPTH {
+                self.modal_stack.push(view);
+            }
+        } else {
+            for v in std::mem::take(&mut self.modal_stack) {
+                self.forget_inputs(&v);
+            }
+            self.view = Some(view);
+        }
+        self.view_error = None;
+    }
+
+    /// Drop the field values belonging to a pop-up that has gone.
+    ///
+    /// A widget's default only seeds its entry the first time it is drawn, so
+    /// leaving these behind would make Cancel a no-op: the pop-up would reopen
+    /// showing exactly the edits it was meant to throw away.
+    fn forget_inputs(&mut self, view: &ui::View) {
+        for id in ui::widget_ids(view) {
+            self.inputs.remove(&id);
+        }
+    }
+
+    /// Close the top pop-up, keeping it just long enough to animate away.
+    fn dismiss_modal(&mut self) {
+        // Only the last one out animates: closing one pop-up to reveal another
+        // behind it is a change of contents, not the layer going away.
+        if let Some(v) = self.modal_stack.pop() {
+            self.forget_inputs(&v);
+            if self.modal_stack.is_empty() {
+                self.modal_closing = Some(v);
+            }
+        }
+    }
+
     fn dispatch(&mut self, invoke: ui::Invoke) {
         // Base params come from the active view's inputs (a module tab's search
         // box etc.); a detail tab has no shared inputs. Row/menu args (the row
         // `id`, `via`, …) are merged on top.
         let mut params: serde_json::Map<String, serde_json::Value> = match self.active_tab() {
-            Some(Tab::Module(_)) => match self
-                .view
-                .as_ref()
-                .map(|v| ui::collect_params(v, &self.inputs))
-            {
-                Some(serde_json::Value::Object(m)) => m,
-                _ => serde_json::Map::new(),
-            },
+            Some(Tab::Module(_)) => {
+                // The screen behind, then each pop-up over it: a settings pop-up
+                // has to send what was typed into it, and where both define a
+                // field the one in front is the one the user just edited.
+                let mut m = serde_json::Map::new();
+                for v in self.view.iter().chain(self.modal_stack.iter()) {
+                    if let serde_json::Value::Object(o) = ui::collect_params(v, &self.inputs) {
+                        m.extend(o);
+                    }
+                }
+                m
+            }
             // A detail tab has its own view + inputs (e.g. a config form).
             Some(Tab::Detail { id }) => match self
                 .detail_tabs
@@ -1577,6 +1648,41 @@ impl eframe::App for LimenApp {
             self.remote_arrivals.clear();
             self.remote_error = None;
             self.worker.send(Command::ListRemote);
+        }
+
+        // Module pop-ups, over everything the panels drew. Driven every frame
+        // rather than only while one is open, so a closing pop-up has something
+        // to animate away with.
+        {
+            let busy_action = self.busy_action.clone();
+            let depth = self.modal_stack.len();
+            let top = self
+                .modal_stack
+                .last()
+                .or(self.modal_closing.as_ref())
+                .cloned();
+            let out = ui::modal_layer(
+                ctx,
+                top.as_ref(),
+                !self.modal_stack.is_empty(),
+                depth,
+                &mut self.inputs,
+                busy_action.as_ref(),
+            );
+            if out.closed {
+                self.modal_closing = None;
+            }
+            if out.dismissed {
+                self.dismiss_modal();
+            } else if let Some(inv) = out.invoke {
+                // A `dismiss` button is answered here — it has nothing to ask the
+                // module, so a round trip would only add a flicker.
+                if inv.dismiss {
+                    self.dismiss_modal();
+                } else {
+                    self.dispatch(inv);
+                }
+            }
         }
 
         ctx.request_repaint_after(Duration::from_millis(150));
