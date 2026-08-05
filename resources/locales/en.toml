@@ -75,6 +75,7 @@ available = "Available"
 [tabstrip]
 
 [perm]
+title = "Permission required"
 this_module = "This module"
 wants_to_run = "“{name}” wants to run “{method}”, which needs elevated permissions."
 grant_run = "Grant & Run"

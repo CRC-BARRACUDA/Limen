@@ -108,6 +108,14 @@ pub struct LimenApp {
     /// Names of modules the user has granted their declared permissions
     /// (trusted at their current content digest).
     trusted: HashSet<String>,
+    /// The consent dialog still on screen, which outlives `pending_action` by
+    /// the length of its closing animation.
+    consent_showing: Option<ui::Invoke>,
+    /// A module action waiting on the question its button carried, and the one
+    /// still fading out — the same pair as the consent dialog, for the same
+    /// reason: an answered question has to keep drawing while it leaves.
+    pending_confirm: Option<ui::Invoke>,
+    confirm_showing: Option<ui::Invoke>,
     /// An elevated action awaiting the user's consent (shown as a dialog).
     pending_action: Option<ui::Invoke>,
     /// A module the user asked to remove, held until they confirm. Removal
@@ -268,6 +276,9 @@ impl LimenApp {
             active: 0,
             view: None,
             view_error: None,
+            consent_showing: None,
+            pending_confirm: None,
+            confirm_showing: None,
             modal_stack: Vec::new(),
             modal_closing: None,
             inputs: HashMap::new(),
@@ -444,6 +455,7 @@ impl LimenApp {
         }
         let answer = ui::confirm_dialog(
             ctx,
+            "removal",
             self.pending_remove.is_some(),
             &i18n::t("confirm.remove_title"),
             self.confirm_subject.as_deref(),
@@ -711,6 +723,18 @@ impl LimenApp {
         self.view_error = None;
     }
 
+    /// Close the pop-up entirely, however many steps deep it went.
+    ///
+    /// The cross means "I am done here" — three steps into a settings form that
+    /// should not mean "take me back two". The back arrow is for that.
+    fn close_modals(&mut self) {
+        let top = self.modal_stack.last().cloned();
+        for v in std::mem::take(&mut self.modal_stack) {
+            self.forget_inputs(&v);
+        }
+        self.modal_closing = top;
+    }
+
     /// Drop the field values belonging to a pop-up that has gone.
     ///
     /// A widget's default only seeds its entry the first time it is drawn, so
@@ -735,6 +759,12 @@ impl LimenApp {
     }
 
     fn dispatch(&mut self, invoke: ui::Invoke) {
+        // A button that carries a question is not run until it is answered. The
+        // module is never told about the click, so it cannot skip asking.
+        if invoke.confirm.is_some() {
+            self.pending_confirm = Some(invoke);
+            return;
+        }
         // Base params come from the active view's inputs (a module tab's search
         // box etc.); a detail tab has no shared inputs. Row/menu args (the row
         // `id`, `via`, …) are merged on top.
@@ -1565,15 +1595,19 @@ impl eframe::App for LimenApp {
         self.serve_browse_request(ctx);
 
         // Consent dialog for a pending elevated action.
-        if let Some(pending) = self.pending_action.clone() {
-            let module = self.module_of(&pending.action.capability).cloned();
-            let mut decision: Option<bool> = None; // Some(true)=grant, Some(false)=deny
-            egui::Window::new("Permission required")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.set_max_width(420.0);
+        //
+        // Kept alive for a moment after it is answered so it can animate away —
+        // the pending action is cleared immediately, so the *last* one is what
+        // the closing frames draw.
+        {
+            let open = self.pending_action.is_some();
+            if open {
+                self.consent_showing = self.pending_action.clone();
+            }
+            let mut decision: Option<bool> = None;
+            if let Some(pending) = self.consent_showing.clone() {
+                let module = self.module_of(&pending.action.capability).cloned();
+                let gone = ui::consent_dialog(ctx, open, |ui| {
                     let fallback = i18n::t("perm.this_module");
                     let name = module
                         .as_ref()
@@ -1620,19 +1654,27 @@ impl eframe::App for LimenApp {
                         );
                     });
                 });
-            match decision {
-                Some(true) => {
-                    if let Some(m) = &module {
-                        self.grant_trust(&m.name);
+                if gone {
+                    self.consent_showing = None;
+                }
+                // Only a live dialog can be answered; a closing one is an
+                // animation and its buttons are on their way out.
+                if open {
+                    match decision {
+                        Some(true) => {
+                            if let Some(m) = &module {
+                                self.grant_trust(&m.name);
+                            }
+                            self.pending_action = None;
+                            self.dispatch(pending); // now allowed
+                        }
+                        Some(false) => {
+                            self.pending_action = None;
+                            self.status = i18n::t("perm.denied");
+                        }
+                        None => {}
                     }
-                    self.pending_action = None;
-                    self.dispatch(pending); // now allowed
                 }
-                Some(false) => {
-                    self.pending_action = None;
-                    self.status = i18n::t("perm.denied");
-                }
-                None => {}
             }
         }
 
@@ -1648,6 +1690,45 @@ impl eframe::App for LimenApp {
             self.remote_arrivals.clear();
             self.remote_error = None;
             self.worker.send(Command::ListRemote);
+        }
+
+        // A module action's own confirmation, drawn with the host's dialog so it
+        // matches the one the module manager uses to remove a module.
+        {
+            let open = self.pending_confirm.is_some();
+            if open {
+                self.confirm_showing = self.pending_confirm.clone();
+            }
+            if let Some(inv) = self.confirm_showing.clone() {
+                let c = inv.confirm.clone().unwrap_or_default();
+                let subject = (!c.subject.is_empty()).then_some(c.subject.as_str());
+                let yes = if c.confirm_label.is_empty() {
+                    i18n::t("confirm.remove_yes")
+                } else {
+                    c.confirm_label.clone()
+                };
+                let no = if c.cancel_label.is_empty() {
+                    i18n::t("confirm.cancel")
+                } else {
+                    c.cancel_label.clone()
+                };
+                match ui::confirm_dialog(ctx, "module", open, &c.title, subject, &yes, &no) {
+                    Some(true) => {
+                        self.pending_confirm = None;
+                        // Run it now that it has been answered; the question is
+                        // dropped so it is not asked a second time.
+                        let mut go = inv;
+                        go.confirm = None;
+                        self.dispatch(go);
+                    }
+                    Some(false) => self.pending_confirm = None,
+                    None => {
+                        if !open {
+                            self.confirm_showing = None;
+                        }
+                    }
+                }
+            }
         }
 
         // Module pop-ups, over everything the panels drew. Driven every frame
@@ -1672,7 +1753,9 @@ impl eframe::App for LimenApp {
             if out.closed {
                 self.modal_closing = None;
             }
-            if out.dismissed {
+            if out.close_all {
+                self.close_modals();
+            } else if out.dismissed {
                 self.dismiss_modal();
             } else if let Some(inv) = out.invoke {
                 // A `dismiss` button is answered here — it has nothing to ask the

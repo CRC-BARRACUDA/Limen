@@ -73,6 +73,7 @@ available = "Доступні"
 [tabstrip]
 
 [perm]
+title = "Потрібен дозвіл"
 this_module = "Цей модуль"
 wants_to_run = "«{name}» хоче виконати «{method}», що потребує підвищених прав."
 grant_run = "Дозволити й запустити"

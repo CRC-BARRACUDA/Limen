@@ -649,9 +649,79 @@ pub fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
 // minimize/maximize/close glyphs and the edge/corner resize grips.
 // --------------------------------------------------------------------------- //
 
+/// A small square button with a painted icon.
+///
+/// Icons are painted, not typed: the app ships a single font and JetBrains Mono
+/// has no trash glyph, so a character would be an empty box. `danger` tints it
+/// red on hover, for the ones that destroy something.
+pub fn icon_button(ui: &mut egui::Ui, icon: &str, danger: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0, 26.0), egui::Sense::click());
+    let a = interact(ui, &resp);
+    let tint = if danger {
+        color::DANGER_BRIGHT
+    } else {
+        color::ACCENT
+    };
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::Rounding::same(3.0),
+        with_alpha(tint, 0.14 * a.hover),
+    );
+    let c = lerp_color(color::TEXT_MUTED, tint, a.hover);
+    let stroke = egui::Stroke::new(1.3_f32, c);
+    let m = rect.center();
+    match icon {
+        // A lid with a handle, a tapering body, and two slots.
+        "trash" => {
+            let (w, h) = (5.5_f32, 6.0_f32);
+            let lid_y = m.y - h + 1.0;
+            painter.hline((m.x - w)..=(m.x + w), lid_y, stroke);
+            // Handle.
+            painter.hline((m.x - 2.0)..=(m.x + 2.0), lid_y - 2.5, stroke);
+            painter.line_segment(
+                [egui::pos2(m.x - 2.0, lid_y - 2.5), egui::pos2(m.x - 2.0, lid_y)],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(m.x + 2.0, lid_y - 2.5), egui::pos2(m.x + 2.0, lid_y)],
+                stroke,
+            );
+            // Body, narrowing toward the base.
+            let bot = m.y + h;
+            painter.line_segment(
+                [egui::pos2(m.x - w + 0.8, lid_y), egui::pos2(m.x - w + 2.0, bot)],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(m.x + w - 0.8, lid_y), egui::pos2(m.x + w - 2.0, bot)],
+                stroke,
+            );
+            painter.hline((m.x - w + 2.0)..=(m.x + w - 2.0), bot, stroke);
+            for dx in [-2.0_f32, 2.0] {
+                painter.line_segment(
+                    [
+                        egui::pos2(m.x + dx, lid_y + 2.5),
+                        egui::pos2(m.x + dx, bot - 1.5),
+                    ],
+                    stroke,
+                );
+            }
+        }
+        _ => {
+            // Unknown icon: a dot, rather than nothing at all.
+            painter.circle_filled(m, 2.0, c);
+        }
+    }
+    resp
+}
+
 /// A window-control button.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WinBtn {
+    /// Return to the step that raised this one. Drawn as a left arrow, in the
+    /// window-control family so it belongs to the frame rather than the form.
+    Back,
     Minimize,
     Maximize,
     Restore,
@@ -703,6 +773,18 @@ pub fn window_button(ui: &mut egui::Ui, kind: WinBtn) -> egui::Response {
         WinBtn::Close => {
             painter.line_segment([c + egui::vec2(-s, -s), c + egui::vec2(s, s)], stroke);
             painter.line_segment([c + egui::vec2(s, -s), c + egui::vec2(-s, s)], stroke);
+        }
+        WinBtn::Back => {
+            // A left arrow: shaft plus two barbs.
+            painter.line_segment([c + egui::vec2(s, 0.0), c + egui::vec2(-s, 0.0)], stroke);
+            painter.line_segment(
+                [c + egui::vec2(-s, 0.0), c + egui::vec2(-s + 4.0, -4.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-s, 0.0), c + egui::vec2(-s + 4.0, 4.0)],
+                stroke,
+            );
         }
     }
     resp
@@ -943,6 +1025,14 @@ pub struct View {
     /// would pile up a new pop-up per keystroke.
     #[serde(default)]
     pub modal: Option<String>,
+    /// How wide this pop-up wants to be, in points. The host clamps it to the
+    /// window — a module cannot know how much room there is, and a text field
+    /// asking for infinite width must never be what decides.
+    #[serde(default)]
+    pub modal_width: Option<f32>,
+    /// How tall it may grow before its contents scroll, in points. Also clamped.
+    #[serde(default)]
+    pub modal_height: Option<f32>,
 }
 
 /// The capability + method a button invokes.
@@ -967,6 +1057,7 @@ impl AutoAction {
     pub fn into_invoke(self) -> Invoke {
         Invoke {
             dismiss: false,
+            confirm: None,
             action: Action {
                 capability: self.capability,
                 method: self.method,
@@ -999,9 +1090,33 @@ pub struct MenuItem {
     /// Open the result in a new tab instead of replacing the current view.
     #[serde(default)]
     pub open_in_tab: bool,
+    /// Ask before running this, exactly as a button can. A destructive action
+    /// is no less destructive for being in a menu.
+    #[serde(default)]
+    pub confirm: Option<Confirm>,
     /// Submenu entries; when present, `action` is ignored and this is a submenu.
     #[serde(default)]
     pub children: Vec<MenuItem>,
+}
+
+/// A question the host asks before running an action.
+///
+/// Carried by the button rather than handled by the module: the module never
+/// sees the click unless the answer was yes, so it cannot forget to ask, and
+/// every confirmation in the app looks and behaves the same — including the
+/// module manager's own "remove this module?".
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Confirm {
+    #[serde(default)]
+    pub title: String,
+    /// What the action happens *to*, drawn in its own frame. The thing at stake
+    /// should be unmistakable rather than something to skim past in a sentence.
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub confirm_label: String,
+    #[serde(default)]
+    pub cancel_label: String,
 }
 
 /// A dispatched interaction: an [`Action`] plus any extra params (e.g. the
@@ -1016,6 +1131,8 @@ pub struct Invoke {
     /// module marked `dismiss` — a Cancel that has nothing to cancel remotely,
     /// so it is answered here rather than by a round trip.
     pub dismiss: bool,
+    /// Ask this before running it. The host handles the asking.
+    pub confirm: Option<Confirm>,
 }
 
 /// One bar in a [`Widget::Chart`].
@@ -1151,8 +1268,24 @@ pub enum Widget {
         /// Close the pop-up this button is in, without calling the module.
         #[serde(default)]
         dismiss: bool,
+        /// Ask before running this. The host shows the question and only calls
+        /// the module if the answer is yes.
+        #[serde(default)]
+        confirm: Option<Confirm>,
+        /// Draw a painted icon instead of the label, which becomes its tooltip.
+        ///
+        /// Painted rather than a glyph because the app ships one font and
+        /// JetBrains Mono has no trash character — a module asking for "🗑"
+        /// would get an empty box on every machine.
+        #[serde(default)]
+        icon: String,
     },
     Separator,
+    /// Inside a [`Widget::Row`], pushes everything after it to the right edge.
+    ///
+    /// What makes a column of trailing buttons line up when the text before them
+    /// does not: without it, each button sits wherever its own row's text ended.
+    Spacer,
     Row {
         children: Vec<Widget>,
     },
@@ -1466,16 +1599,26 @@ fn render_widget(
             args,
             open_in_tab,
             dismiss,
+            confirm,
+            icon,
         } => {
             let running = busy == Some(action);
             ui.horizontal(|ui| {
                 // Module buttons use the shared animated widgets, so a module's UI
                 // animates just like the host's chrome.
                 let resp = ui
-                    .add_enabled_ui(*enabled, |ui| match style {
-                        ButtonStyle::Primary => primary_button(ui, text, egui::Vec2::ZERO),
-                        ButtonStyle::Danger => danger_button(ui, text, egui::Vec2::ZERO),
-                        ButtonStyle::Default => outline_button(ui, text, egui::Vec2::ZERO),
+                    .add_enabled_ui(*enabled, |ui| {
+                        if !icon.is_empty() {
+                            // The label becomes the tooltip: an icon with no
+                            // name is a guess, and this one deletes things.
+                            return icon_button(ui, icon, matches!(style, ButtonStyle::Danger))
+                                .on_hover_text(text);
+                        }
+                        match style {
+                            ButtonStyle::Primary => primary_button(ui, text, egui::Vec2::ZERO),
+                            ButtonStyle::Danger => danger_button(ui, text, egui::Vec2::ZERO),
+                            ButtonStyle::Default => outline_button(ui, text, egui::Vec2::ZERO),
+                        }
                     })
                     .inner;
                 if resp.clicked() {
@@ -1484,6 +1627,7 @@ fn render_widget(
                         args: args.clone(),
                         open_in_tab: *open_in_tab,
                         dismiss: *dismiss,
+                        confirm: confirm.clone(),
                     });
                 }
                 if running {
@@ -1495,10 +1639,62 @@ fn render_widget(
         Widget::Separator => {
             ui.separator();
         }
+        // Only meaningful inside a Row, which handles it; on its own it is
+        // nothing rather than an error.
+        Widget::Spacer => {}
         Widget::Row { children } => {
             // Top-align so a row of mixed-height widgets (e.g. buttons) lines up
             // by their tops instead of being vertically centered.
-            ui.horizontal_top(|ui| render_widgets(ui, children, inputs, busy, clicked));
+            ui.horizontal_top(|ui| {
+                // Anything after a spacer hugs the right edge. Laid out
+                // right-to-left, so the tail is rendered in reverse to come out
+                // in the order it was written.
+                if let Some(at) = children.iter().position(|c| matches!(c, Widget::Spacer)) {
+                    let (head, tail) = children.split_at(at);
+                    render_widgets(ui, head, inputs, busy, clicked);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        for c in tail[1..].iter().rev() {
+                            render_widget(ui, c, inputs, busy, clicked);
+                        }
+                    });
+                    return;
+                }
+                // Path and text fields ask for all the width there is, so the
+                // first one in a row takes it and the rest are left as stubs —
+                // three thresholds side by side rendered as one wide box and two
+                // small ones. Share the row between them instead.
+                let greedy = children
+                    .iter()
+                    .filter(|c| matches!(c, Widget::Text { .. } | Widget::File { .. }))
+                    .count();
+                if greedy < 2 {
+                    render_widgets(ui, children, inputs, busy, clicked);
+                    return;
+                }
+                let gap = ui.spacing().item_spacing.x;
+                // What the fields have left once the labels and buttons beside
+                // them have taken their share.
+                let fixed: f32 = gap * (children.len().saturating_sub(1)) as f32;
+                let share = ((ui.available_width() - fixed) / greedy as f32).max(72.0);
+                for c in children {
+                    if matches!(c, Widget::Text { .. } | Widget::File { .. }) {
+                        // A field's label sits *beside* its box here, so it is
+                        // centred against it rather than left on its top edge.
+                        // The zero desired height is what keeps that honest:
+                        // centring inside a region that was given the pop-up's
+                        // whole remaining height puts the pair in the middle of
+                        // a band of empty space. The row itself stays
+                        // top-aligned, which is what a row of buttons wants.
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(share, 0.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| render_widget(ui, c, inputs, busy, clicked),
+                        );
+                    } else {
+                        render_widget(ui, c, inputs, busy, clicked);
+                    }
+                }
+            });
         }
         Widget::Table {
             columns,
@@ -1680,55 +1876,154 @@ impl Accepts {
     }
 }
 
-/// What a frame of the pop-up layer produced.
+/// The overshoot curve: runs past the target and settles back onto it.
+///
+/// The constant is the usual one — a ~10% overshoot, enough to read as weight
+/// without looking like a bug.
+fn ease_out_back(t: f32) -> f32 {
+    const C1: f32 = 1.70158;
+    const C3: f32 = C1 + 1.0;
+    let u = t - 1.0;
+    1.0 + C3 * u * u * u + C1 * u * u
+}
+
+/// Where an eased value is in its journey.
+#[derive(Clone, Copy)]
+struct Eased {
+    from: f32,
+    to: f32,
+    start: f64,
+}
+
+/// Animate a value toward `target` along [`ease_out_back`].
+///
+/// egui's own `animate_value_with_time` interpolates monotonically and so cannot
+/// overshoot; this keeps its own from/to/start instead. Re-targeting mid-flight
+/// starts from wherever the value currently *is*, so a size that changes twice
+/// in quick succession does not jump back to the old one first.
+fn animate_back(ctx: &egui::Context, id: egui::Id, target: f32, duration: f32) -> f32 {
+    if !animations_enabled() {
+        return target;
+    }
+    // Read the clock before taking the data lock — both lock the same Context.
+    let now = ctx.input(|i| i.time);
+    let state = ctx.data_mut(|d| d.get_temp::<Eased>(id));
+    let (value, running) = match state {
+        Some(a) => {
+            let p = (((now - a.start) as f32) / duration.max(0.001)).clamp(0.0, 1.0);
+            (a.from + (a.to - a.from) * ease_out_back(p), p < 1.0)
+        }
+        // First sight of this value: start where it is asked to be, so opening
+        // does not fly in from zero.
+        None => (target, false),
+    };
+    let retarget = state.is_none_or(|a| (a.to - target).abs() > 0.5);
+    if retarget {
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                id,
+                Eased {
+                    from: value,
+                    to: target,
+                    start: now,
+                },
+            )
+        });
+    }
+    if running || retarget {
+        // Nothing else is driving the clock between frames, so ask.
+        ctx.request_repaint();
+    }
+    value
+}
+
+/// Scale an overlay about its own centre as it arrives and leaves.
+///
+/// Applied to the layer at paint time rather than by changing the box's width,
+/// so nothing inside reflows while it animates — text that re-wraps mid-fade
+/// reads as a glitch. `t` is the same 0→1 the opacity uses, so the scale, the
+/// fade and the rise are one motion.
+fn pop_layer(ctx: &egui::Context, layer: egui::LayerId, rect: egui::Rect, t: f32) {
+    if !animations_enabled() {
+        return;
+    }
+    let s = 0.92 + 0.08 * ease_out_back(t);
+    if (s - 1.0).abs() < 0.0005 {
+        return;
+    }
+    // Scaling about a point: p' = s·p + c·(1 − s) keeps `c` where it is.
+    let c = rect.center().to_vec2();
+    ctx.set_transform_layer(layer, egui::emath::TSTransform::new(c * (1.0 - s), s));
+}
+
+/// What a pop-up window looks like, independent of what is inside it.
+pub struct OverlayOpts {
+    /// Requested content width in points; clamped to the window.
+    pub width: f32,
+    /// How tall the content may grow before it scrolls.
+    pub max_height: f32,
+    /// A title bar with the window controls on the right. `None` leaves the
+    /// header to the content — the host's own dialogs centre their titles.
+    pub title: Option<String>,
+    /// Show the back arrow beside the close control.
+    pub back: bool,
+    /// Show the close control.
+    pub close: bool,
+}
+
+impl Default for OverlayOpts {
+    fn default() -> Self {
+        Self {
+            width: 460.0,
+            max_height: f32::INFINITY,
+            title: None,
+            back: false,
+            close: false,
+        }
+    }
+}
+
+/// What the chrome around a pop-up reported this frame.
 #[derive(Default)]
-pub struct ModalOutcome {
-    /// A button inside the pop-up was clicked.
-    pub invoke: Option<Invoke>,
-    /// The pop-up asked to close — Esc, the close cross, or a `dismiss` button.
-    pub dismissed: bool,
-    /// The closing animation has finished, so the caller can drop what it kept
-    /// only so the pop-up had something to draw on the way out.
+pub struct Overlay {
+    /// Esc was pressed or the back arrow clicked — go back one step.
+    pub back: bool,
+    /// The close control was clicked.
+    pub close: bool,
+    /// It has finished animating away and the caller may let go of its content.
     pub closed: bool,
 }
 
-/// Draw the module pop-up layer: a module view shown over the screen it came
-/// from.
+/// A pop-up window: the veil, the frame, the entrance, and nothing about what
+/// is inside.
 ///
-/// Unlike [`confirm_dialog`], the content here is a module's own view, so this
-/// draws whatever widgets it sent. `view` is the one on top — or, once the stack
-/// is empty, the one still animating away, which is why the caller keeps it a
-/// moment longer than the stack does.
+/// Every overlay in the app is this plus its own content — a module's view, an
+/// "are you sure?", a permission prompt. They were three near-identical copies
+/// of the same thirty lines, which is how one of them ended up without the
+/// entrance animation the other two had.
 ///
-/// `depth` keys the entrance animation, so opening a second pop-up over the
-/// first animates rather than snapping in.
-pub fn modal_layer(
+/// Call it every frame with `open`: an overlay that only exists while it is open
+/// cannot animate shut.
+pub fn overlay(
     ctx: &egui::Context,
-    view: Option<&View>,
+    id: egui::Id,
     open: bool,
-    depth: usize,
-    inputs: &mut HashMap<String, String>,
-    busy: Option<&Action>,
-) -> ModalOutcome {
-    let id = egui::Id::new("limen_modal");
+    opts: &OverlayOpts,
+    add: impl FnOnce(&mut egui::Ui),
+) -> Overlay {
+    let mut out = Overlay::default();
     let t = if animations_enabled() {
         ctx.animate_bool_with_time(id, open, 0.13)
     } else {
         open as u8 as f32
     };
-    let mut out = ModalOutcome::default();
     if t <= 0.002 {
-        // Fully gone: tell the caller it can let go of the view it was holding
-        // open purely for the animation.
         out.closed = !open;
         return out;
     }
-    let Some(view) = view else {
-        return out;
-    };
 
     // The veil dims the screen behind and, sensing clicks across all of it at a
-    // higher order than the panels, swallows them — so the view underneath is
+    // higher order than the panels, swallows them — so what is underneath is
     // inert while the pop-up stands.
     let screen = ctx.screen_rect();
     egui::Area::new(id.with("veil"))
@@ -1740,110 +2035,13 @@ pub fn modal_layer(
                 .rect_filled(rect, egui::Rounding::ZERO, with_alpha(color::BG, 0.72 * t));
         });
 
-    // Esc closes the top one, always — a pop-up you cannot get out of is a trap,
-    // and a module should not be able to build one.
+    // Esc always gets you out — a pop-up you cannot leave is a trap, and a
+    // module should not be able to build one.
     if open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        out.dismissed = true;
+        out.back = true;
     }
 
-    egui::Area::new(id.with("box"))
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, (1.0 - t) * 12.0])
-        .show(ctx, |ui| {
-            ui.set_opacity(t);
-            egui::Frame::none()
-                .fill(color::BG_ELEVATED)
-                .stroke(egui::Stroke::new(1.0_f32, color::BORDER))
-                .inner_margin(egui::Margin::symmetric(22.0, 18.0))
-                .show(ui, |ui| {
-                    ui.set_max_width(520.0);
-                    // A tall form must scroll inside the pop-up rather than run
-                    // off the bottom of the screen.
-                    let max_h = (screen.height() - 140.0).max(220.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&view.title).size(16.0).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add(egui::Button::new(egui::RichText::new("✕").size(15.0)).frame(false))
-                                .on_hover_text("Esc")
-                                .clicked()
-                            {
-                                out.dismissed = true;
-                            }
-                        });
-                    });
-                    ui.add_space(10.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(max_h)
-                        .show(ui, |ui| {
-                            // Depth keys the entrance so a second pop-up over the
-                            // first animates in as its own arrival.
-                            // Read the clock *before* taking the data lock:
-                            // `input` and `data_mut` lock the same Context, so
-                            // nesting them deadlocks the moment a pop-up opens.
-                            let now = ui.input(|i| i.time);
-                            let key = id.with("reveal").with(depth);
-                            let reveal =
-                                ui.data_mut(|d| *d.get_temp_mut_or_insert_with(key, || now));
-                            if let Some(inv) =
-                                render_view(ui, view, inputs, busy, reveal)
-                            {
-                                out.invoke = Some(inv);
-                            }
-                        });
-                });
-        });
-    out
-}
-
-/// A modal "are you sure?" over the app.
-///
-/// Call it every frame with `open`; it animates itself in and out, so the caller
-/// keeps whatever it is holding until the answer comes back. Returns
-/// `Some(true)` on confirm, `Some(false)` on cancel, `None` while it is open,
-/// closing, or absent.
-///
-/// This is the engine's own dialog, not something a module can raise: the host
-/// decides which of *its* actions deserve a question, so the answer cannot be
-/// skipped by a module that would rather not ask.
-///
-/// `subject` is what the action will happen *to* — drawn in its own frame, so
-/// the thing at stake is unmistakable rather than something to skim past inside
-/// a sentence. Keep passing it while the dialog closes, or it will blink empty
-/// on the way out.
-pub fn confirm_dialog(
-    ctx: &egui::Context,
-    open: bool,
-    title: &str,
-    subject: Option<&str>,
-    confirm_label: &str,
-    cancel_label: &str,
-) -> Option<bool> {
-    let id = egui::Id::new("limen_confirm");
-    let t = if animations_enabled() {
-        ctx.animate_bool_with_time(id, open, 0.13)
-    } else {
-        open as u8 as f32
-    };
-    if t <= 0.002 {
-        return None;
-    }
-
-    // A veil across the whole window: it dims what is behind and, because it
-    // senses clicks over the full screen at a higher order than the panels,
-    // swallows them — so the app underneath is inert while the question stands.
-    let screen = ctx.screen_rect();
-    egui::Area::new(id.with("veil"))
-        .order(egui::Order::Middle)
-        .fixed_pos(screen.min)
-        .show(ctx, |ui| {
-            let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
-            ui.painter()
-                .rect_filled(rect, egui::Rounding::ZERO, with_alpha(color::BG, 0.72 * t));
-        });
-
-    let mut answer = None;
-    egui::Area::new(id.with("box"))
+    let area = egui::Area::new(id.with("box"))
         .order(egui::Order::Foreground)
         // Rises the last few pixels as it arrives, and sinks as it leaves.
         .anchor(egui::Align2::CENTER_CENTER, [0.0, (1.0 - t) * 12.0])
@@ -1852,43 +2050,256 @@ pub fn confirm_dialog(
             egui::Frame::none()
                 .fill(color::BG_ELEVATED)
                 .stroke(egui::Stroke::new(1.0_f32, color::BORDER))
-                .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                .inner_margin(egui::Margin::symmetric(22.0, 18.0))
                 .show(ui, |ui| {
-                    ui.set_max_width(420.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new(title).size(17.0).strong());
-                        if let Some(s) = subject {
-                            ui.add_space(14.0);
-                            egui::Frame::none()
-                                .fill(color::BG_WIDGET)
-                                .stroke(egui::Stroke::new(1.0_f32, color::BORDER))
-                                .inner_margin(egui::Margin::symmetric(16.0, 9.0))
-                                .show(ui, |ui| {
-                                    ui.label(egui::RichText::new(s).strong());
-                                });
-                        }
-                        ui.add_space(18.0);
+                    // Pinned width, always: module text fields ask for
+                    // `f32::INFINITY`, harmless in a panel because a panel is
+                    // already bounded, but an Area is not — an unpinned pop-up
+                    // grows straight past both edges of the window.
+                    let room = (screen.width() - 80.0).max(320.0);
+                    let target_w = opts.width.clamp(320.0, 1290.0).min(room);
+                    let max_h = opts.max_height.min(screen.height() - 100.0).max(200.0);
+                    let w = animate_back(ctx, id.with("w"), target_w, 0.22);
+                    ui.set_width(w);
 
-                        // Both buttons the same width, so the pair can be
-                        // centred by arithmetic rather than by hoping a layout
-                        // does it.
-                        const BW: f32 = 150.0;
-                        let gap = ui.spacing().item_spacing.x;
-                        let pair = BW * 2.0 + gap;
+                    if let Some(title) = &opts.title {
                         ui.horizontal(|ui| {
-                            ui.add_space(((ui.available_width() - pair) / 2.0).max(0.0));
-                            if danger_button(ui, confirm_label, egui::vec2(BW, 0.0)).clicked() {
-                                answer = Some(true);
-                            }
-                            if primary_button(ui, cancel_label, egui::vec2(BW, 0.0)).clicked() {
-                                answer = Some(false);
-                            }
+                            ui.label(egui::RichText::new(title).size(16.0).strong());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    // Right-to-left, so close is placed first and
+                                    // ends up outermost — the corner it occupies
+                                    // on the window itself. Back sits just inside
+                                    // it, with the window controls rather than
+                                    // adrift on the other side of the title.
+                                    if opts.close
+                                        && window_button(ui, WinBtn::Close)
+                                            .on_hover_text("Esc")
+                                            .clicked()
+                                    {
+                                        out.close = true;
+                                    }
+                                    if opts.back && window_button(ui, WinBtn::Back).clicked() {
+                                        out.back = true;
+                                    }
+                                },
+                            );
                         });
-                    });
+                        ui.add_space(10.0);
+                    }
+
+                    // Height follows the content, measured on the previous frame
+                    // and animated toward. Content that changes makes the box
+                    // grow rather than appear at a new size — the two read as one
+                    // thing changing.
+                    let hkey = id.with("content_h");
+                    let measured: f32 = ui.data(|d| d.get_temp(hkey)).unwrap_or(0.0);
+                    let mut area = egui::ScrollArea::vertical();
+                    if measured > 0.0 {
+                        let h = animate_back(ctx, id.with("h"), measured.min(max_h), 0.22);
+                        area = area.max_height(h).min_scrolled_height(h);
+                    } else {
+                        // First frame for this content: nothing measured yet, so
+                        // let it size itself and record what it came to.
+                        area = area.max_height(max_h);
+                    }
+                    area
+                        // Width is the pop-up's decision, so it must not shrink
+                        // to content; height is handled above.
+                        .auto_shrink([false, measured <= 0.0])
+                        .show(ui, |ui| {
+                            ui.set_width(w);
+                            add(ui);
+                            let h = ui.min_rect().height();
+                            ui.data_mut(|d| d.insert_temp(hkey, h));
+                        });
                 });
         });
+    pop_layer(ctx, area.response.layer_id, area.response.rect, t);
+    out
+}
+
+/// What a frame of the pop-up layer produced.
+#[derive(Default)]
+pub struct ModalOutcome {
+    /// A button inside the pop-up was clicked.
+    pub invoke: Option<Invoke>,
+    /// Go back one step — Esc, the back arrow, or a `dismiss` button. At the
+    /// first step that closes the pop-up; deeper in it returns to what raised it.
+    pub dismissed: bool,
+    /// Close the whole pop-up, however deep it went. The cross means "I am done
+    /// here", which at three steps in should not mean "take me back two".
+    pub close_all: bool,
+    /// The closing animation has finished, so the caller can drop what it kept
+    /// only so the pop-up had something to draw on the way out.
+    pub closed: bool,
+}
+
+/// Draw the module pop-up layer: a module view shown over the screen it came
+/// from.
+///
+/// The chrome is [`overlay`]; this adds what is particular to a module's own
+/// window — its requested size, its title bar with back and close, and the
+/// widgets it sent. `view` is the one on top, or, once the stack is empty, the
+/// one still animating away, which is why the caller keeps it a moment longer
+/// than the stack does.
+///
+/// `depth` shows the back arrow once there is somewhere to go back to.
+pub fn modal_layer(
+    ctx: &egui::Context,
+    view: Option<&View>,
+    open: bool,
+    depth: usize,
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+) -> ModalOutcome {
+    let id = egui::Id::new("limen_modal");
+    let mut out = ModalOutcome::default();
+    let Some(view) = view else {
+        // Still has to be driven so the layer can finish closing.
+        out.closed = overlay(ctx, id, false, &OverlayOpts::default(), |_| {}).closed;
+        return out;
+    };
+
+    let opts = OverlayOpts {
+        width: view.modal_width.unwrap_or(560.0),
+        max_height: view.modal_height.unwrap_or(f32::INFINITY),
+        title: Some(view.title.clone()),
+        // Back appears only once there is somewhere to go back to; at the first
+        // step the cross is the only way out.
+        back: depth > 1,
+        close: true,
+    };
+
+    let chrome = overlay(ctx, id, open, &opts, |ui| {
+        // Depth keys the entrance so a second pop-up over the first animates in
+        // as its own arrival. Read the clock before taking the data lock —
+        // `input` and `data_mut` lock the same Context, and nesting them
+        // deadlocks the moment a pop-up opens.
+        let now = ui.input(|i| i.time);
+        let key = id.with("reveal").with(depth);
+        let reveal = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(key, || now));
+        if let Some(inv) = render_view(ui, view, inputs, busy, reveal) {
+            out.invoke = Some(inv);
+        }
+    });
+    out.dismissed = chrome.back;
+    // The cross means "I am done here", which at three steps in should not mean
+    // "take me back two".
+    out.close_all = chrome.close;
+    out.closed = chrome.closed;
+    out
+}
+
+/// A modal "are you sure?" over the app.
+///
+/// The chrome is [`overlay`]; this is the question shape on top of it — a
+/// centred title, the subject in its own frame, and two buttons.
+///
+/// Call it every frame with `open`; it animates itself in and out, so the caller
+/// keeps whatever it is holding until the answer comes back. Returns
+/// `Some(true)` on confirm, `Some(false)` on cancel, `None` while it is open,
+/// closing, or absent.
+///
+/// `which` keys the dialog: the host's own questions and a module's are the same
+/// dialog, but two of them sharing one id would fight over the screen.
+///
+/// `subject` is what the action will happen *to* — drawn in its own frame, so
+/// the thing at stake is unmistakable rather than something to skim past inside
+/// a sentence. Keep passing it while the dialog closes, or it will blink empty
+/// on the way out.
+pub fn confirm_dialog(
+    ctx: &egui::Context,
+    which: &str,
+    open: bool,
+    title: &str,
+    subject: Option<&str>,
+    confirm_label: &str,
+    cancel_label: &str,
+) -> Option<bool> {
+    let mut answer = None;
+    let opts = OverlayOpts {
+        width: 420.0,
+        ..Default::default()
+    };
+    overlay(
+        ctx,
+        egui::Id::new("limen_confirm").with(which),
+        open,
+        &opts,
+        |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(title).size(17.0).strong());
+                if let Some(s) = subject {
+                    ui.add_space(14.0);
+                    egui::Frame::none()
+                        .fill(color::BG_WIDGET)
+                        .stroke(egui::Stroke::new(1.0_f32, color::BORDER))
+                        .inner_margin(egui::Margin::symmetric(16.0, 9.0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(s).strong());
+                        });
+                }
+                ui.add_space(18.0);
+
+                // Both buttons the same width, so the pair can be centred by
+                // arithmetic rather than by hoping a layout does it.
+                const BW: f32 = 150.0;
+                let gap = ui.spacing().item_spacing.x;
+                let pair = BW * 2.0 + gap;
+                ui.horizontal(|ui| {
+                    ui.add_space(((ui.available_width() - pair) / 2.0).max(0.0));
+                    if danger_button(ui, confirm_label, egui::vec2(BW, 0.0)).clicked() {
+                        answer = Some(true);
+                    }
+                    if primary_button(ui, cancel_label, egui::vec2(BW, 0.0)).clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        },
+    );
     // Only a live dialog can be answered; a closing one is just an animation.
     open.then_some(answer).flatten()
+}
+
+/// The host's consent dialog: the same pop-up window as everything else, with
+/// the permission question inside it.
+///
+/// Content is a closure because what needs consenting to varies — a module name,
+/// the permissions it declares — while the frame, the veil and the timing should
+/// not. Returns `true` once it has finished animating away, so the caller can
+/// let go of whatever it was drawing.
+pub fn consent_dialog(
+    ctx: &egui::Context,
+    open: bool,
+    contents: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let opts = OverlayOpts {
+        width: 460.0,
+        ..Default::default()
+    };
+    overlay(
+        ctx,
+        egui::Id::new("limen_consent"),
+        open,
+        &opts,
+        |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new(crate::i18n::t("perm.title"))
+                        .size(17.0)
+                        .strong(),
+                );
+            });
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(10.0);
+            contents(ui);
+        },
+    )
+    .closed
 }
 
 /// A path field: type it, drop a file or folder on it, or Browse for it.
@@ -2303,6 +2714,8 @@ fn render_interactive_table(
                 args.insert("id".into(), Value::String(row_id.clone()));
                 *clicked = Some(Invoke {
                     dismiss: false,
+                    // A double-click is not a menu entry; nothing to ask.
+                    confirm: None,
                     action: act.action.clone(),
                     args,
                     open_in_tab: act.open_in_tab,
@@ -2331,6 +2744,8 @@ fn render_row_menu(ui: &mut egui::Ui, items: &[MenuItem], row_id: &str, out: &mu
                 args.insert("id".into(), Value::String(row_id.to_string()));
                 *out = Some(Invoke {
                     dismiss: false,
+                    // A menu entry can carry a question just as a button can.
+                    confirm: item.confirm.clone(),
                     action: action.clone(),
                     args,
                     open_in_tab: item.open_in_tab,
@@ -2675,6 +3090,13 @@ mod tests {
         let popup: View =
             serde_json::from_str(r#"{"title":"S","widgets":[],"modal":"settings"}"#).unwrap();
         assert_eq!(popup.modal.as_deref(), Some("settings"));
+        // Size is optional: a pop-up that does not ask gets the host's default.
+        assert!(popup.modal_width.is_none());
+        let sized: View = serde_json::from_str(
+            r#"{"title":"S","widgets":[],"modal":"s","modal_width":860.0}"#,
+        )
+        .unwrap();
+        assert_eq!(sized.modal_width, Some(860.0));
 
         let btn: Widget = serde_json::from_str(
             r#"{"kind":"button","text":"Cancel","action":{"capability":"c","method":"m"},"dismiss":true}"#,
@@ -2692,6 +3114,245 @@ mod tests {
             Widget::Button { dismiss, .. } => assert!(!dismiss, "a plain button still calls out"),
             _ => panic!("expected a button"),
         }
+    }
+
+    /// Every overlay in the app arrives the same way — module pop-ups, the
+    /// "are you sure?" and the permission prompt — and each has to survive the
+    /// frames where it is part-way there, which is when a scaled layer and a
+    /// half-faded frame are being drawn together.
+    #[test]
+    fn every_overlay_draws_through_its_entrance_and_exit() {
+        let view: View = serde_json::from_str(
+            r#"{"title":"Settings","modal":"s","modal_width":600.0,
+                "widgets":[{"kind":"label","text":"body"},
+                           {"kind":"button","text":"Go","action":{"capability":"c","method":"m"}}]}"#,
+        )
+        .unwrap();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+
+        /// One overlay, drawn open or closed.
+        type Draw = Box<dyn Fn(&egui::Context, bool)>;
+        let draws: Vec<Draw> = vec![
+            Box::new(move |ctx: &egui::Context, open: bool| {
+                let mut inputs = HashMap::new();
+                let v = if open { Some(&view) } else { None };
+                let _ = modal_layer(ctx, v, open, 1, &mut inputs, None);
+            }),
+            Box::new(|ctx: &egui::Context, open: bool| {
+                let _ = confirm_dialog(ctx, "t", open, "Remove?", Some("x"), "Yes", "No");
+            }),
+            Box::new(|ctx: &egui::Context, open: bool| {
+                let _ = consent_dialog(ctx, open, |ui| {
+                    ui.label("wants to run");
+                });
+            }),
+        ];
+
+        for draw in draws {
+            let ctx = egui::Context::default();
+            install_fonts(&ctx);
+            // Closed first: the layer is driven every frame in the app, and
+            // without those frames egui's animation would start *at* its target
+            // and the entrance would never happen.
+            for _ in 0..3 {
+                let _ = ctx.run(input.clone(), |ctx| draw(ctx, false));
+            }
+            for _ in 0..20 {
+                let _ = ctx.run(input.clone(), |ctx| draw(ctx, true));
+            }
+            for _ in 0..20 {
+                let _ = ctx.run(input.clone(), |ctx| draw(ctx, false));
+            }
+        }
+    }
+
+    /// All three overlays are the same window with different contents, so the
+    /// chrome must behave identically in each — including Esc, which is the one
+    /// way out that must never depend on what a pop-up chose to draw.
+    #[test]
+    fn esc_leaves_every_overlay() {
+        let input = |esc: bool| {
+            let mut i = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            if esc {
+                i.events.push(egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            i
+        };
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let opts = OverlayOpts {
+            title: Some("A window".into()),
+            close: true,
+            ..Default::default()
+        };
+        // Open it, then press Esc.
+        for _ in 0..3 {
+            let _ = ctx.run(input(false), |ctx| {
+                overlay(ctx, egui::Id::new("x"), false, &opts, |_| {});
+            });
+        }
+        let mut asked_back = false;
+        for i in 0..10 {
+            let _ = ctx.run(input(i == 5), |ctx| {
+                let o = overlay(ctx, egui::Id::new("x"), true, &opts, |ui| {
+                    ui.label("body");
+                });
+                if o.back {
+                    asked_back = true;
+                }
+            });
+        }
+        assert!(asked_back, "Esc must always be a way out");
+    }
+
+    /// The curve is the point: it must run *past* the target and come back. A
+    /// monotonic ease would satisfy "it moves and settles" while looking like
+    /// the thing it replaced.
+    #[test]
+    fn the_resize_curve_overshoots_and_settles() {
+        assert_eq!(ease_out_back(0.0), 0.0);
+        assert!((ease_out_back(1.0) - 1.0).abs() < 1e-5, "it lands on target");
+
+        let peak = (1..100)
+            .map(|i| ease_out_back(i as f32 / 100.0))
+            .fold(f32::MIN, f32::max);
+        assert!(peak > 1.0, "it has to overshoot, else it is not `back`");
+        assert!(peak < 1.2, "but not so far it reads as a glitch: {peak}");
+
+        // The overshoot is late in the curve — it arrives fast, then settles.
+        let quarter = ease_out_back(0.25);
+        assert!(quarter > 0.5, "most of the distance is covered early: {quarter}");
+    }
+
+    /// Re-targeting mid-flight has to continue from where the value *is*. A
+    /// pop-up whose size changes twice quickly would otherwise snap back to the
+    /// first size before starting the second move.
+    #[test]
+    fn a_resize_interrupted_by_another_continues_from_where_it_is() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("t");
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        // Settle at 600.
+        let mut v = 0.0;
+        for _ in 0..3 {
+            let _ = ctx.run(input.clone(), |ctx| v = animate_back(ctx, id, 600.0, 0.22));
+        }
+        assert!((v - 600.0).abs() < 0.5);
+
+        // Retarget to 300 and stop part-way.
+        let mut mid = 0.0;
+        for _ in 0..4 {
+            let _ = ctx.run(input.clone(), |ctx| mid = animate_back(ctx, id, 300.0, 0.22));
+        }
+        assert!(mid < 600.0 && mid > 300.0, "in flight: {mid}");
+
+        // Now retarget again; the next value must be near where it was, not back
+        // at 600.
+        let mut after = 0.0;
+        let _ = ctx.run(input.clone(), |ctx| after = animate_back(ctx, id, 900.0, 0.22));
+        // It kept moving for that frame, so it is not exactly `mid` — the
+        // invariant is that it stayed where it had got to rather than snapping
+        // back to where it started or ahead to where it is going.
+        assert!(
+            (after - mid).abs() < (after - 600.0).abs(),
+            "should continue from {mid}, not jump back toward 600 (got {after})"
+        );
+        assert!(
+            (after - mid).abs() < (after - 900.0).abs(),
+            "and not jump ahead to the new target (got {after})"
+        );
+    }
+
+    /// A button that carries a question must not reach the module until it is
+    /// answered — that is the whole point of putting the question on the button.
+    #[test]
+    fn a_button_with_a_question_is_not_a_plain_button() {
+        let plain: Widget = serde_json::from_str(
+            r#"{"kind":"button","text":"Go","action":{"capability":"c","method":"m"}}"#,
+        )
+        .unwrap();
+        match plain {
+            Widget::Button { confirm, .. } => assert!(confirm.is_none(), "asking is opt-in"),
+            _ => panic!("expected a button"),
+        }
+
+        let asking: Widget = serde_json::from_str(
+            r#"{"kind":"button","text":"Delete","action":{"capability":"c","method":"m"},
+                "confirm":{"title":"Remove these rules?","subject":"yara-rules-core.yar"}}"#,
+        )
+        .unwrap();
+        match asking {
+            Widget::Button { confirm, .. } => {
+                let c = confirm.expect("the question");
+                assert_eq!(c.subject, "yara-rules-core.yar");
+                // Labels are optional: the host has its own words for yes and no.
+                assert!(c.confirm_label.is_empty());
+            }
+            _ => panic!("expected a button"),
+        }
+    }
+
+    /// The consent dialog is the app's only overlay that used to snap in and
+    /// out. It has to animate, and — because the answer clears the pending
+    /// action immediately — it has to keep drawing after it is answered, or
+    /// there would be nothing left to animate away.
+    #[test]
+    fn the_consent_dialog_animates_out_after_it_is_answered() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut gone_while_open = None;
+        let _ = ctx.run(input.clone(), |ctx| {
+            gone_while_open = Some(consent_dialog(ctx, true, |ui| {
+                ui.label("“loki” wants to run “scan”");
+            }));
+        });
+        assert_eq!(gone_while_open, Some(false), "an open dialog is not gone");
+
+        // Answered: it keeps drawing while it fades, and only then reports that
+        // the caller may let go.
+        let mut gone = false;
+        for _ in 0..200 {
+            let _ = ctx.run(input.clone(), |ctx| {
+                gone = consent_dialog(ctx, false, |ui| {
+                    ui.label("“loki” wants to run “scan”");
+                });
+            });
+            if gone {
+                break;
+            }
+        }
+        assert!(gone, "it must eventually finish closing");
     }
 
     /// Control for the pop-up test below: the shipped confirm dialog uses the
@@ -2712,7 +3373,7 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.label("behind");
             });
-            let _ = confirm_dialog(ctx, true, "Remove module?", Some("loki"), "Remove", "Cancel");
+            let _ = confirm_dialog(ctx, "test", true, "Remove module?", Some("loki"), "Remove", "Cancel");
         });
     }
 
@@ -2745,13 +3406,13 @@ mod tests {
             )),
             ..Default::default()
         };
-        for open in [true, false] {
+        for (open, depth) in [(true, 1), (true, 2), (false, 2)] {
             let _ = ctx.run(input.clone(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.label("behind");
                 });
                 // Open, then closing — the closing frame still has to draw.
-                let _ = modal_layer(ctx, Some(&view), open, 0, &mut inputs, None);
+                let _ = modal_layer(ctx, Some(&view), open, depth, &mut inputs, None);
             });
         }
     }
