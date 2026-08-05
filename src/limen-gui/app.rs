@@ -56,6 +56,46 @@ impl Tab {
     }
 }
 
+/// Move the page on screen aside and bring another forward.
+///
+/// The whole rule of per-tab state in one place: what a tab was showing is kept
+/// under its own name, and what the next tab was showing is handed back. A `from`
+/// of `None` means the page being left belongs to no module tab and is simply
+/// dropped; a `to` of `None` means the tab being opened is not a module tab and
+/// starts empty — otherwise the last module's view would show behind an About
+/// page.
+fn swap_page(
+    current: ModulePage,
+    stored: &mut HashMap<String, ModulePage>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> ModulePage {
+    if let Some(name) = from {
+        stored.insert(name.to_string(), current);
+    }
+    to.and_then(|name| stored.remove(name)).unwrap_or_default()
+}
+
+/// Everything a module tab holds while it is not the one on screen.
+///
+/// The module page's state used to be the app's, so switching tabs threw it away
+/// and rebuilt it — which meant a pop-up open in one tab could not survive a
+/// glance at another. Each module tab keeps its own, and the app swaps the
+/// active one in and out.
+#[derive(Default)]
+struct ModulePage {
+    view: Option<ui::View>,
+    view_error: Option<String>,
+    modal_stack: Vec<ui::View>,
+    modal_closing: Option<ui::View>,
+    inputs: HashMap<String, String>,
+    output: String,
+    /// The scan (or whatever) this tab is waiting on, so its spinner survives a
+    /// look at another tab.
+    busy: bool,
+    busy_action: Option<ui::Action>,
+}
+
 /// A detail tab's content: a module-returned [`ui::View`] opened from a row
 /// action (e.g. "About device"), with its own inputs and load state.
 #[derive(Default)]
@@ -111,6 +151,13 @@ pub struct LimenApp {
     /// The consent dialog still on screen, which outlives `pending_action` by
     /// the length of its closing animation.
     consent_showing: Option<ui::Invoke>,
+    /// The tab content area, as of the last frame that drew one. Pop-ups are
+    /// scoped to it rather than to the window.
+    content_rect: Option<egui::Rect>,
+    /// What each module tab was showing when it was last active, keyed by module
+    /// name. The active tab's own state lives in the fields above; this is where
+    /// the others wait.
+    module_pages: HashMap<String, ModulePage>,
     /// A module action waiting on the question its button carried, and the one
     /// still fading out — the same pair as the consent dialog, for the same
     /// reason: an answered question has to keep drawing while it leaves.
@@ -277,6 +324,8 @@ impl LimenApp {
             view: None,
             view_error: None,
             consent_showing: None,
+            content_rect: None,
+            module_pages: HashMap::new(),
             pending_confirm: None,
             confirm_showing: None,
             modal_stack: Vec::new(),
@@ -336,13 +385,86 @@ impl LimenApp {
         self.tabs.get(self.active).cloned()
     }
 
+    /// Lift the page currently in the fields out of them.
+    fn take_page(&mut self) -> ModulePage {
+        ModulePage {
+            view: self.view.take(),
+            view_error: self.view_error.take(),
+            modal_stack: std::mem::take(&mut self.modal_stack),
+            modal_closing: self.modal_closing.take(),
+            inputs: std::mem::take(&mut self.inputs),
+            output: std::mem::take(&mut self.output),
+            busy: std::mem::take(&mut self.busy),
+            busy_action: self.busy_action.take(),
+        }
+    }
+
+    /// Put a page into the fields, which is what the frame draws from.
+    fn put_page(&mut self, p: ModulePage) {
+        self.view = p.view;
+        self.view_error = p.view_error;
+        self.modal_stack = p.modal_stack;
+        self.modal_closing = p.modal_closing;
+        self.inputs = p.inputs;
+        self.output = p.output;
+        self.busy = p.busy;
+        self.busy_action = p.busy_action;
+    }
+
+    /// Put the active module tab's state away, ready for another to take the
+    /// fields.
+    fn stash_page(&mut self) {
+        let from = match self.active_tab() {
+            Some(Tab::Module(name)) => Some(name),
+            _ => None,
+        };
+        let cur = self.take_page();
+        let next = swap_page(cur, &mut self.module_pages, from.as_deref(), None);
+        self.put_page(next);
+    }
+
+    /// Take back what a module tab was showing, or start it empty.
+    fn restore_page(&mut self, name: &str) {
+        let cur = self.take_page();
+        let to = (!name.is_empty()).then_some(name);
+        let next = swap_page(cur, &mut self.module_pages, None, to);
+        self.put_page(next);
+    }
+
+    /// The one door every tab change goes through, so a module tab's state is
+    /// always put away before another takes the fields.
+    fn activate(&mut self, index: usize) {
+        if index >= self.tabs.len() || index == self.active {
+            return;
+        }
+        self.stash_page();
+        self.active = index;
+        match self.active_tab() {
+            Some(Tab::Module(name)) => {
+                self.restore_page(&name);
+                self.resume_page();
+            }
+            // Not a module tab: leave the fields empty rather than showing the
+            // last module's view behind an About page.
+            _ => self.restore_page(""),
+        }
+    }
+
     /// Open `tab` (focus it if already open, else append), and activate it.
     fn open_tab(&mut self, tab: Tab) {
         match self.tabs.iter().position(|t| *t == tab) {
-            Some(i) => self.active = i,
+            Some(i) => self.activate(i),
             None => {
+                self.stash_page();
                 self.tabs.push(tab);
                 self.active = self.tabs.len() - 1;
+                match self.active_tab() {
+                    Some(Tab::Module(name)) => {
+                        self.restore_page(&name);
+                        self.resume_page();
+                    }
+                    _ => self.restore_page(""),
+                }
             }
         }
     }
@@ -352,15 +474,57 @@ impl LimenApp {
         if index >= self.tabs.len() {
             return;
         }
-        // Free a detail tab's stored view when its tab closes.
-        if let Tab::Detail { id } = self.tabs[index] {
-            self.detail_tabs.remove(&id);
+        // Free a tab's stored view when it closes.
+        match &self.tabs[index] {
+            Tab::Detail { id } => {
+                self.detail_tabs.remove(id);
+            }
+            Tab::Module(name) => {
+                self.module_pages.remove(name);
+                // Closing the tab you are looking at also clears the fields, or
+                // its view would linger under the next one.
+                if index == self.active {
+                    self.view = None;
+                    self.view_error = None;
+                    self.modal_stack.clear();
+                    self.modal_closing = None;
+                    self.inputs.clear();
+                    self.output.clear();
+                    self.busy = false;
+                    self.busy_action = None;
+                }
+            }
+            _ => {}
         }
         self.tabs.remove(index);
+        let was = self.active;
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
         } else if self.active > index {
             self.active -= 1;
+        }
+        // Closing a tab lands you on another one, which has to be given its own
+        // state back just as switching to it would.
+        if was != self.active || was == index {
+            match self.active_tab() {
+                Some(Tab::Module(name)) => {
+                    self.restore_page(&name);
+                    self.resume_page();
+                }
+                _ => self.restore_page(""),
+            }
+        }
+    }
+
+    /// Pick up a chain the tab was in the middle of.
+    ///
+    /// A view that carries an `auto` was polling something — a scan, an install.
+    /// Restoring it puts the picture back but not the loop, so the loop is
+    /// started again; otherwise a scan left running in one tab would be frozen
+    /// mid-progress on return.
+    fn resume_page(&mut self) {
+        if let Some(a) = self.view.as_ref().and_then(|v| v.auto.clone()) {
+            self.dispatch(a.into_invoke());
         }
     }
 
@@ -461,6 +625,7 @@ impl LimenApp {
             self.confirm_subject.as_deref(),
             &i18n::t("confirm.remove_yes"),
             &i18n::t("confirm.cancel"),
+            self.content_rect,
         );
         match answer {
             Some(true) => self.pending_remove.take(),
@@ -557,7 +722,31 @@ impl LimenApp {
                 }
                 Event::RunDone { tag, result } => match tag {
                     RunTag::Ui { module } => {
-                        // Ignore late results if the active tab isn't that module.
+                        // A result for a tab the user has since left still has to
+                        // land: its tab keeps its own state now, and dropping it
+                        // would leave that tab waiting on a view that already
+                        // arrived — and, because it would still look busy, never
+                        // ask for another.
+                        if self.active_tab() != Some(Tab::Module(module.clone())) {
+                            let page = self.module_pages.entry(module).or_default();
+                            page.busy = false;
+                            match result {
+                                Ok(v) => match serde_json::from_value::<ui::View>(v) {
+                                    Ok(view) => {
+                                        // Stored, not chained: a background tab's
+                                        // `auto` loop resumes when it is next
+                                        // shown (see `resume_page`).
+                                        page.view = Some(view);
+                                        page.view_error = None;
+                                    }
+                                    Err(e) => {
+                                        page.view_error = Some(format!("invalid UI spec: {e}"))
+                                    }
+                                },
+                                Err(e) => page.view_error = Some(e),
+                            }
+                            return;
+                        }
                         if self.active_tab() == Some(Tab::Module(module)) {
                             self.busy = false;
                             match result {
@@ -660,15 +849,14 @@ impl LimenApp {
     }
 
     fn select_module(&mut self, name: String) {
+        // Opening the tab restores whatever it was showing, pop-up included.
         self.open_tab(Tab::Module(name.clone()));
-        self.view = None;
-        self.view_error = None;
-        // A pop-up belongs to the screen that raised it; moving to another
-        // module must not leave one hanging over the new one.
-        self.modal_stack.clear();
-        self.modal_closing = None;
-        self.inputs.clear();
-        self.output.clear();
+        // Coming back to a tab that already has a screen: leave it alone. Asking
+        // the module for a fresh `ui` would throw away where the user was — a
+        // half-filled form, an open settings pop-up, a finished scan's results.
+        if self.view.is_some() || self.view_error.is_some() || self.busy {
+            return;
+        }
         // A module that failed to start has no live connection — show why, here,
         // instead of trying to call it (or blocking the whole app).
         if let Some(err) = self.failed.get(&name) {
@@ -1371,7 +1559,7 @@ impl eframe::App for LimenApp {
             let content_frame = egui::Frame::none()
                 .fill(ui::color::BG)
                 .inner_margin(egui::Margin::same(content_margin));
-            egui::CentralPanel::default()
+            let content = egui::CentralPanel::default()
                 .frame(content_frame)
                 .show(ctx, |ui| {
                     // Framed HUD corner brackets, evenly inset from the window edge;
@@ -1460,6 +1648,9 @@ impl eframe::App for LimenApp {
                         }
                     }
                 });
+            // Pop-ups belong to the tab that raised them, so this is what they
+            // dim and block — the title bar and the tab strip stay live.
+            self.content_rect = Some(content.response.rect);
         }
 
         if do_update && let Some(info) = self.update.clone() {
@@ -1469,9 +1660,12 @@ impl eframe::App for LimenApp {
 
         // Apply tab intents.
         if let Some(i) = switch_to {
-            match self.tabs.get(i).cloned() {
-                Some(Tab::Module(name)) => self.select_module(name), // re-fetch its UI
-                _ => self.active = i,
+            // Every tab change goes through one door, which puts the old tab's
+            // state away and gives the new one its own back.
+            self.activate(i);
+            // A module tab that has never been shown still needs its first view.
+            if let Some(Tab::Module(name)) = self.active_tab() {
+                self.select_module(name);
             }
         }
         if let Some(i) = close_idx {
@@ -1582,6 +1776,10 @@ impl eframe::App for LimenApp {
             // already loaded).
             self.worker.send(Command::Reload);
             self.remote_fetched = false;
+            // A reload restarts the modules, so a stored screen describes a
+            // connection that no longer exists — and a stored pop-up would sit
+            // over a module that has forgotten it was ever open.
+            self.module_pages.clear();
         }
         if let Some(a) = action {
             // Elevated methods prompt for consent (once) before running.
@@ -1607,7 +1805,7 @@ impl eframe::App for LimenApp {
             let mut decision: Option<bool> = None;
             if let Some(pending) = self.consent_showing.clone() {
                 let module = self.module_of(&pending.action.capability).cloned();
-                let gone = ui::consent_dialog(ctx, open, |ui| {
+                let gone = ui::consent_dialog(ctx, open, self.content_rect, |ui| {
                     let fallback = i18n::t("perm.this_module");
                     let name = module
                         .as_ref()
@@ -1712,7 +1910,16 @@ impl eframe::App for LimenApp {
                 } else {
                     c.cancel_label.clone()
                 };
-                match ui::confirm_dialog(ctx, "module", open, &c.title, subject, &yes, &no) {
+                match ui::confirm_dialog(
+                    ctx,
+                    "module",
+                    open,
+                    &c.title,
+                    subject,
+                    &yes,
+                    &no,
+                    self.content_rect,
+                ) {
                     Some(true) => {
                         self.pending_confirm = None;
                         // Run it now that it has been answered; the question is
@@ -1747,6 +1954,7 @@ impl eframe::App for LimenApp {
                 top.as_ref(),
                 !self.modal_stack.is_empty(),
                 depth,
+                self.content_rect,
                 &mut self.inputs,
                 busy_action.as_ref(),
             );
@@ -3918,5 +4126,119 @@ mod barracuda_tests {
             art.max
         );
         assert!(art.max.x - art.min.x > 100.0 && art.max.y - art.min.y > 100.0);
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    fn page(marker: &str) -> ModulePage {
+        let view: ui::View =
+            serde_json::from_str(&format!(r#"{{"title":"{marker}","widgets":[]}}"#)).unwrap();
+        let popup: ui::View = serde_json::from_str(
+            r#"{"title":"Scan settings","modal":"loki.settings","widgets":[]}"#,
+        )
+        .unwrap();
+        ModulePage {
+            view: Some(view),
+            modal_stack: vec![popup],
+            inputs: [("target".to_string(), format!("/srv/{marker}"))]
+                .into_iter()
+                .collect(),
+            busy: true,
+            ..Default::default()
+        }
+    }
+
+    fn title(p: &ModulePage) -> String {
+        p.view.as_ref().map(|v| v.title.clone()).unwrap_or_default()
+    }
+
+    /// The point of the whole thing: what a tab was showing — including an open
+    /// pop-up and a half-filled form — is still there when you come back.
+    #[test]
+    fn a_tab_keeps_its_screen_while_another_is_shown() {
+        let mut stored = HashMap::new();
+
+        // On "loki", with a settings pop-up open. Switch to "banlist".
+        let onscreen = swap_page(page("loki"), &mut stored, Some("loki"), Some("banlist"));
+        assert!(onscreen.view.is_none(), "banlist has never been shown");
+        assert!(onscreen.modal_stack.is_empty());
+
+        // Come back. Everything is as it was left.
+        let back = swap_page(onscreen, &mut stored, Some("banlist"), Some("loki"));
+        assert_eq!(title(&back), "loki");
+        assert_eq!(back.modal_stack.len(), 1, "the pop-up survived the trip");
+        assert_eq!(back.modal_stack[0].modal.as_deref(), Some("loki.settings"));
+        assert_eq!(back.inputs.get("target").unwrap(), "/srv/loki");
+        assert!(back.busy, "and so did what it was waiting on");
+    }
+
+    /// A non-module tab starts empty. Without this the last module's view — and
+    /// its pop-up — would show behind an About page.
+    #[test]
+    fn a_tab_that_is_not_a_module_shows_nothing() {
+        let mut stored = HashMap::new();
+        let onscreen = swap_page(page("loki"), &mut stored, Some("loki"), None);
+        assert!(onscreen.view.is_none());
+        assert!(onscreen.modal_stack.is_empty());
+        assert!(!onscreen.busy);
+        // ...and loki's screen was not lost, only set aside.
+        assert_eq!(title(stored.get("loki").unwrap()), "loki");
+    }
+
+    /// Leaving a page that belongs to no tab drops it rather than filing it
+    /// under someone else's name.
+    #[test]
+    fn a_page_with_no_tab_is_not_kept() {
+        let mut stored = HashMap::new();
+        let _ = swap_page(page("about"), &mut stored, None, Some("loki"));
+        assert!(stored.is_empty(), "nothing was filed: {:?}", stored.keys());
+    }
+
+    /// Two tabs do not share a form. Their inputs are the most obvious thing to
+    /// leak, since the fields they name are usually identical.
+    #[test]
+    fn two_module_tabs_do_not_share_their_inputs() {
+        let mut stored = HashMap::new();
+        let mut onscreen = swap_page(page("loki"), &mut stored, Some("loki"), Some("banlist"));
+        onscreen
+            .inputs
+            .insert("target".to_string(), "/srv/banlist".to_string());
+
+        let loki = swap_page(onscreen, &mut stored, Some("banlist"), Some("loki"));
+        assert_eq!(loki.inputs.get("target").unwrap(), "/srv/loki");
+        let banlist = swap_page(loki, &mut stored, Some("loki"), Some("banlist"));
+        assert_eq!(banlist.inputs.get("target").unwrap(), "/srv/banlist");
+    }
+
+    /// Closing a tab forgets it: reopening the module starts fresh rather than
+    /// resurrecting a pop-up from a tab the user closed.
+    #[test]
+    fn a_closed_tab_leaves_nothing_behind() {
+        let mut stored = HashMap::new();
+        let onscreen = swap_page(page("loki"), &mut stored, Some("loki"), None);
+        assert!(stored.contains_key("loki"));
+
+        stored.remove("loki"); // what close_tab does
+        let reopened = swap_page(onscreen, &mut stored, None, Some("loki"));
+        assert!(reopened.view.is_none());
+        assert!(reopened.modal_stack.is_empty());
+    }
+
+    /// A reload restarts every module, so a stored screen describes a connection
+    /// that no longer exists — and a stored pop-up would sit over a module that
+    /// has forgotten it was ever open.
+    #[test]
+    fn a_reload_clears_what_every_tab_was_showing() {
+        let mut stored = HashMap::new();
+        let onscreen = swap_page(page("loki"), &mut stored, Some("loki"), Some("banlist"));
+        let _ = swap_page(page("banlist"), &mut stored, Some("banlist"), None);
+        assert_eq!(stored.len(), 2);
+
+        stored.clear(); // what the reload does
+        let after = swap_page(onscreen, &mut stored, None, Some("loki"));
+        assert!(after.view.is_none(), "nothing survives a reload");
     }
 }

@@ -1969,6 +1969,13 @@ pub struct OverlayOpts {
     pub back: bool,
     /// Show the close control.
     pub close: bool,
+    /// The area this pop-up belongs to — dimmed, blocked, and centred within.
+    ///
+    /// A tab's content rather than the whole window: the title bar, the tab
+    /// strip and every other tab stay usable while it is open, so a pop-up
+    /// suspends the thing that raised it and nothing else. `None` falls back to
+    /// the whole window.
+    pub bounds: Option<egui::Rect>,
 }
 
 impl Default for OverlayOpts {
@@ -1979,6 +1986,7 @@ impl Default for OverlayOpts {
             title: None,
             back: false,
             close: false,
+            bounds: None,
         }
     }
 }
@@ -2022,15 +2030,17 @@ pub fn overlay(
         return out;
     }
 
-    // The veil dims the screen behind and, sensing clicks across all of it at a
-    // higher order than the panels, swallows them — so what is underneath is
-    // inert while the pop-up stands.
+    // The veil dims what the pop-up belongs to and, sensing clicks across all of
+    // it at a higher order than the panels, swallows them — so that area is
+    // inert while the pop-up stands. Bounded rather than full-screen: everything
+    // outside it, the title bar and the tab strip included, stays live.
     let screen = ctx.screen_rect();
+    let bounds = opts.bounds.unwrap_or(screen);
     egui::Area::new(id.with("veil"))
         .order(egui::Order::Middle)
-        .fixed_pos(screen.min)
+        .fixed_pos(bounds.min)
         .show(ctx, |ui| {
-            let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+            let (rect, _) = ui.allocate_exact_size(bounds.size(), egui::Sense::click_and_drag());
             ui.painter()
                 .rect_filled(rect, egui::Rounding::ZERO, with_alpha(color::BG, 0.72 * t));
         });
@@ -2044,7 +2054,15 @@ pub fn overlay(
     let area = egui::Area::new(id.with("box"))
         .order(egui::Order::Foreground)
         // Rises the last few pixels as it arrives, and sinks as it leaves.
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, (1.0 - t) * 12.0])
+        // Centred on its own area, not on the window: anchoring is relative to
+        // the screen, so the offset is how far that area's middle sits from it.
+        .anchor(
+            egui::Align2::CENTER_CENTER,
+            [
+                bounds.center().x - screen.center().x,
+                bounds.center().y - screen.center().y + (1.0 - t) * 12.0,
+            ],
+        )
         .show(ctx, |ui| {
             ui.set_opacity(t);
             egui::Frame::none()
@@ -2056,9 +2074,9 @@ pub fn overlay(
                     // `f32::INFINITY`, harmless in a panel because a panel is
                     // already bounded, but an Area is not — an unpinned pop-up
                     // grows straight past both edges of the window.
-                    let room = (screen.width() - 80.0).max(320.0);
+                    let room = (bounds.width() - 80.0).max(320.0);
                     let target_w = opts.width.clamp(320.0, 1290.0).min(room);
-                    let max_h = opts.max_height.min(screen.height() - 100.0).max(200.0);
+                    let max_h = opts.max_height.min(bounds.height() - 100.0).max(200.0);
                     let w = animate_back(ctx, id.with("w"), target_w, 0.22);
                     ui.set_width(w);
 
@@ -2146,11 +2164,13 @@ pub struct ModalOutcome {
 /// than the stack does.
 ///
 /// `depth` shows the back arrow once there is somewhere to go back to.
+#[allow(clippy::too_many_arguments)]
 pub fn modal_layer(
     ctx: &egui::Context,
     view: Option<&View>,
     open: bool,
     depth: usize,
+    bounds: Option<egui::Rect>,
     inputs: &mut HashMap<String, String>,
     busy: Option<&Action>,
 ) -> ModalOutcome {
@@ -2158,7 +2178,17 @@ pub fn modal_layer(
     let mut out = ModalOutcome::default();
     let Some(view) = view else {
         // Still has to be driven so the layer can finish closing.
-        out.closed = overlay(ctx, id, false, &OverlayOpts::default(), |_| {}).closed;
+        out.closed = overlay(
+            ctx,
+            id,
+            false,
+            &OverlayOpts {
+                bounds,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .closed;
         return out;
     };
 
@@ -2170,6 +2200,7 @@ pub fn modal_layer(
         // step the cross is the only way out.
         back: depth > 1,
         close: true,
+        bounds,
     };
 
     let chrome = overlay(ctx, id, open, &opts, |ui| {
@@ -2209,6 +2240,7 @@ pub fn modal_layer(
 /// the thing at stake is unmistakable rather than something to skim past inside
 /// a sentence. Keep passing it while the dialog closes, or it will blink empty
 /// on the way out.
+#[allow(clippy::too_many_arguments)]
 pub fn confirm_dialog(
     ctx: &egui::Context,
     which: &str,
@@ -2217,10 +2249,12 @@ pub fn confirm_dialog(
     subject: Option<&str>,
     confirm_label: &str,
     cancel_label: &str,
+    bounds: Option<egui::Rect>,
 ) -> Option<bool> {
     let mut answer = None;
     let opts = OverlayOpts {
         width: 420.0,
+        bounds,
         ..Default::default()
     };
     overlay(
@@ -2274,10 +2308,12 @@ pub fn confirm_dialog(
 pub fn consent_dialog(
     ctx: &egui::Context,
     open: bool,
+    bounds: Option<egui::Rect>,
     contents: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let opts = OverlayOpts {
         width: 460.0,
+        bounds,
         ..Default::default()
     };
     overlay(
@@ -3142,13 +3178,13 @@ mod tests {
             Box::new(move |ctx: &egui::Context, open: bool| {
                 let mut inputs = HashMap::new();
                 let v = if open { Some(&view) } else { None };
-                let _ = modal_layer(ctx, v, open, 1, &mut inputs, None);
+                let _ = modal_layer(ctx, v, open, 1, None, &mut inputs, None);
             }),
             Box::new(|ctx: &egui::Context, open: bool| {
-                let _ = confirm_dialog(ctx, "t", open, "Remove?", Some("x"), "Yes", "No");
+                let _ = confirm_dialog(ctx, "t", open, "Remove?", Some("x"), "Yes", "No", None);
             }),
             Box::new(|ctx: &egui::Context, open: bool| {
-                let _ = consent_dialog(ctx, open, |ui| {
+                let _ = consent_dialog(ctx, open, None, |ui| {
                     ui.label("wants to run");
                 });
             }),
@@ -3221,6 +3257,60 @@ mod tests {
             });
         }
         assert!(asked_back, "Esc must always be a way out");
+    }
+
+    /// A pop-up belongs to the area that raised it, not to the window. The veil
+    /// must cover exactly that area — otherwise it dims and blocks the title bar
+    /// and the tab strip, and the app becomes unusable while a pop-up is open in
+    /// one tab.
+    #[test]
+    fn a_pop_up_dims_only_the_area_it_belongs_to() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        // The content area below a title bar and a tab strip.
+        let content = egui::Rect::from_min_max(egui::pos2(0.0, 120.0), egui::pos2(1280.0, 800.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let opts = OverlayOpts {
+            title: Some("Scan settings".into()),
+            bounds: Some(content),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let _ = ctx.run(input.clone(), |ctx| {
+                overlay(ctx, egui::Id::new("b"), false, &opts, |_| {});
+            });
+        }
+        for _ in 0..30 {
+            let _ = ctx.run(input.clone(), |ctx| {
+                overlay(ctx, egui::Id::new("b"), true, &opts, |ui| {
+                    ui.label("body");
+                });
+            });
+        }
+
+        let veil = ctx
+            .memory(|m| m.area_rect(egui::Id::new("b").with("veil")))
+            .expect("the veil drew");
+        assert!(
+            veil.min.y >= content.min.y - 0.5,
+            "the veil must start below the chrome, not at the top of the window: {veil:?}"
+        );
+        assert!(veil.height() <= content.height() + 0.5);
+
+        // ...and the box is centred on that area, not on the window.
+        let boxed = ctx
+            .memory(|m| m.area_rect(egui::Id::new("b").with("box")))
+            .expect("the box drew");
+        assert!(
+            (boxed.center().y - content.center().y).abs() < 2.0,
+            "centred on its area ({}), not the window ({}): {boxed:?}",
+            content.center().y,
+            screen.center().y
+        );
     }
 
     /// The curve is the point: it must run *past* the target and come back. A
@@ -3333,7 +3423,7 @@ mod tests {
         };
         let mut gone_while_open = None;
         let _ = ctx.run(input.clone(), |ctx| {
-            gone_while_open = Some(consent_dialog(ctx, true, |ui| {
+            gone_while_open = Some(consent_dialog(ctx, true, None, |ui| {
                 ui.label("“loki” wants to run “scan”");
             }));
         });
@@ -3344,7 +3434,7 @@ mod tests {
         let mut gone = false;
         for _ in 0..200 {
             let _ = ctx.run(input.clone(), |ctx| {
-                gone = consent_dialog(ctx, false, |ui| {
+                gone = consent_dialog(ctx, false, None, |ui| {
                     ui.label("“loki” wants to run “scan”");
                 });
             });
@@ -3373,7 +3463,7 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.label("behind");
             });
-            let _ = confirm_dialog(ctx, "test", true, "Remove module?", Some("loki"), "Remove", "Cancel");
+            let _ = confirm_dialog(ctx, "test", true, "Remove module?", Some("loki"), "Remove", "Cancel", None);
         });
     }
 
@@ -3412,7 +3502,7 @@ mod tests {
                     ui.label("behind");
                 });
                 // Open, then closing — the closing frame still has to draw.
-                let _ = modal_layer(ctx, Some(&view), open, depth, &mut inputs, None);
+                let _ = modal_layer(ctx, Some(&view), open, depth, None, &mut inputs, None);
             });
         }
     }
