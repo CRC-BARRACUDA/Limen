@@ -2511,12 +2511,27 @@ fn file_field(
 /// its entrance on every tick and strobe.
 fn view_shape(view: &View) -> u64 {
     use std::hash::{Hash, Hasher};
+    fn walk<H: std::hash::Hasher>(widgets: &[Widget], h: &mut H) {
+        widgets.len().hash(h);
+        for w in widgets {
+            std::mem::discriminant(w).hash(h);
+            match w {
+                // A button's label is part of the shape. Two screens can be
+                // built from the same widgets and still be different screens —
+                // a mode switch offering "Scan processes" or "Scan autostart"
+                // differs only in what its one button says. Safe to include
+                // because a screen that merely refreshes keeps its buttons: a
+                // progress view's Stop is Stop on every tick, while the counts
+                // beside it change and are deliberately left out.
+                Widget::Button { text, .. } => text.hash(h),
+                Widget::Row { children } => walk(children, h),
+                _ => {}
+            }
+        }
+    }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     view.title.hash(&mut h);
-    view.widgets.len().hash(&mut h);
-    for w in &view.widgets {
-        std::mem::discriminant(w).hash(&mut h);
-    }
+    walk(&view.widgets, &mut h);
     h.finish()
 }
 
@@ -3629,6 +3644,39 @@ mod tests {
             r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"checkbox","id":"x"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
         );
         assert_ne!(view_shape(&basic), view_shape(&advanced));
+
+        // Two screens built from the same widgets, differing only in what the
+        // button says — a mode switch offering the next scan. Same shape by the
+        // old rule, and so no entrance at all.
+        let to_procs = parse(
+            r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"button","text":"Scan running processes instead","action":{"capability":"c","method":"m"}}]}"#,
+        );
+        let to_autoruns = parse(
+            r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"button","text":"Scan what starts automatically instead","action":{"capability":"c","method":"m"}}]}"#,
+        );
+        assert_ne!(
+            view_shape(&to_procs),
+            view_shape(&to_autoruns),
+            "a screen whose only difference is its button is still a different screen"
+        );
+
+        // ...and a button nested in a row counts the same way.
+        let row_a = parse(
+            r#"{"title":"S","widgets":[{"kind":"row","children":[{"kind":"button","text":"Files","action":{"capability":"c","method":"m"}}]}]}"#,
+        );
+        let row_b = parse(
+            r#"{"title":"S","widgets":[{"kind":"row","children":[{"kind":"button","text":"Processes","action":{"capability":"c","method":"m"}}]}]}"#,
+        );
+        assert_ne!(view_shape(&row_a), view_shape(&row_b));
+
+        // A progress view keeps its buttons while its counts change, so it must
+        // still not re-animate — that is what the whole rule protects.
+        let polling = |n: &str| {
+            parse(&format!(
+                r#"{{"title":"S","widgets":[{{"kind":"label","text":"{n} lines logged"}},{{"kind":"button","text":"Stop","action":{{"capability":"c","method":"m"}}}}]}}"#
+            ))
+        };
+        assert_eq!(view_shape(&polling("12")), view_shape(&polling("4310")));
 
         // A different screen entirely.
         let other = parse(
