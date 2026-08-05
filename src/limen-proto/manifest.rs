@@ -159,12 +159,23 @@ pub struct Permissions {
     /// RTR are not this: they run elevated on the remote machine, not the host.)
     #[serde(default)]
     pub may_require_admin: bool,
+    /// May ask the host to run a command with administrator / root privileges,
+    /// via `host.elevate`.
+    ///
+    /// Declared separately from [`subprocess`](Self::subprocess) because it is a
+    /// different thing to consent to: a module that may spawn processes runs
+    /// them as you, while this one asks the operating system to run something as
+    /// root. The host refuses `host.elevate` unless this is set, so a module
+    /// cannot reach for it without having said so where the user can read it.
+    #[serde(default)]
+    pub elevate: bool,
 }
 
 impl Permissions {
     /// Whether any declared permission is security-relevant (worth consenting to).
     pub fn sensitive(&self) -> bool {
         self.admin
+            || self.elevate
             || self.run_hosts
             || self.subprocess
             || !self.elevated_methods.is_empty()
@@ -190,6 +201,11 @@ impl Permissions {
         }
         if self.subprocess {
             out.push("spawn local processes".to_string());
+        }
+        if self.elevate {
+            // Worded so it reads as what it is on the consent screen: the module
+            // does not become root, it asks the OS to run something as root.
+            out.push("run commands as administrator".to_string());
         }
         if !self.network.is_empty() {
             out.push(format!("network: {}", self.network.join(", ")));
@@ -259,6 +275,34 @@ pub fn localized_description(dir: &Path, lang: &str) -> Option<String> {
 /// manifest's `display_name`, then its `name`).
 pub fn localized_title(dir: &Path, lang: &str) -> Option<String> {
     localized_module_field(dir, lang, "title")
+}
+
+#[cfg(test)]
+mod elevate_tests {
+    use super::*;
+
+    /// Elevation is opt-in and must be visible. A module that never mentions it
+    /// cannot ask for root, and one that does has to show up on the consent
+    /// screen saying so — otherwise the permission is a formality.
+    #[test]
+    fn elevation_is_declared_or_refused() {
+        let silent: Permissions = toml::from_str("subprocess = true").unwrap();
+        assert!(!silent.elevate, "not asking is the default");
+        assert!(!silent.summary().iter().any(|p| p.contains("administrator")));
+
+        let asking: Permissions = toml::from_str("subprocess = true\nelevate = true").unwrap();
+        assert!(asking.elevate);
+        assert!(asking.sensitive(), "it must require consent");
+        assert!(
+            asking
+                .summary()
+                .iter()
+                .any(|p| p == "run commands as administrator"),
+            "and say so in words the consent screen shows: {:?}",
+            asking.summary()
+        );
+    }
+
 }
 
 #[cfg(test)]
