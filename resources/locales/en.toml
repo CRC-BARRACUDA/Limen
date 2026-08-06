@@ -53,9 +53,9 @@ title = "Modules"
 reload = "Reload"
 search_hint = "Search by name — or tag:ua, description:banned, cap:programs.local"
 open = "Open"
-remove = "Remove"
 github = "GitHub ↗"
 update = "Update"
+remove = "Remove"
 install = "Install"
 updating = "Updating…"
 installing = "Installing…"
@@ -75,6 +75,7 @@ available = "Available"
 [tabstrip]
 
 [perm]
+title = "Permission required"
 this_module = "This module"
 wants_to_run = "“{name}” wants to run “{method}”, which needs elevated permissions."
 grant_run = "Grant & Run"
@@ -128,3 +129,8 @@ dev_mode_on = "Dev mode on — updates sourced from the paths above."
 lines = "lines"
 autoscroll = "Autoscroll"
 no_logs = "No logs yet."
+
+[confirm]
+remove_title = "Remove module?"
+remove_yes = "Remove"
+cancel = "Cancel"

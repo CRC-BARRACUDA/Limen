@@ -59,6 +59,42 @@ pub struct Host {
     host_call: HostCallFn,
 }
 
+/// What [`Host::elevate`] came back with.
+///
+/// `ran` distinguishes "the user refused" from "it ran and failed", which a bare
+/// exit code cannot: a dismissed prompt and a command that exited non-zero are
+/// different things to report.
+#[derive(Debug, Clone)]
+pub struct Elevated {
+    /// Whether the command actually started with privileges.
+    pub ran: bool,
+    /// Its exit status, where the platform could report one.
+    pub code: Option<i32>,
+    /// A fixed word, so the module can act on it *and* say it in the user's
+    /// language: `""` (ran cleanly), `"unavailable"`, `"refused"`, `"failed"`,
+    /// `"error"`.
+    pub reason: String,
+    /// The English detail, for logs and as a fallback.
+    pub message: String,
+}
+
+impl Elevated {
+    /// It ran and exited cleanly.
+    pub fn ok(&self) -> bool {
+        self.ran && matches!(self.code, Some(0) | None)
+    }
+    /// Nothing on this machine can ask for privileges — no polkit, no graphical
+    /// sudo. Worth telling the user, since the fix is theirs: install one, or
+    /// start Limen as root.
+    pub fn unavailable(&self) -> bool {
+        self.reason == "unavailable"
+    }
+    /// The user was asked and said no.
+    pub fn refused(&self) -> bool {
+        self.reason == "refused"
+    }
+}
+
 impl Host {
     /// Call `method` on whichever module provides `capability`.
     pub fn call(
@@ -97,6 +133,132 @@ impl Host {
     /// Best-effort — registry/device_manager are Windows-only.
     pub fn open(&self, target: &str, value: &str) {
         let _ = self.raw("host.open", json!({ "target": target, "value": value }));
+    }
+
+    /// This module's own directory on disk.
+    ///
+    /// A module that manages content of its own — a downloaded scanner, a rule
+    /// set — keeps it under `tools/` in here. That subdirectory is deliberately
+    /// excluded from the module's trust digest, so filling it does not revoke
+    /// the module's approval; it is also removed with the module, and wiped when
+    /// the module updates, so a new module version starts from a clean slate and
+    /// can require a different tool version.
+    pub fn module_dir(&self) -> Option<String> {
+        self.raw("host.module_dir", Value::Null)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Raise a desktop notification on the machine running Limen.
+    ///
+    /// For work the user is not watching — a long scan finishing, an install
+    /// landing. `urgency` is `"low"`, `"normal"` or `"critical"`; anything else
+    /// is treated as `"normal"`. Best-effort: a session with no notification
+    /// daemon simply shows nothing, and that is not an error.
+    pub fn notify(&self, title: &str, body: &str, urgency: &str) {
+        let _ = self.raw(
+            "host.notify",
+            json!({ "title": title, "body": body, "urgency": urgency }),
+        );
+    }
+
+    /// Run a command with administrator / root privileges, letting the operating
+    /// system ask the user for them.
+    ///
+    /// Limen stays unprivileged — what is elevated is the command. Requires
+    /// `elevate = true` under `[permissions]`; without it the host refuses,
+    /// which is the point: a module cannot reach for root without having said so
+    /// where the user can read it.
+    ///
+    /// **Blocks** until the command finishes, so call it from a worker thread
+    /// rather than from a method that has to return a view.
+    ///
+    /// Pass absolute paths. Elevation replaces the environment with a minimal
+    /// one, so anything resolved through `PATH` will not be found.
+    pub fn elevate(&self, argv: &[&str], cwd: Option<&str>) -> Elevated {
+        let mut params = json!({ "argv": argv });
+        if let Some(d) = cwd {
+            params["cwd"] = json!(d);
+        }
+        self.elevate_call(params)
+    }
+
+    /// Start an elevated command and return an id to poll with
+    /// [`Host::elevate_status`], instead of waiting for it.
+    ///
+    /// For anything long: waiting blocks every other call this module makes,
+    /// including the one that draws its own progress. The authorization prompt
+    /// alone can sit there indefinitely — the user may be looking at a password
+    /// dialog, or may have walked away.
+    pub fn elevate_async(&self, argv: &[&str], cwd: Option<&str>) -> Option<u64> {
+        let mut params = json!({ "argv": argv, "wait": false });
+        if let Some(d) = cwd {
+            params["cwd"] = json!(d);
+        }
+        self.raw("host.elevate", params)
+            .ok()
+            .and_then(|v| v.get("id").and_then(Value::as_u64))
+    }
+
+    /// Whether a started elevation is still going, and how it ended.
+    ///
+    /// `None` while it is still running — including while the prompt is on
+    /// screen unanswered, which is what a module should be showing.
+    pub fn elevate_status(&self, id: u64) -> Option<Elevated> {
+        let v = self
+            .raw("host.elevate_status", json!({ "id": id }))
+            .ok()?;
+        if v.get("running").and_then(Value::as_bool).unwrap_or(false) {
+            return None;
+        }
+        Some(Elevated {
+            ran: v.get("ran").and_then(Value::as_bool).unwrap_or(false),
+            code: v.get("code").and_then(Value::as_i64).map(|c| c as i32),
+            reason: v.get("reason").and_then(Value::as_str).unwrap_or("error").to_string(),
+            message: v.get("message").and_then(Value::as_str).unwrap_or_default().to_string(),
+        })
+    }
+
+    fn elevate_call(&self, params: Value) -> Elevated {
+        match self.raw("host.elevate", params) {
+            Ok(v) => Elevated {
+                ran: v.get("ran").and_then(Value::as_bool).unwrap_or(false),
+                code: v.get("code").and_then(Value::as_i64).map(|c| c as i32),
+                reason: v
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("error")
+                    .to_string(),
+                message: v
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+            // The host refused, most likely because the permission is missing.
+            Err(e) => Elevated {
+                ran: false,
+                code: None,
+                reason: "error".into(),
+                message: e.to_string(),
+            },
+        }
+    }
+
+    /// Whether this machine can ask the user for privileges at all, and how.
+    ///
+    /// Ask before offering an action that needs elevation: a machine with
+    /// neither polkit nor a graphical sudo can do nothing, and the user should
+    /// hear that up front rather than after the attempt.
+    pub fn can_elevate(&self) -> (bool, String) {
+        match self.raw("host.can_elevate", Value::Null) {
+            Ok(v) => (
+                v.get("available").and_then(Value::as_bool).unwrap_or(false),
+                v.get("how").and_then(Value::as_str).unwrap_or("").to_string(),
+            ),
+            Err(_) => (false, String::new()),
+        }
     }
 
     /// Show a native "open file" dialog on the host; returns the chosen path, or

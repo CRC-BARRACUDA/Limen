@@ -39,12 +39,17 @@ function Text(id, opts = {}) {
 }
 // A filesystem path input keyed by `id` (the chosen path comes back in the
 // method params, like Text). Typed, dropped onto, or chosen via Browse.
-// `directory` picks a folder and accepts only folders; `browse` labels the
-// button, so the module can translate it with the rest of its view.
+// `accepts` is "file", "dir", or "file|dir" for either; a dual field shows two
+// Browse buttons, since no OS has a dialog that picks either — label the second
+// with `browseDir`. Both labels live here so the module can translate them.
 function File(id, opts = {}) {
   return { toSpec: () => ({
     kind: "file", id, label: opts.label || "", placeholder: opts.placeholder || "",
-    default: opts.default || "", directory: !!opts.directory, browse: opts.browse || "",
+    default: opts.default || "",
+    // `directory: true` is the older spelling of `accepts: "dir"`.
+    accepts: opts.directory ? "dir" : (opts.accepts || "file"),
+    browse: opts.browse || "",
+    browse_dir: opts.browseDir || opts.browse_dir || "",
   }) };
 }
 function Select(id, options, opts = {}) {
@@ -54,7 +59,9 @@ function Select(id, options, opts = {}) {
 }
 function Button(text, opts = {}) {
   return { toSpec: () => ({
-    kind: "button", text, style: opts.primary ? "primary" : "default",
+    kind: "button", text,
+    // `danger` is the red one, for an action that destroys something.
+    style: opts.danger ? "danger" : (opts.primary ? "primary" : "default"),
     action: { capability: opts.capability || _currentCapability, method: opts.method || opts.calls },
   }) };
 }
@@ -86,6 +93,19 @@ class Host {
   about() {
     // { os, arch, family, hostname, limen_version, base_dir }
     return this._m._request("host.about", {});
+  }
+  // This module's own directory on disk. Content the module fetches for itself
+  // belongs under `tools/` in here: excluded from the trust digest, removed with
+  // the module, wiped when the module updates.
+  moduleDir() {
+    const r = this._m._request("host.module_dir", null);
+    return typeof r === "string" && r ? r : null;
+  }
+  // Raise a desktop notification on the machine running Limen, for work the
+  // user is not watching. `urgency` is "low" | "normal" | "critical".
+  // Best-effort: a session with no notification daemon shows nothing.
+  notify(title, body = "", urgency = "normal") {
+    this._m._request("host.notify", { title: String(title), body: String(body), urgency });
   }
   log(message) {
     this._m._request("host.log", String(message));

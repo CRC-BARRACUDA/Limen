@@ -333,6 +333,27 @@ impl Host {
         handler: &Arc<IncomingHandler>,
         logger: &Logger,
     ) -> Result<()> {
+        // Give this module a handler that knows where the module lives. The
+        // shared dispatcher is one closure for every module and so has no idea
+        // who is calling; a module that manages content of its own — a fetched
+        // tool under `tools/` — has to be able to find its own directory.
+        let handler: Arc<IncomingHandler> = {
+            let shared = handler.clone();
+            let dir = spec.cwd.clone();
+            // Whether this module may ask for elevation is a property of *this*
+            // module, so the check lives here rather than in the shared
+            // dispatcher, which cannot tell who is calling.
+            let may_elevate = spec.permissions.elevate;
+            Arc::new(move |method: &str, params: Value| match method {
+                "host.module_dir" => Ok(json!(dir.to_string_lossy())),
+                "host.elevate" => host_elevate(params, may_elevate),
+                "host.can_elevate" => Ok(host_can_elevate()),
+                "host.elevate_status" => host_elevate_status(params),
+                _ => shared(method, params),
+            })
+        };
+        let handler = &handler;
+
         let conn: Arc<dyn Module> = match &spec.launch {
             Launch::Script { runtime, script } => {
                 // Resolve the interpreter now; if missing, skip the module
@@ -459,6 +480,7 @@ fn host_handler(
         "host.capabilities" => Ok(json!(broker.capabilities())),
         "host.locale" => Ok(json!(limen_proto::locale::current())),
         "host.open" => host_open(params),
+        "host.notify" => host_notify(params),
         "host.pick_file" => Ok(host_pick_file()),
         "host.log" => {
             let msg = params.as_str().map(str::to_string).unwrap_or_else(|| params.to_string());
@@ -470,6 +492,580 @@ fn host_handler(
             format!("unknown host method {other}"),
         )),
     }
+}
+
+/// Raise a desktop notification on the machine running Limen, for work the user
+/// is not sitting and watching — a scan that has finished, an install that has
+/// landed. `params`:
+/// `{ "title": "...", "body": "...", "urgency": "low"|"normal"|"critical" }`.
+///
+/// Best-effort and fire-and-forget, like [`host_open`]: a desktop with no
+/// notification daemon, or a locked-down session, is not a module error. Going
+/// through the host rather than each module shelling out for itself means one
+/// implementation to keep working per platform, and one place to put policy.
+/// Run a command with administrator / root privileges, letting the operating
+/// system ask the user for them.
+///
+/// Limen itself stays unprivileged. What is elevated is the child — the same
+/// shape as launching `regedit` through `ShellExecuteW`, and the reason this
+/// belongs to the host rather than to each module: elevation is gated by a
+/// declared permission, the argument vector never goes near a shell, and there
+/// is one implementation to get right per platform instead of one per module.
+///
+/// Blocks until the command finishes and returns its exit status, so a module
+/// can tell "the user said no" from "it ran and failed". Callers must therefore
+/// invoke it off any thread that draws.
+/// Elevations still running, so a module can start one and keep drawing.
+///
+/// A module's `Host` handle holds a raw pointer and cannot cross threads, so the
+/// module cannot wait on this itself without blocking every other call it makes
+/// — including the one that draws its progress. The host does the waiting and
+/// the module asks how it went.
+type Elevations = std::sync::Mutex<std::collections::HashMap<u64, Arc<std::sync::Mutex<Value>>>>;
+
+fn elevations() -> &'static Elevations {
+    static E: std::sync::OnceLock<Elevations> = std::sync::OnceLock::new();
+    E.get_or_init(Default::default)
+}
+
+/// How an elevation started with `wait: false` is going.
+fn host_elevate_status(params: Value) -> std::result::Result<Value, RpcError> {
+    let id = params.get("id").and_then(Value::as_u64).unwrap_or(0);
+    let slot = elevations().lock().unwrap().get(&id).cloned();
+    match slot {
+        Some(state) => {
+            let v = state.lock().unwrap().clone();
+            // Finished results are dropped once collected — a module that polls
+            // forever should not pin them, and there is nothing more to say.
+            if v.get("running").and_then(Value::as_bool) == Some(false) {
+                elevations().lock().unwrap().remove(&id);
+            }
+            Ok(v)
+        }
+        None => Ok(json!({ "running": false, "ran": false, "reason": "error",
+                           "message": "no such elevation" })),
+    }
+}
+
+fn host_elevate(params: Value, may_elevate: bool) -> std::result::Result<Value, RpcError> {
+    if !may_elevate {
+        return Err(RpcError::new(
+            limen_proto::rpc::INVALID_REQUEST,
+            "this module does not declare the `elevate` permission",
+        ));
+    }
+    let argv: Vec<String> = params
+        .get("argv")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if argv.is_empty() {
+        return Err(RpcError::new(limen_proto::rpc::INVALID_PARAMS, "argv must be non-empty"));
+    }
+    let cwd = params.get("cwd").and_then(Value::as_str).map(str::to_string);
+
+    // The default waits and returns the outcome, which is what a short command
+    // wants. `wait: false` returns an id instead, for something long enough that
+    // the caller has to stay responsive while it runs — the authorization prompt
+    // and then, often, minutes of work.
+    if params.get("wait").and_then(Value::as_bool).unwrap_or(true) {
+        return elevate_native(&argv, cwd.as_deref());
+    }
+
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let state = Arc::new(std::sync::Mutex::new(
+        json!({ "running": true, "ran": false, "reason": "", "message": "" }),
+    ));
+    elevations().lock().unwrap().insert(id, state.clone());
+
+    std::thread::spawn(move || {
+        let done = elevate_native(&argv, cwd.as_deref())
+            .unwrap_or_else(|e| elevate_result(false, None, "error", &e.to_string()));
+        let mut slot = state.lock().unwrap();
+        *slot = done;
+        slot["running"] = json!(false);
+    });
+    Ok(json!({ "id": id, "running": true }))
+}
+
+/// Result shape shared by every platform.
+///
+/// `reason` is a fixed word rather than prose because the caller has to be able
+/// to act on it and to say it in the user's language: "" (ran cleanly),
+/// `unavailable` (nothing on this machine can ask), `refused` (the user said
+/// no), `failed` (it ran and exited non-zero), `error` (it could not start).
+/// `message` is the English detail, for logs and as a fallback.
+fn elevate_result(ran: bool, code: Option<i32>, reason: &str, message: &str) -> Value {
+    json!({ "ran": ran, "code": code, "reason": reason, "message": message })
+}
+
+/// Find an executable on `PATH`.
+///
+/// Nothing is assumed to be installed: a minimal or hardened Linux may have
+/// neither polkit nor sudo, and the honest answer there is to say so rather than
+/// to run the command unprivileged and let the caller believe otherwise.
+#[cfg(unix)]
+fn program_on_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|d| d.join(name))
+            .find(|p| p.is_file())
+    })
+}
+
+/// Whether this machine has any way to ask the user for privileges.
+///
+/// Offered separately so a module can tell the user *before* they choose an
+/// action that needs it, rather than after the attempt fails.
+fn host_can_elevate() -> Value {
+    #[cfg(target_os = "linux")]
+    {
+        // Already root: nothing to ask for.
+        if std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("Uid:"))
+                    .and_then(|l| l.split_whitespace().nth(2).map(|u| u == "0"))
+            })
+            .unwrap_or(false)
+        {
+            return json!({ "available": true, "how": "already-root" });
+        }
+        if program_on_path("pkexec").is_some() {
+            return json!({ "available": true, "how": "pkexec" });
+        }
+        // sudo is only usable without a terminal if a graphical askpass is
+        // configured; otherwise it would sit waiting for input nobody can give.
+        if program_on_path("sudo").is_some() && std::env::var_os("SUDO_ASKPASS").is_some() {
+            return json!({ "available": true, "how": "sudo-askpass" });
+        }
+        json!({ "available": false, "how": "" })
+    }
+
+    // Both have it built in — osascript and the UAC prompt.
+    #[cfg(target_os = "macos")]
+    {
+        json!({ "available": true, "how": "osascript" })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        json!({ "available": true, "how": "runas" })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        json!({ "available": false, "how": "" })
+    }
+}
+
+/// Linux: polkit. `pkexec` shows the desktop's own authentication dialog and
+/// runs the command as root; the arguments go to execve, never to a shell.
+///
+/// Note for callers: pkexec deliberately replaces the environment with a minimal
+/// one, so a command that resolves anything relative to `PATH` or to its own
+/// environment must be given absolute paths. The working directory is set
+/// explicitly here for the same reason.
+#[cfg(target_os = "linux")]
+fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+    // Already root — run it directly rather than asking for what we have.
+    let how = host_can_elevate();
+    let how = how.get("how").and_then(Value::as_str).unwrap_or("");
+    let mut cmd = match how {
+        "already-root" => std::process::Command::new(&argv[0]),
+        "pkexec" => {
+            let mut c = std::process::Command::new("pkexec");
+            // The desktop's own polkit agent shows the dialog; the internal one
+            // is a text prompt on a terminal that may not exist.
+            c.arg("--disable-internal-agent");
+            c.args(argv);
+            c
+        }
+        "sudo-askpass" => {
+            let mut c = std::process::Command::new("sudo");
+            // -A uses $SUDO_ASKPASS, a graphical helper; -n would rather fail
+            // than block, but with an askpass there is something to answer with.
+            c.arg("-A");
+            c.args(argv);
+            c
+        }
+        _ => {
+            return Ok(elevate_result(
+                false,
+                None,
+                "unavailable",
+                "neither pkexec nor a graphical sudo askpass is available on this machine",
+            ))
+        }
+    };
+    if how == "already-root" {
+        cmd.args(&argv[1..]);
+    }
+    // Keep the caller's working directory: elevation helpers do not guarantee
+    // one, and a tool that resolves its data relative to `.` would otherwise
+    // find nothing and report an empty result rather than an error.
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    match cmd.status() {
+        Ok(st) => {
+            let code = st.code();
+            // 126 is polkit's "not authorised" — the prompt was dismissed or the
+            // password was wrong. 127 is "could not run it at all".
+            let (reason, message) = match code {
+                Some(0) => ("", ""),
+                Some(126) => ("refused", "authentication was dismissed or refused"),
+                Some(127) => ("error", "the command could not be started"),
+                _ => ("failed", "the command exited with an error"),
+            };
+            Ok(elevate_result(
+                !matches!(code, Some(126) | Some(127)),
+                code,
+                reason,
+                message,
+            ))
+        }
+        Err(e) => Ok(elevate_result(
+            false,
+            None,
+            "error",
+            &format!("the elevation helper could not be started: {e}"),
+        )),
+    }
+}
+
+/// macOS: `osascript` asks for administrator privileges with the system's own
+/// dialog. The command is embedded in AppleScript, so each argument is quoted
+/// for the shell it ends up in.
+#[cfg(target_os = "macos")]
+fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+    // `do shell script` runs its argument through sh, so anything a caller
+    // passes has to be quoted rather than trusted — a path with a space in it is
+    // the ordinary case, not the attack.
+    fn shell_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+    let mut line = String::new();
+    if let Some(d) = cwd {
+        line.push_str(&format!("cd {} && ", shell_quote(d)));
+    }
+    line.push_str(
+        &argv
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let script = format!(
+        "do shell script {} with administrator privileges",
+        shell_quote(&line)
+    );
+    match std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+    {
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            // AppleScript reports a dismissed prompt as error -128.
+            let refused = err.contains("-128");
+            let (reason, message) = if refused {
+                ("refused", "authentication was dismissed")
+            } else if out.status.success() {
+                ("", "")
+            } else {
+                ("failed", "the command exited with an error")
+            };
+            Ok(elevate_result(
+                out.status.success(),
+                out.status.code(),
+                reason,
+                message,
+            ))
+        }
+        Err(e) => Ok(elevate_result(
+            false,
+            None,
+            &format!("osascript could not be started: {e}"),
+        )),
+    }
+}
+
+/// Windows: the `runas` verb, which is what raises the UAC prompt — the same
+/// route the host already uses to open `regedit`.
+///
+/// `ShellExecuteExW` rather than `ShellExecuteW` so the process handle comes
+/// back and the call can wait for it; fire-and-forget would leave the caller
+/// unable to tell a finished scan from a refused prompt.
+#[cfg(target_os = "windows")]
+fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+
+    #[repr(C)]
+    struct ShellExecuteInfoW {
+        cb_size: u32,
+        f_mask: u32,
+        hwnd: *mut c_void,
+        lp_verb: *const u16,
+        lp_file: *const u16,
+        lp_parameters: *const u16,
+        lp_directory: *const u16,
+        n_show: i32,
+        h_inst_app: *mut c_void,
+        lp_id_list: *mut c_void,
+        lp_class: *const u16,
+        hkey_class: *mut c_void,
+        dw_hot_key: u32,
+        h_icon_or_monitor: *mut c_void,
+        h_process: *mut c_void,
+    }
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn WaitForSingleObject(handle: *mut c_void, ms: u32) -> u32;
+        fn GetExitCodeProcess(handle: *mut c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+    /// Arguments become one command line, so each is quoted — a path with a
+    /// space would otherwise arrive as two arguments.
+    fn quote(s: &str) -> String {
+        if s.contains(['"', ' ', '\t']) {
+            format!("\"{}\"", s.replace('"', "\\\""))
+        } else {
+            s.to_string()
+        }
+    }
+
+    const SEE_MASK_NOCLOSEPROCESS: u32 = 0x0000_0040;
+    const SEE_MASK_NO_UI: u32 = 0x0000_0400;
+    const SW_HIDE: i32 = 0;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+    const ERROR_CANCELLED: u32 = 1223;
+
+    let verb = wide("runas");
+    let file = wide(&argv[0]);
+    let params = wide(
+        &argv[1..]
+            .iter()
+            .map(|a| quote(a))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let dir = cwd.map(wide);
+
+    let mut info = ShellExecuteInfoW {
+        cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+        f_mask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_UI,
+        hwnd: std::ptr::null_mut(),
+        lp_verb: verb.as_ptr(),
+        lp_file: file.as_ptr(),
+        lp_parameters: params.as_ptr(),
+        lp_directory: dir.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
+        n_show: SW_HIDE,
+        h_inst_app: std::ptr::null_mut(),
+        lp_id_list: std::ptr::null_mut(),
+        lp_class: std::ptr::null(),
+        hkey_class: std::ptr::null_mut(),
+        dw_hot_key: 0,
+        h_icon_or_monitor: std::ptr::null_mut(),
+        h_process: std::ptr::null_mut(),
+    };
+
+    // SAFETY: every pointer is null or a NUL-terminated UTF-16 buffer that
+    // outlives the call, and `cb_size` matches the struct actually passed.
+    let ok = unsafe { ShellExecuteExW(&mut info) } != 0;
+    if !ok {
+        let err = unsafe { GetLastError() };
+        let (reason, message) = if err == ERROR_CANCELLED {
+            ("refused", "the administrator prompt was dismissed")
+        } else {
+            ("error", "the command could not be started")
+        };
+        return Ok(elevate_result(false, None, reason, message));
+    }
+    if info.h_process.is_null() {
+        // It launched but gave us nothing to wait on; report that honestly
+        // rather than claim an exit status we do not have.
+        return Ok(elevate_result(true, None, "", ""));
+    }
+    // SAFETY: `h_process` is a live handle returned by the call above, closed
+    // exactly once below.
+    let code = unsafe {
+        WaitForSingleObject(info.h_process, INFINITE);
+        let mut c: u32 = 0;
+        let got = GetExitCodeProcess(info.h_process, &mut c) != 0;
+        CloseHandle(info.h_process);
+        got.then_some(c as i32)
+    };
+    let (reason, message) = if code == Some(0) {
+        ("", "")
+    } else {
+        ("failed", "the command exited with an error")
+    };
+    Ok(elevate_result(true, code, reason, message))
+}
+
+/// Everywhere else there is no agreed way to ask, so say so rather than run the
+/// command unprivileged and let the caller believe it was elevated.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn elevate_native(_argv: &[String], _cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+    Ok(elevate_result(
+        false,
+        None,
+        "unavailable",
+        "this platform has no supported way to ask for administrator privileges",
+    ))
+}
+
+fn host_notify(params: Value) -> std::result::Result<Value, RpcError> {
+    let title = params.get("title").and_then(Value::as_str).unwrap_or("Limen");
+    let body = params.get("body").and_then(Value::as_str).unwrap_or("");
+    let urgency = params
+        .get("urgency")
+        .and_then(Value::as_str)
+        .filter(|u| matches!(*u, "low" | "normal" | "critical"))
+        .unwrap_or("normal");
+    notify_native(title, body, urgency);
+    Ok(Value::Null)
+}
+
+#[cfg(target_os = "linux")]
+fn notify_native(title: &str, body: &str, urgency: &str) {
+    // Arguments go straight to execve — no shell, so nothing in `title`/`body`
+    // can be read as syntax however it is spelled.
+    let _ = std::process::Command::new("notify-send")
+        .args(["-a", "Limen", "-u", urgency, title, body])
+        .spawn();
+}
+
+#[cfg(target_os = "macos")]
+fn notify_native(title: &str, body: &str, _urgency: &str) {
+    // `osascript -e` takes AppleScript *source*, so the text is escaped rather
+    // than merely quoted — a stray `"` would otherwise end the literal and the
+    // rest would be executed as script.
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        esc(body),
+        esc(title)
+    );
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn();
+}
+
+/// Give Windows an app identity of our own, so notifications are attributed to
+/// **Limen** rather than to whatever process happened to raise them.
+///
+/// A toast from an *unregistered* AUMID is accepted and then silently dropped —
+/// which is why borrowing PowerShell's registered id works at all, at the cost
+/// of every module notification reading "Windows PowerShell". Registering ours
+/// costs one HKCU key and makes the attribution honest. No elevation: this is
+/// the user's own hive.
+///
+/// Done once per process, and idempotent besides. `IconUri` is only set when the
+/// icon has actually been extracted (`limen-core` writes it on the app's first
+/// notification); a missing file would just render no icon. Note the icon —
+/// unlike the name — appears from the next sign-in, because `WpnUserService`
+/// caches an app's display data when it starts.
+#[cfg(target_os = "windows")]
+fn ensure_app_id() {
+    use limen_proto::proc::NoConsole;
+    use std::sync::OnceLock;
+    static DONE: OnceLock<()> = OnceLock::new();
+    DONE.get_or_init(|| {
+        const KEY: &str = r"HKCU\Software\Classes\AppUserModelId\Limen";
+        let mut values = vec![("DisplayName", APP_ID.to_string())];
+        if let Some(icon) = icon_file() {
+            values.push(("IconUri", icon.to_string_lossy().into_owned()));
+            values.push(("IconBackgroundColor", "00000000".to_string()));
+        }
+        for (name, value) in values {
+            // `.output()` rather than `.status()`: reg's "The operation completed
+            // successfully." would otherwise land in the debug build's console.
+            let _ = std::process::Command::new("reg")
+                .args(["add", KEY, "/v", name, "/t", "REG_SZ", "/d", &value, "/f"])
+                .no_console()
+                .output();
+        }
+    });
+}
+
+/// The app id Windows attributes Limen's toasts to. Matches the one
+/// `limen-core` registers for update notifications, so both speak as one app.
+#[cfg(target_os = "windows")]
+const APP_ID: &str = "Limen";
+
+/// The extracted app icon, if it is there. `limen-core` unpacks it to
+/// `<base>/state/icon.png` at startup; the host only ever reads it, so a missing
+/// file is not an error — it just means a toast without a picture.
+#[cfg(target_os = "windows")]
+fn icon_file() -> Option<std::path::PathBuf> {
+    let path = limen_home().join("state").join("icon.png");
+    path.is_file().then_some(path)
+}
+
+#[cfg(target_os = "windows")]
+fn notify_native(title: &str, body: &str, _urgency: &str) {
+    use limen_proto::proc::NoConsole;
+    // A WinRT ToastGeneric shown through our own registered AUMID — registered
+    // first, since an unregistered id is accepted and then silently dropped.
+    ensure_app_id();
+    // The text lands inside an XML document inside a single-quoted PowerShell
+    // string, so it has to survive both: XML entities first, then PowerShell's
+    // doubled-quote escape.
+    fn xml(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+    fn ps(s: &str) -> String {
+        s.replace('\'', "''")
+    }
+    // `appLogoOverride` is the thumbnail *beside the text*. It is separate from
+    // the small icon in the header, which comes from the AUMID's `IconUri` and
+    // only refreshes when `WpnUserService` restarts — this one is per-toast, so
+    // it shows immediately. A `file:///` src needs forward slashes.
+    let logo = icon_file()
+        .map(|p| {
+            format!(
+                "<image placement=\"appLogoOverride\" src=\"file:///{}\"/>",
+                xml(&p.to_string_lossy().replace('\\', "/"))
+            )
+        })
+        .unwrap_or_default();
+    let doc = format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text>{}</binding></visual></toast>",
+        xml(title),
+        xml(body),
+        logo
+    );
+    let script = format!(
+        "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];\
+         [void][Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom,ContentType=WindowsRuntime];\
+         $x=New-Object Windows.Data.Xml.Dom.XmlDocument;$x.LoadXml('{}');\
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{}')\
+         .Show((New-Object Windows.UI.Notifications.ToastNotification $x))",
+        ps(&doc),
+        APP_ID
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .no_console()
+        .spawn();
 }
 
 /// Show a native "open file" dialog on the host and return the chosen path as

@@ -54,15 +54,29 @@ impl Widget {
 
     // ---- input options ---------------------------------------------------- //
     /// A field label (for `text` / `select`).
-    /// For a [`file`] widget: pick a directory rather than a file.
+    /// For a [`file`] widget: take a directory rather than a file.
     pub fn directory(self) -> Self {
-        self.set("directory", json!(true))
+        self.set("accepts", json!("dir"))
+    }
+
+    /// For a [`file`] widget: take *either* a file or a directory.
+    ///
+    /// The OS has no dialog that picks either, so such a field shows two Browse
+    /// buttons; give the second one a label with [`Widget::browse_dir`].
+    pub fn files_or_dirs(self) -> Self {
+        self.set("accepts", json!("file|dir"))
     }
 
     /// For a [`file`] widget: the Browse button's label, so the module can
     /// localize it alongside the rest of its view.
     pub fn browse(self, text: impl Into<String>) -> Self {
         self.set("browse", json!(text.into()))
+    }
+
+    /// For a [`files_or_dirs`](Widget::files_or_dirs) widget: the label of the
+    /// second button, the one that opens a folder chooser.
+    pub fn browse_dir(self, text: impl Into<String>) -> Self {
+        self.set("browse_dir", json!(text.into()))
     }
 
     pub fn label(self, text: impl Into<String>) -> Self {
@@ -84,6 +98,10 @@ impl Widget {
     pub fn primary(self) -> Self {
         self.set("style", json!("primary"))
     }
+    /// Draw a button in red: the action destroys something.
+    pub fn danger(self) -> Self {
+        self.set("style", json!("danger"))
+    }
     /// Start a `checkbox` checked.
     pub fn checked(self) -> Self {
         self.set("default", json!(true))
@@ -96,6 +114,37 @@ impl Widget {
     /// current one.
     pub fn open_in_tab(self) -> Self {
         self.set("open_in_tab", json!(true))
+    }
+    /// Close the pop-up this button is in, without calling the module. For the
+    /// Cancel of a [`window_modal`], which has nothing to cancel remotely.
+    pub fn dismiss(self) -> Self {
+        self.set("dismiss", json!(true))
+    }
+    /// Ask before running this button's action.
+    ///
+    /// The host shows the question — the same dialog it uses to confirm removing
+    /// a module — and only calls the module if the answer is yes. `subject` is
+    /// what the action happens *to*, drawn in its own frame so the thing at
+    /// stake is unmistakable. Labels default to the host's own wording.
+    pub fn confirm(self, title: &str, subject: &str) -> Self {
+        self.set("confirm", json!({ "title": title, "subject": subject }))
+    }
+
+    /// As [`Widget::confirm`], with the module's own words on the buttons.
+    pub fn confirm_labelled(self, title: &str, subject: &str, yes: &str, no: &str) -> Self {
+        self.set(
+            "confirm",
+            json!({ "title": title, "subject": subject,
+                    "confirm_label": yes, "cancel_label": no }),
+        )
+    }
+
+    /// Draw a painted icon instead of the label, which becomes the tooltip.
+    ///
+    /// Known: `"trash"`. Painted rather than typed because the host ships one
+    /// font and it has no trash character.
+    pub fn icon(self, name: &str) -> Self {
+        self.set("icon", json!(name))
     }
 
     // ---- table interactivity ---------------------------------------------- //
@@ -131,6 +180,23 @@ impl Widget {
         )
     }
 
+    /// As [`Widget::on_activate`], but the result replaces the current view
+    /// rather than opening a tab — for a table inside a pop-up, where a new tab
+    /// would take the user out of the window they are working in.
+    pub fn on_activate_here(
+        self,
+        capability: impl Into<String>,
+        method: impl Into<String>,
+    ) -> Self {
+        self.set(
+            "on_activate",
+            json!({
+                "action": { "capability": capability.into(), "method": method.into() },
+                "open_in_tab": false,
+            }),
+        )
+    }
+
     fn into_value(self) -> Value {
         Value::Object(self.0)
     }
@@ -157,6 +223,27 @@ impl MenuItem {
         self.0.insert("open_in_tab".into(), json!(true));
         self
     }
+    /// Ask before running this, exactly as a button can — a destructive action
+    /// is no less destructive for being in a menu. The host shows the question
+    /// and only calls the module if the answer is yes.
+    pub fn confirm(mut self, title: &str, subject: &str) -> Self {
+        self.0.insert(
+            "confirm".into(),
+            json!({ "title": title, "subject": subject }),
+        );
+        self
+    }
+
+    /// As [`MenuItem::confirm`], with the module's own words on the buttons.
+    pub fn confirm_labelled(mut self, title: &str, subject: &str, yes: &str, no: &str) -> Self {
+        self.0.insert(
+            "confirm".into(),
+            json!({ "title": title, "subject": subject,
+                    "confirm_label": yes, "cancel_label": no }),
+        );
+        self
+    }
+
     /// Turn this into a submenu with the given children (its own action, if any,
     /// is then ignored).
     pub fn submenu(mut self, children: Vec<MenuItem>) -> Self {
@@ -234,6 +321,15 @@ pub fn separator() -> Widget {
     Widget::of_kind("separator")
 }
 
+/// Inside a [`row`], pushes everything after it to the right edge.
+///
+/// What makes a column of trailing buttons line up when the text before them
+/// does not — a delete button per row, say, which should sit at the same place
+/// on every line rather than wherever that line's text happened to end.
+pub fn spacer() -> Widget {
+    Widget::of_kind("spacer")
+}
+
 /// A progress step with an animated status icon — a loading spinner that morphs
 /// into a check when done. `state` is "pending", "loading", or "done".
 pub fn step(label: impl Into<String>, state: impl Into<String>) -> Widget {
@@ -271,6 +367,47 @@ pub fn chart(title: impl Into<String>, data: Vec<(String, f64)>) -> Widget {
 pub fn window(title: impl Into<String>, widgets: Vec<Widget>) -> Value {
     let ws: Vec<Value> = widgets.into_iter().map(Widget::into_value).collect();
     json!({ "title": title.into(), "widgets": ws })
+}
+
+/// A view shown as a pop-up over the screen it came from, instead of replacing
+/// it.
+///
+/// The view underneath stays visible and stops responding, so settings or a
+/// sub-form can be put in front of the user without losing their place. Pop-ups
+/// stack — one can open another — and Esc always closes the top one, so give
+/// every pop-up a way out that the user would think to press.
+/// `id` is the pop-up's identity: returning a view with an id that is already
+/// open redraws that pop-up in place instead of opening another over it, so a
+/// form can refresh itself after every edit.
+/// A pop-up that asks for a particular size.
+///
+/// `width` is in points and the host clamps it to the window — a module cannot
+/// know how much room there is. Changing it between steps is the point: the
+/// pop-up animates from one size to the next, so a step that needs more room
+/// grows into it rather than reappearing at a different size.
+pub fn window_modal_sized(
+    title: impl Into<String>,
+    id: impl Into<String>,
+    width: f32,
+    widgets: Vec<Widget>,
+) -> Value {
+    let mut v = window_modal(title, id, widgets);
+    if let Value::Object(m) = &mut v {
+        m.insert("modal_width".into(), json!(width));
+    }
+    v
+}
+
+pub fn window_modal(
+    title: impl Into<String>,
+    id: impl Into<String>,
+    widgets: Vec<Widget>,
+) -> Value {
+    let mut v = window(title, widgets);
+    if let Value::Object(m) = &mut v {
+        m.insert("modal".into(), json!(id.into()));
+    }
+    v
 }
 
 /// A view that auto-invokes `capability`.`method` once, right after it renders

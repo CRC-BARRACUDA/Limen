@@ -51,9 +51,9 @@ title = "Модулі"
 reload = "Перезавантажити"
 search_hint = "Пошук за назвою — або tag:ua, description:banned, cap:programs.local"
 open = "Відкрити"
-remove = "Видалити"
 github = "GitHub ↗"
 update = "Оновити"
+remove = "Видалити"
 install = "Встановити"
 updating = "Оновлення…"
 installing = "Встановлення…"
@@ -73,6 +73,7 @@ available = "Доступні"
 [tabstrip]
 
 [perm]
+title = "Потрібен дозвіл"
 this_module = "Цей модуль"
 wants_to_run = "«{name}» хоче виконати «{method}», що потребує підвищених прав."
 grant_run = "Дозволити й запустити"
@@ -126,3 +127,8 @@ dev_mode_on = "Режим розробника увімкнено — оновл
 lines = "рядків"
 autoscroll = "Автопрокрутка"
 no_logs = "Ще немає журналів."
+
+[confirm]
+remove_title = "Видалити модуль?"
+remove_yes = "Видалити"
+cancel = "Скасувати"

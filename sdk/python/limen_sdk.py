@@ -79,21 +79,25 @@ class File(Widget):
     method params, exactly like `Text`).
 
     The user can type a path, drag a file or folder onto the field, or press
-    Browse for the OS picker. `directory=True` picks a folder instead of a file
-    and only accepts folders when dropped. `browse` is the button's label — it
-    lives here, rather than in the host, so a module can translate it alongside
-    the rest of its view."""
+    Browse for the OS picker. `accepts` is "file", "dir", or "file|dir" for
+    either; a dual field shows two Browse buttons, since no OS offers a dialog
+    that picks either — label the second with `browse_dir`. `browse` and
+    `browse_dir` live here rather than in the host so a module can translate them
+    alongside the rest of its view."""
 
-    def __init__(self, id, label="", placeholder="", default="", directory=False,
-                 browse=""):
+    def __init__(self, id, label="", placeholder="", default="", accepts="file",
+                 browse="", browse_dir="", directory=False):
         self.id, self.label, self.placeholder = id, label, placeholder
-        self.default, self.directory, self.browse = default, bool(directory), browse
+        self.default, self.browse, self.browse_dir = default, browse, browse_dir
+        # `directory=True` is the older spelling of `accepts="dir"`.
+        self.accepts = "dir" if directory else accepts
 
     def to_spec(self):
         return {
             "kind": "file", "id": self.id, "label": self.label,
             "placeholder": self.placeholder, "default": self.default,
-            "directory": self.directory, "browse": self.browse,
+            "accepts": self.accepts, "browse": self.browse,
+            "browse_dir": self.browse_dir,
         }
 
 
@@ -126,16 +130,18 @@ class Checkbox(Widget):
 class Button(Widget):
     """A button. `calls` names a method on THIS module; the SDK fills in the
     capability. Use `capability=`/`method=` to target another module instead.
-    `primary=True` is the filled accent button, otherwise an outline button; both
+    `primary=True` is the filled accent button and `danger=True` the red one for
+    an action that destroys something; otherwise an outline button. Both
     animate on hover/press on the host."""
 
     def __init__(self, text, calls=None, capability=None, method=None, primary=False,
+                 danger=False,
                  enabled=True, args=None, open_in_tab=False):
         self.text = text
         self.calls = calls
         self.capability = capability
         self.method = method
-        self.primary = primary
+        self.primary, self.danger = primary, danger
         self.enabled = enabled
         self.args = args
         self.open_in_tab = open_in_tab
@@ -145,7 +151,7 @@ class Button(Widget):
         meth = self.method or self.calls
         spec = {
             "kind": "button", "text": self.text,
-            "style": "primary" if self.primary else "default",
+            "style": "danger" if self.danger else ("primary" if self.primary else "default"),
             "enabled": self.enabled,
             "action": {"capability": cap, "method": meth},
         }
@@ -323,6 +329,22 @@ class Host:
         the path / URL / registry key (ignored for device_manager). Best-effort;
         registry and device_manager are Windows-only."""
         self._m._request("host.open", {"target": target, "value": value})
+
+    def module_dir(self):
+        """This module's own directory on disk. Content the module fetches for
+        itself belongs under `tools/` in here: that subdirectory is excluded from
+        the module's trust digest, is removed with the module, and is wiped when
+        the module updates."""
+        r = self._m._request("host.module_dir", None)
+        return r if isinstance(r, str) and r else None
+
+    def notify(self, title, body="", urgency="normal"):
+        """Raise a desktop notification on the machine running Limen — for work
+        the user is not watching, like a long scan finishing. `urgency` is
+        "low" | "normal" | "critical". Best-effort: a session with no
+        notification daemon shows nothing, which is not an error."""
+        self._m._request("host.notify",
+                         {"title": str(title), "body": str(body), "urgency": urgency})
 
     def pick_file(self):
         """Show a native 'open file' dialog on the host; returns the chosen path,
