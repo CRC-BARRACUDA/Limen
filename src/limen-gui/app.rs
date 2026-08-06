@@ -545,12 +545,38 @@ impl LimenApp {
     }
 
     /// Apply the chosen language globally and persist it to settings.json.
-    fn save_language(&self) {
+    ///
+    /// The host's own chrome re-renders from the catalogue every frame, so it
+    /// follows immediately. A module's screen does not: it is a stored view of
+    /// strings the module already translated, and it only changes language when
+    /// the module is asked again. So every cached view is dropped and the module
+    /// on screen is re-asked — otherwise the app sits in two languages at once
+    /// until something happens to invoke it.
+    fn save_language(&mut self) {
         i18n::set_locale(self.language);
         limen_proto::locale::set(self.language.code());
         if let Ok(mut cfg) = limen_core::Config::load() {
             cfg.language = Some(self.language.code().to_string());
             let _ = cfg.save();
+        }
+
+        // Tabs that are not on screen: drop what they were showing, so each is
+        // rebuilt in the new language when it is next opened.
+        self.module_pages.clear();
+
+        // The tab on screen: ask its module for its view again. `ui` is a
+        // module's landing screen, so this returns the user to it — a language
+        // change is rare and deliberate, and a screen half in the old language
+        // is worse than starting a module over.
+        if let Some(Tab::Module(name)) = self.active_tab() {
+            self.view = None;
+            self.view_error = None;
+            self.modal_stack.clear();
+            self.modal_closing = None;
+            self.output.clear();
+            self.busy = false;
+            self.busy_action = None;
+            self.select_module(name);
         }
     }
 
