@@ -540,77 +540,40 @@ fn elevations() -> &'static Elevations {
 
 /// End every elevation still running, on the way out.
 ///
-/// They are our own children, but root ones — the kernel refuses an
-/// unprivileged signal — so this asks for the privileges to end them, which
-/// polkit usually grants without a second prompt so soon after the first.
+/// Almost nothing to do, deliberately. Each elevated command is held by a
+/// supervisor that ends it when its socket closes, and the operating system
+/// closes those when this process exits — however it exits. Asking for
+/// privileges here, as this once did, meant a password prompt and a stall while
+/// the window was already closing, to do what closing does by itself.
+///
+/// What remains is for anything not supervised: our own children, which we can
+/// signal because they are ours.
 fn stop_all_elevations(log: &Logger) {
-    let live: Vec<(u64, u32)> = elevations()
+    let live: Vec<u32> = elevations()
         .lock()
         .unwrap()
-        .iter()
-        .filter_map(|(id, st)| {
+        .values()
+        .filter_map(|st| {
             let v = st.lock().unwrap();
             (v.get("running").and_then(Value::as_bool) == Some(true))
-                .then(|| v.get("pid").and_then(Value::as_u64).map(|p| (*id, p as u32)))
+                .then(|| v.get("pid").and_then(Value::as_u64).map(|p| p as u32))
                 .flatten()
         })
         .collect();
-    for (_, pid) in &live {
-        log(&format!("[elevate] closing: stopping {pid}"));
-        kill_pid(*pid);
-    }
     if live.is_empty() {
         return;
     }
-    std::thread::sleep(std::time::Duration::from_millis(150));
-
-    // Whatever is left is running as root, and an unprivileged parent cannot
-    // signal it — so ask for the privileges to end it. Closing the window has to
-    // mean the scan is over: leaving one grinding through a disk with nothing
-    // left to report to is worse than a prompt on the way out.
-    //
-    // In practice there is usually no prompt: polkit keeps the authorization
-    // from the one that started the scan for a few minutes. If there is, and it
-    // goes unanswered, the wait below gives up and the app closes anyway.
     #[cfg(unix)]
     {
-        let survivors: Vec<u32> = live
-            .iter()
-            .map(|(_, pid)| *pid)
-            .filter(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
-            .collect();
-        if survivors.is_empty() {
-            return;
+        // Dropping the links is what ends the supervised ones; it would happen
+        // at exit anyway, but doing it here ends them a moment sooner.
+        let held = supervisors().lock().unwrap().drain().count();
+        if held > 0 {
+            log(&format!("[elevate] closing: {held} supervised, ending with us"));
         }
-        let kill = program_on_path("kill").unwrap_or_else(|| std::path::PathBuf::from("/bin/kill"));
-        for pid in &survivors {
-            log(&format!("[elevate] closing: asking to stop {pid} as root"));
-            let argv = vec![
-                kill.to_string_lossy().into_owned(),
-                "-TERM".to_string(),
-                pid.to_string(),
-            ];
-            start_elevation(argv, None, log, "closing");
-        }
-        // Bounded: a prompt nobody answers must not hold the window open.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-        while std::time::Instant::now() < deadline {
-            if survivors
-                .iter()
-                .all(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists())
-            {
-                log("[elevate] closing: stopped");
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        for pid in survivors {
-            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
-                log(&format!(
-                    "[elevate] closing: {pid} would not stop — end it with: sudo kill {pid}"
-                ));
-            }
-        }
+    }
+    for pid in live {
+        kill_pid(pid);
     }
 }
 
@@ -635,6 +598,24 @@ fn host_elevate_stop(params: Value, log: &Logger, who: &str) -> std::result::Res
     let still_running = |state: &Arc<std::sync::Mutex<Value>>| {
         state.lock().unwrap().get("running").and_then(Value::as_bool) == Some(true)
     };
+
+    // A supervised command stops by being asked: the supervisor is root and is
+    // the command's parent, so it can do what we cannot. No second prompt.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        let sup = supervisors().lock().unwrap().get(&id).and_then(|s| s.try_clone().ok());
+        if let Some(mut s) = sup {
+            let _ = writeln!(s, "stop");
+            let _ = s.flush();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if state.lock().unwrap().get("running").and_then(Value::as_bool) != Some(true) {
+                log(&format!("[elevate] {who}: supervisor stopped {pid}"));
+                supervisors().lock().unwrap().remove(&id);
+                return Ok(json!({ "stopped": true }));
+            }
+        }
+    }
 
     // The polite attempt first: it works when the command was never elevated,
     // or when we are root already.
@@ -746,6 +727,73 @@ fn host_elevate(
     Ok(json!({ "id": start_elevation(argv, cwd, log, who), "running": true }))
 }
 
+/// Live supervisors, by elevation id.
+///
+/// Holding the socket *is* the mechanism: the supervisor ends its child when
+/// this closes, and the operating system closes it when Limen exits — however
+/// Limen exits. Nothing has to run on the way out, which is the point: shutdown
+/// code cannot be relied on, and a crash leaves no chance to run any.
+#[cfg(unix)]
+type Supervisors = std::sync::Mutex<
+    std::collections::HashMap<u64, std::os::unix::net::UnixStream>,
+>;
+
+#[cfg(unix)]
+fn supervisors() -> &'static Supervisors {
+    static S: std::sync::OnceLock<Supervisors> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Where the supervisor binary lives: beside the running executable.
+fn supervisor_bin() -> Option<std::path::PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let exe = dir.join(if cfg!(windows) { "limen-cli.exe" } else { "limen-cli" });
+    exe.exists().then_some(exe)
+}
+
+/// Wrap `argv` so it runs under a supervisor that outlives the authorization but
+/// not Limen.
+///
+/// A root child cannot be signalled by an unprivileged parent, so the privileges
+/// go to something that stays: the supervisor is elevated, spawns the command
+/// itself, and ends it when this socket closes or when told to. One
+/// authorization, and control of it afterwards.
+///
+/// `None` when there is no supervisor to use — the caller then elevates the
+/// command directly, as before.
+#[cfg(unix)]
+fn supervised(id: u64, argv: &[String], cwd: Option<&str>) -> Option<(Vec<String>, std::os::unix::net::UnixListener, std::path::PathBuf)> {
+    let bin = supervisor_bin()?;
+    // Short path: AF_UNIX truncates around 108 bytes, and the module directory
+    // is nowhere near short enough.
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let sock = dir.join(format!("limen-sup-{}-{id}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let listener = std::os::unix::net::UnixListener::bind(&sock).ok()?;
+    // Only this user may connect: the supervisor runs as root on our say-so.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let mut out = vec![
+        bin.to_string_lossy().into_owned(),
+        "supervise".into(),
+        "--connect".into(),
+        sock.to_string_lossy().into_owned(),
+    ];
+    if let Some(d) = cwd {
+        out.push("--cwd".into());
+        out.push(d.to_string());
+    }
+    out.push("--".into());
+    out.extend(argv.iter().cloned());
+    Some((out, listener, sock))
+}
+
 /// Start an elevated command in the background and return the id to poll it by.
 fn start_elevation(argv: Vec<String>, cwd: Option<String>, log: &Logger, who: &str) -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -761,6 +809,48 @@ fn start_elevation(argv: Vec<String>, cwd: Option<String>, log: &Logger, who: &s
         "ran": false, "reason": "", "message": ""
     })));
     elevations().lock().unwrap().insert(id, state.clone());
+
+    // Elevate a supervisor rather than the command itself, where we can. It
+    // holds the command and ends it when this side closes — which the operating
+    // system does for us, however Limen exits.
+    #[cfg(unix)]
+    let (argv, cwd) = match supervised(id, &argv, cwd.as_deref()) {
+        Some((wrapped, listener, sock)) => {
+            let state = state.clone();
+            let log = log.clone();
+            let who = who.to_string();
+            std::thread::spawn(move || {
+                // The supervisor connects once it is running as root; that is
+                // also the moment authorization finished.
+                if let Ok((stream, _)) = listener.accept() {
+                    {
+                        let mut slot = state.lock().unwrap();
+                        slot["phase"] = json!("running");
+                    }
+                    log(&format!("[elevate] {who}: supervised, running"));
+                    // Read the pid it reports, then hold the socket: closing it
+                    // is what ends the command.
+                    let mut line = String::new();
+                    let mut r = std::io::BufReader::new(
+                        stream.try_clone().expect("clone the supervisor link"),
+                    );
+                    use std::io::BufRead;
+                    if r.read_line(&mut line).is_ok()
+                        && let Some(p) =
+                            line.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok())
+                    {
+                        state.lock().unwrap()["pid"] = json!(p);
+                    }
+                    supervisors().lock().unwrap().insert(id, stream);
+                }
+                let _ = std::fs::remove_file(&sock);
+            });
+            // The supervisor sets the directory itself, so the helper need not.
+            (wrapped, None)
+        }
+        None => (argv, cwd),
+    };
+
 
     let log = log.clone();
     let who = who.to_string();
