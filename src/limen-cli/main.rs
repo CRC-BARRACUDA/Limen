@@ -9,6 +9,8 @@
 //!   limen run demo.native shout --params '{"name":"world"}'
 //!   limen demo
 
+mod supervise;
+
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -35,6 +37,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a command elevated, and end it when Limen goes away.
+    ///
+    /// Not for hand use: Limen elevates *this* rather than the command itself,
+    /// because a root process cannot be signalled by the unprivileged parent
+    /// that started it — so the privileges go to something that stays and can
+    /// end it, on request or when Limen exits.
+    #[command(hide = true)]
+    Supervise {
+        /// Socket back to Limen. Its closing is what says Limen is gone.
+        #[arg(long)]
+        connect: String,
+        /// Working directory for the command.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// The command, after `--`. Fixed here, never sent over the socket.
+        #[arg(last = true, required = true)]
+        argv: Vec<String>,
+    },
     /// List installed modules and their capabilities.
     Modules,
     /// Show a capability provider's self-description.
@@ -81,6 +101,10 @@ fn main() -> Result<()> {
     let dirs = resolve_search_dirs(&cli)?;
 
     match &cli.command {
+        Command::Supervise { connect, cwd, argv } => {
+            let code = supervise::run(connect, cwd.as_deref(), argv)?;
+            std::process::exit(code);
+        }
         Command::Modules => {
             let engine = Engine::load(&dirs)?;
             print_modules(&engine);

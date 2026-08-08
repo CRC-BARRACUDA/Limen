@@ -344,11 +344,17 @@ impl Host {
             // module, so the check lives here rather than in the shared
             // dispatcher, which cannot tell who is calling.
             let may_elevate = spec.permissions.elevate;
+            // Elevation is the one thing here the user cannot watch happen: a
+            // prompt they answered, a command they never saw, run as root. It
+            // goes to the console so there is a record of what was asked for.
+            let log = logger.clone();
+            let who = spec.name.clone();
             Arc::new(move |method: &str, params: Value| match method {
                 "host.module_dir" => Ok(json!(dir.to_string_lossy())),
-                "host.elevate" => host_elevate(params, may_elevate),
+                "host.elevate" => host_elevate(params, may_elevate, &log, &who),
                 "host.can_elevate" => Ok(host_can_elevate()),
                 "host.elevate_status" => host_elevate_status(params),
+                "host.elevate_stop" => host_elevate_stop(params, &log, &who),
                 _ => shared(method, params),
             })
         };
@@ -457,6 +463,10 @@ impl Host {
 
     /// Shut modules down in reverse dependency order.
     pub fn shutdown(&mut self) {
+        // Anything elevated on a module's behalf is still running, and closing
+        // the window is not a reason to leave a root process chewing through a
+        // disk with nothing left to report to.
+        stop_all_elevations(&self.logger);
         for conn in self.connections.iter().rev() {
             conn.shutdown();
         }
@@ -528,6 +538,167 @@ fn elevations() -> &'static Elevations {
     E.get_or_init(Default::default)
 }
 
+/// End every elevation still running, on the way out.
+///
+/// Almost nothing to do, deliberately. Each elevated command is held by a
+/// supervisor that ends it when its socket closes, and the operating system
+/// closes those when this process exits — however it exits. Asking for
+/// privileges here, as this once did, meant a password prompt and a stall while
+/// the window was already closing, to do what closing does by itself.
+///
+/// What remains is for anything not supervised: our own children, which we can
+/// signal because they are ours.
+fn stop_all_elevations(log: &Logger) {
+    let live: Vec<u32> = elevations()
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|st| {
+            let v = st.lock().unwrap();
+            (v.get("running").and_then(Value::as_bool) == Some(true))
+                .then(|| v.get("pid").and_then(Value::as_u64).map(|p| p as u32))
+                .flatten()
+        })
+        .collect();
+    if live.is_empty() {
+        return;
+    }
+    #[cfg(any(unix, windows))]
+    {
+        // Dropping the links is what ends the supervised ones; it would happen
+        // at exit anyway, but doing it here ends them a moment sooner.
+        let held = supervisors().lock().unwrap().drain().count();
+        if held > 0 {
+            log(&format!("[elevate] closing: {held} supervised, ending with us"));
+        }
+    }
+    for pid in live {
+        kill_pid(pid);
+    }
+}
+
+/// Stop an elevation that is still running.
+///
+/// Best effort, and honest about it: once authorized the program runs as root,
+/// and an unprivileged process cannot signal one — the kernel refuses. So this
+/// reports whether it actually stopped, and a caller that gets `false` has to
+/// say so rather than pretend.
+fn host_elevate_stop(params: Value, log: &Logger, who: &str) -> std::result::Result<Value, RpcError> {
+    let id = params.get("id").and_then(Value::as_u64).unwrap_or(0);
+    let slot = elevations().lock().unwrap().get(&id).cloned();
+    let Some(state) = slot else {
+        return Ok(json!({ "stopped": false }));
+    };
+    let pid = state.lock().unwrap().get("pid").and_then(Value::as_u64);
+    let Some(pid) = pid.filter(|p| *p > 0) else {
+        // Nothing to signal — macOS runs it inside osascript, which gives us no
+        // handle at all.
+        return Ok(json!({ "stopped": false }));
+    };
+    let still_running = |state: &Arc<std::sync::Mutex<Value>>| {
+        state.lock().unwrap().get("running").and_then(Value::as_bool) == Some(true)
+    };
+
+    // A supervised command stops by being asked: the supervisor is elevated and
+    // is the command's parent, so it can do what we cannot. No second prompt.
+    #[cfg(any(unix, windows))]
+    {
+        use std::io::Write;
+        let sup = supervisors().lock().unwrap().get(&id).and_then(|s| s.try_clone().ok());
+        if let Some(mut s) = sup {
+            let _ = writeln!(s, "stop");
+            let _ = s.flush();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if state.lock().unwrap().get("running").and_then(Value::as_bool) != Some(true) {
+                log(&format!("[elevate] {who}: supervisor stopped {pid}"));
+                supervisors().lock().unwrap().remove(&id);
+                return Ok(json!({ "stopped": true }));
+            }
+        }
+    }
+
+    // The polite attempt first: it works when the command was never elevated,
+    // or when we are root already.
+    kill_pid(pid as u32);
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    if !still_running(&state) {
+        log(&format!("[elevate] {who}: stopped {pid}"));
+        return Ok(json!({ "stopped": true }));
+    }
+
+    // It is running as root, so the kernel refused us. Ask for the privileges to
+    // end it — in the background, with an id to poll, because the operating
+    // system may put a prompt on screen and the caller has to be able to say so
+    // rather than freeze with nothing showing.
+    let argv = stop_argv(pid);
+    if argv.is_empty() {
+        // No way to ask on this platform; say so rather than report a stop that
+        // never happened.
+        return Ok(json!({ "stopped": false }));
+    }
+    log(&format!(
+        "[elevate] {who}: {pid} would not stop unprivileged, asking to stop it with privileges"
+    ));
+    let pending = start_elevation(argv, None, log, who);
+    Ok(json!({ "stopped": false, "pending": pending }))
+}
+
+/// The command that ends `pid`, to be run elevated.
+///
+/// Only reached when the unprivileged attempt was refused, which is also why it
+/// is a whole command rather than a signal: it has to survive being handed to
+/// the platform's elevation helper.
+#[cfg(unix)]
+fn stop_argv(pid: u64) -> Vec<String> {
+    let kill = program_on_path("kill").unwrap_or_else(|| std::path::PathBuf::from("/bin/kill"));
+    vec![
+        kill.to_string_lossy().into_owned(),
+        "-TERM".to_string(),
+        pid.to_string(),
+    ]
+}
+
+#[cfg(windows)]
+fn stop_argv(pid: u64) -> Vec<String> {
+    // Absolute, because what resolves this is the elevation prompt rather than
+    // our own environment, and `PATH` need not be the one we can see. `/T` takes
+    // the tree — a scanner that spawned workers leaves them running otherwise —
+    // and `/F` because a process being stopped against its will does not
+    // cooperate by definition.
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    vec![
+        format!(r"{root}\System32\taskkill.exe"),
+        "/PID".to_string(),
+        pid.to_string(),
+        "/T".to_string(),
+        "/F".to_string(),
+    ]
+}
+
+/// Nothing agreed to ask with, so nothing to ask.
+#[cfg(not(any(unix, windows)))]
+fn stop_argv(_pid: u64) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn kill_pid(pid: u32) {
+    use limen_proto::NoConsole;
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .no_console()
+        .status();
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: u32) {
+    use limen_proto::NoConsole;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .no_console()
+        .status();
+}
+
 /// How an elevation started with `wait: false` is going.
 fn host_elevate_status(params: Value) -> std::result::Result<Value, RpcError> {
     let id = params.get("id").and_then(Value::as_u64).unwrap_or(0);
@@ -547,8 +718,14 @@ fn host_elevate_status(params: Value) -> std::result::Result<Value, RpcError> {
     }
 }
 
-fn host_elevate(params: Value, may_elevate: bool) -> std::result::Result<Value, RpcError> {
+fn host_elevate(
+    params: Value,
+    may_elevate: bool,
+    log: &Logger,
+    who: &str,
+) -> std::result::Result<Value, RpcError> {
     if !may_elevate {
+        log(&format!("[elevate] {who}: refused, no `elevate` permission"));
         return Err(RpcError::new(
             limen_proto::rpc::INVALID_REQUEST,
             "this module does not declare the `elevate` permission",
@@ -567,30 +744,382 @@ fn host_elevate(params: Value, may_elevate: bool) -> std::result::Result<Value, 
         return Err(RpcError::new(limen_proto::rpc::INVALID_PARAMS, "argv must be non-empty"));
     }
     let cwd = params.get("cwd").and_then(Value::as_str).map(str::to_string);
+    // The whole command, so a scan that fails inside an elevated child can be
+    // reproduced by hand from the console.
+    log(&format!(
+        "[elevate] {who}: {}{}",
+        argv.join(" "),
+        cwd.as_deref()
+            .map(|d| format!("   (in {d})"))
+            .unwrap_or_default()
+    ));
 
     // The default waits and returns the outcome, which is what a short command
     // wants. `wait: false` returns an id instead, for something long enough that
     // the caller has to stay responsive while it runs — the authorization prompt
     // and then, often, minutes of work.
     if params.get("wait").and_then(Value::as_bool).unwrap_or(true) {
-        return elevate_native(&argv, cwd.as_deref());
+        return elevate_native(&argv, cwd.as_deref(), &|| {}, &|_| {});
     }
 
+    Ok(json!({ "id": start_elevation(argv, cwd, log, who), "running": true }))
+}
+
+/// One end of the link to a supervisor.
+///
+/// A Unix socket and a Windows named pipe are set up differently and are alike
+/// in everything after that: both carry a line, and both let each side see the
+/// other close. Naming them once keeps the logic that uses them single-sourced
+/// rather than written twice and drifting.
+#[cfg(unix)]
+type SupLink = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type SupLink = std::fs::File;
+
+/// What waits for the supervisor to arrive.
+#[cfg(unix)]
+type SupServer = std::os::unix::net::UnixListener;
+#[cfg(windows)]
+type SupServer = PipeServer;
+
+/// Live supervisors, by elevation id.
+///
+/// Holding the link *is* the mechanism: the supervisor ends its child when this
+/// closes, and the operating system closes it when Limen exits — however Limen
+/// exits. Nothing has to run on the way out, which is the point: shutdown code
+/// cannot be relied on, and a crash leaves no chance to run any.
+#[cfg(any(unix, windows))]
+type Supervisors = std::sync::Mutex<std::collections::HashMap<u64, SupLink>>;
+
+#[cfg(any(unix, windows))]
+fn supervisors() -> &'static Supervisors {
+    static S: std::sync::OnceLock<Supervisors> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Wait for the supervisor to connect, and take the link.
+#[cfg(unix)]
+fn sup_accept(server: SupServer) -> Option<SupLink> {
+    server.accept().ok().map(|(stream, _)| stream)
+}
+
+#[cfg(windows)]
+fn sup_accept(server: SupServer) -> Option<SupLink> {
+    server.accept()
+}
+
+/// Clear away whatever the server left on disk. A Unix socket is a file and
+/// stays until removed; a named pipe is not a file and goes with its handle.
+#[cfg(unix)]
+fn sup_cleanup(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(windows)]
+fn sup_cleanup(_path: &Path) {}
+
+/// The server end of a supervisor pipe.
+///
+/// Windows has no separate listener to accept from: a named pipe *is* both, and
+/// `ConnectNamedPipe` waits for the client on the very handle that then carries
+/// the traffic. Held as an `isize` rather than a `HANDLE` so the value can move
+/// to the thread that waits — a raw pointer is not `Send`, and this one is only
+/// ever used by the thread it is handed to.
+#[cfg(windows)]
+struct PipeServer(isize);
+
+#[cfg(windows)]
+impl PipeServer {
+    /// Create the pipe before anything is elevated, so the supervisor has
+    /// something to connect back to the moment it starts.
+    ///
+    /// The default security descriptor is what restricts it: it grants the
+    /// creating user and the local administrators, and nobody else — so the
+    /// elevated supervisor (the same user, higher integrity) can open it while
+    /// another user on the machine cannot. One instance, because exactly one
+    /// supervisor is expected and a second connection would mean something is
+    /// wrong rather than something to serve.
+    fn create(name: &str) -> Option<Self> {
+        use std::ffi::{c_void, OsStr};
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CreateNamedPipeW(
+                name: *const u16,
+                open_mode: u32,
+                pipe_mode: u32,
+                max_instances: u32,
+                out_buf: u32,
+                in_buf: u32,
+                default_timeout: u32,
+                security: *mut c_void,
+            ) -> *mut c_void;
+        }
+
+        const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
+        // Byte stream, blocking. The link carries one short line each way, so
+        // there is nothing message framing would buy.
+        const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
+        const PIPE_WAIT: u32 = 0x0000_0000;
+        const INVALID_HANDLE_VALUE: isize = -1;
+
+        let wide: Vec<u16> = OsStr::new(name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` is a NUL-terminated UTF-16 buffer that outlives the
+        // call, and a null security pointer asks for the default descriptor.
+        let h = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1,
+                512,
+                512,
+                0,
+                std::ptr::null_mut(),
+            )
+        } as isize;
+        (h != INVALID_HANDLE_VALUE && h != 0).then_some(Self(h))
+    }
+
+    /// Block until the supervisor connects, then hand back the pipe as a file.
+    ///
+    /// `File` because it owns the handle and closes it on drop — and closing is
+    /// precisely the signal the supervisor waits for, so ownership and meaning
+    /// line up rather than needing to be remembered.
+    fn accept(self) -> Option<SupLink> {
+        use std::ffi::c_void;
+        use std::os::windows::io::FromRawHandle;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn ConnectNamedPipe(handle: *mut c_void, overlapped: *mut c_void) -> i32;
+            fn CloseHandle(handle: *mut c_void) -> i32;
+            fn GetLastError() -> u32;
+        }
+        // The client can win the race and connect before we ask; that is a
+        // success reported as an error, and the only one worth accepting.
+        const ERROR_PIPE_CONNECTED: u32 = 535;
+
+        // SAFETY: `self.0` came from `CreateNamedPipeW` above and is still open;
+        // a null overlapped pointer asks for the blocking form.
+        let ok = unsafe { ConnectNamedPipe(self.0 as *mut c_void, std::ptr::null_mut()) } != 0
+            || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+        if !ok {
+            // SAFETY: still our handle, and nothing took ownership of it.
+            unsafe { CloseHandle(self.0 as *mut c_void) };
+            return None;
+        }
+        // SAFETY: ownership of the handle moves into the `File`, which closes it
+        // exactly once; `self` is consumed so it cannot be closed twice.
+        Some(unsafe { std::fs::File::from_raw_handle(self.0 as *mut c_void) })
+    }
+}
+
+/// Where the supervisor binary lives: beside the running executable.
+///
+/// In a debug build the directory above is tried too, and only then: Cargo puts
+/// test binaries in `target/debug/deps/` while `limen-cli` sits in
+/// `target/debug/`, so without this the supervisor is unreachable from a test
+/// and the whole path would go unexercised. A release install has both in one
+/// directory, so the fallback never applies where it would widen what can be
+/// elevated.
+fn supervisor_bin() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) { "limen-cli.exe" } else { "limen-cli" };
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let beside = dir.join(name);
+    if beside.exists() {
+        return Some(beside);
+    }
+    if cfg!(debug_assertions) {
+        let above = dir.parent()?.join(name);
+        if above.exists() {
+            return Some(above);
+        }
+    }
+    None
+}
+
+/// Wrap `argv` so it runs under a supervisor that outlives the authorization but
+/// not Limen.
+///
+/// A root child cannot be signalled by an unprivileged parent, so the privileges
+/// go to something that stays: the supervisor is elevated, spawns the command
+/// itself, and ends it when this socket closes or when told to. One
+/// authorization, and control of it afterwards.
+///
+/// `None` when there is no supervisor to use — the caller then elevates the
+/// command directly, as before.
+#[cfg(unix)]
+fn supervised(
+    id: u64,
+    argv: &[String],
+    cwd: Option<&str>,
+) -> Option<(Vec<String>, SupServer, std::path::PathBuf)> {
+    let bin = supervisor_bin()?;
+    // Short path: AF_UNIX truncates around 108 bytes, and the module directory
+    // is nowhere near short enough.
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let sock = dir.join(format!("limen-sup-{}-{id}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let listener = std::os::unix::net::UnixListener::bind(&sock).ok()?;
+    // Only this user may connect: the supervisor runs as root on our say-so.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let mut out = vec![
+        bin.to_string_lossy().into_owned(),
+        "supervise".into(),
+        "--connect".into(),
+        sock.to_string_lossy().into_owned(),
+    ];
+    if let Some(d) = cwd {
+        out.push("--cwd".into());
+        out.push(d.to_string());
+    }
+    out.push("--".into());
+    out.extend(argv.iter().cloned());
+    Some((out, listener, sock))
+}
+
+/// The same, over a named pipe.
+///
+/// The reason is the same as on Unix and so is the shape: an elevated process
+/// runs at an integrity level this one cannot touch, so `OpenProcess` for
+/// termination is refused exactly as `kill` is. The privileges therefore go to
+/// the supervisor, which is the command's parent and can end it.
+///
+/// The pipe name carries this process's id as well as the elevation id, so two
+/// copies of Limen running at once cannot collide on it.
+#[cfg(windows)]
+fn supervised(
+    id: u64,
+    argv: &[String],
+    cwd: Option<&str>,
+) -> Option<(Vec<String>, SupServer, std::path::PathBuf)> {
+    let bin = supervisor_bin()?;
+    let name = format!(r"\\.\pipe\limen-sup-{}-{id}", std::process::id());
+    let server = PipeServer::create(&name)?;
+
+    let mut out = vec![
+        bin.to_string_lossy().into_owned(),
+        "supervise".into(),
+        "--connect".into(),
+        name.clone(),
+    ];
+    if let Some(d) = cwd {
+        out.push("--cwd".into());
+        out.push(d.to_string());
+    }
+    out.push("--".into());
+    out.extend(argv.iter().cloned());
+    // Nothing to clean up afterwards — the path is returned for symmetry with
+    // the Unix socket, and `sup_cleanup` does nothing with it here.
+    Some((out, server, std::path::PathBuf::from(name)))
+}
+
+/// Start an elevated command in the background and return the id to poll it by.
+fn start_elevation(argv: Vec<String>, cwd: Option<String>, log: &Logger, who: &str) -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let state = Arc::new(std::sync::Mutex::new(
-        json!({ "running": true, "ran": false, "reason": "", "message": "" }),
-    ));
+    // `phase` is what a caller shows: while the prompt is up there is nothing to
+    // report but the asking, and once the program is running its own progress
+    // takes over. Guessing at that from the program's output is what a caller
+    // has to do otherwise, and it guesses wrong — output can lag the prompt by
+    // seconds, leaving "waiting for authorization" on screen long after it was
+    // given.
+    let state = Arc::new(std::sync::Mutex::new(json!({
+        "running": true, "phase": "authorizing",
+        "ran": false, "reason": "", "message": ""
+    })));
     elevations().lock().unwrap().insert(id, state.clone());
 
+    // Elevate a supervisor rather than the command itself, where we can. It
+    // holds the command and ends it when this side closes — which the operating
+    // system does for us, however Limen exits.
+    #[cfg(any(unix, windows))]
+    let (argv, cwd) = match supervised(id, &argv, cwd.as_deref()) {
+        Some((wrapped, listener, sock)) => {
+            let state = state.clone();
+            let log = log.clone();
+            let who = who.to_string();
+            std::thread::spawn(move || {
+                // The supervisor connects once it is running elevated; that is
+                // also the moment authorization finished.
+                if let Some(stream) = sup_accept(listener) {
+                    {
+                        let mut slot = state.lock().unwrap();
+                        slot["phase"] = json!("running");
+                    }
+                    log(&format!("[elevate] {who}: supervised, running"));
+                    // Read the pid it reports, then hold the socket: closing it
+                    // is what ends the command.
+                    let mut line = String::new();
+                    let mut r = std::io::BufReader::new(
+                        stream.try_clone().expect("clone the supervisor link"),
+                    );
+                    use std::io::BufRead;
+                    if r.read_line(&mut line).is_ok()
+                        && let Some(p) =
+                            line.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok())
+                    {
+                        state.lock().unwrap()["pid"] = json!(p);
+                    }
+                    supervisors().lock().unwrap().insert(id, stream);
+                }
+                sup_cleanup(&sock);
+            });
+            // The supervisor sets the directory itself, so the helper need not.
+            (wrapped, None)
+        }
+        None => (argv, cwd),
+    };
+
+
+    let log = log.clone();
+    let who = who.to_string();
     std::thread::spawn(move || {
-        let done = elevate_native(&argv, cwd.as_deref())
+        let running = state.clone();
+        let announce = log.clone();
+        let name = who.clone();
+        let started = move || {
+            let mut slot = running.lock().unwrap();
+            slot["phase"] = json!("running");
+            announce(&format!("[elevate] {name}: authorized, running"));
+        };
+        let noted = state.clone();
+        let note_pid = move |p: u32| {
+            noted.lock().unwrap()["pid"] = json!(p);
+        };
+        let done = elevate_native(&argv, cwd.as_deref(), &started, &note_pid)
             .unwrap_or_else(|e| elevate_result(false, None, "error", &e.to_string()));
+        log(&format!(
+            "[elevate] {who}: {} (code {:?}){}",
+            done.get("reason")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty())
+                .unwrap_or("ok"),
+            done.get("code").and_then(Value::as_i64),
+            done.get("message")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(|m| format!(" — {m}"))
+                .unwrap_or_default()
+        ));
         let mut slot = state.lock().unwrap();
         *slot = done;
         slot["running"] = json!(false);
+        slot["phase"] = json!("done");
     });
-    Ok(json!({ "id": id, "running": true }))
+    id
 }
 
 /// Result shape shared by every platform.
@@ -671,10 +1200,30 @@ fn host_can_elevate() -> Value {
 /// environment must be given absolute paths. The working directory is set
 /// explicitly here for the same reason.
 #[cfg(target_os = "linux")]
-fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+fn elevate_native(
+    argv: &[String],
+    cwd: Option<&str>,
+    started: &dyn Fn(),
+    pid: &dyn Fn(u32),
+) -> std::result::Result<Value, RpcError> {
     // Already root — run it directly rather than asking for what we have.
     let how = host_can_elevate();
     let how = how.get("how").and_then(Value::as_str).unwrap_or("");
+    // The working directory has to survive the helper.
+    //
+    // `pkexec` runs the program from root's home unless told otherwise — its
+    // `--keep-cwd` exists but not in every polkit — so a program that resolves
+    // anything relative to `.` finds nothing and fails in a way that looks like
+    // a clean result. `env -C` sets it in the child itself, which works whatever
+    // the helper does, and passes the arguments as argv rather than through a
+    // shell that would have to quote them.
+    let env_bin = program_on_path("env").unwrap_or_else(|| std::path::PathBuf::from("/usr/bin/env"));
+    let with_cwd = |c: &mut std::process::Command| {
+        if let Some(d) = cwd {
+            c.arg(&env_bin).arg("-C").arg(d);
+        }
+    };
+
     let mut cmd = match how {
         "already-root" => std::process::Command::new(&argv[0]),
         "pkexec" => {
@@ -682,6 +1231,7 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
             // The desktop's own polkit agent shows the dialog; the internal one
             // is a text prompt on a terminal that may not exist.
             c.arg("--disable-internal-agent");
+            with_cwd(&mut c);
             c.args(argv);
             c
         }
@@ -690,6 +1240,7 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
             // -A uses $SUDO_ASKPASS, a graphical helper; -n would rather fail
             // than block, but with an askpass there is something to answer with.
             c.arg("-A");
+            with_cwd(&mut c);
             c.args(argv);
             c
         }
@@ -711,7 +1262,57 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
-    match cmd.status() {
+    // Spawned rather than waited on, so the moment authentication finishes can
+    // be noticed: pkexec and sudo both `exec` the target program in their own
+    // process, so `/proc/<pid>/comm` changing away from the helper's name is
+    // exactly that moment. Nothing else tells us — the prompt belongs to the
+    // desktop, not to us.
+    // What the process is called until authentication finishes. With a cwd it
+    // is `env` that pkexec execs first, and `env` execs the target in turn — so
+    // either name means "not started yet".
+    let helpers: &[&str] = match (how, cwd.is_some()) {
+        ("pkexec", true) => &["pkexec", "env"],
+        ("pkexec", false) => &["pkexec"],
+        ("sudo-askpass", true) => &["sudo", "env"],
+        ("sudo-askpass", false) => &["sudo"],
+        _ => &[],
+    };
+    let helper = helpers.first().copied().unwrap_or("");
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(elevate_result(
+                false,
+                None,
+                "error",
+                &format!("the elevation helper could not be started: {e}"),
+            ))
+        }
+    };
+    if helper.is_empty() {
+        // Already root: there was never anything to authorize.
+        started();
+    }
+    pid(child.id());
+    let comm = std::path::PathBuf::from(format!("/proc/{}/comm", child.id()));
+    let mut announced = helper.is_empty();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Ok(st),
+            Err(e) => break Err(e),
+            Ok(None) => {}
+        }
+        if !announced {
+            let now = std::fs::read_to_string(&comm).unwrap_or_default();
+            let now = now.trim();
+            if !now.is_empty() && !helpers.contains(&now) {
+                announced = true;
+                started();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    };
+    match status {
         Ok(st) => {
             let code = st.code();
             // 126 is polkit's "not authorised" — the prompt was dismissed or the
@@ -742,7 +1343,12 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
 /// dialog. The command is embedded in AppleScript, so each argument is quoted
 /// for the shell it ends up in.
 #[cfg(target_os = "macos")]
-fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+fn elevate_native(
+    argv: &[String],
+    cwd: Option<&str>,
+    _started: &dyn Fn(),
+    _pid: &dyn Fn(u32),
+) -> std::result::Result<Value, RpcError> {
     // `do shell script` runs its argument through sh, so anything a caller
     // passes has to be quoted rather than trusted — a path with a space in it is
     // the ordinary case, not the attack.
@@ -801,7 +1407,12 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
 /// back and the call can wait for it; fire-and-forget would leave the caller
 /// unable to tell a finished scan from a refused prompt.
 #[cfg(target_os = "windows")]
-fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+fn elevate_native(
+    argv: &[String],
+    cwd: Option<&str>,
+    started: &dyn Fn(),
+    pid: &dyn Fn(u32),
+) -> std::result::Result<Value, RpcError> {
     use std::ffi::{c_void, OsStr};
     use std::os::windows::ffi::OsStrExt;
 
@@ -832,6 +1443,7 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
     unsafe extern "system" {
         fn WaitForSingleObject(handle: *mut c_void, ms: u32) -> u32;
         fn GetExitCodeProcess(handle: *mut c_void, code: *mut u32) -> i32;
+        fn GetProcessId(handle: *mut c_void) -> u32;
         fn CloseHandle(handle: *mut c_void) -> i32;
         fn GetLastError() -> u32;
     }
@@ -896,10 +1508,22 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
         };
         return Ok(elevate_result(false, None, reason, message));
     }
+    // The call returns only once the elevation prompt has been answered, so
+    // this is the exact moment authorization finished — the caller has been
+    // showing "waiting for authorization" until now.
+    started();
     if info.h_process.is_null() {
         // It launched but gave us nothing to wait on; report that honestly
         // rather than claim an exit status we do not have.
         return Ok(elevate_result(true, None, "", ""));
+    }
+    // What was started, so it can be stopped later. Supervised, this is the
+    // supervisor and the real command's id arrives over the link in a moment
+    // and replaces it; unsupervised, this is all there will ever be.
+    // SAFETY: `h_process` is the live handle returned above, not yet closed.
+    let started_pid = unsafe { GetProcessId(info.h_process) };
+    if started_pid != 0 {
+        pid(started_pid);
     }
     // SAFETY: `h_process` is a live handle returned by the call above, closed
     // exactly once below.
@@ -921,7 +1545,12 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
 /// Everywhere else there is no agreed way to ask, so say so rather than run the
 /// command unprivileged and let the caller believe it was elevated.
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn elevate_native(_argv: &[String], _cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+fn elevate_native(
+    _argv: &[String],
+    _cwd: Option<&str>,
+    _started: &dyn Fn(),
+    _pid: &dyn Fn(u32),
+) -> std::result::Result<Value, RpcError> {
     Ok(elevate_result(
         false,
         None,
@@ -1505,6 +2134,117 @@ fn limen_home() -> PathBuf {
         .ok()
         .and_then(|exe| exe.parent().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The supervisor, without the elevation.
+///
+/// Supervising and elevating are separable, and only the first half is ours:
+/// `supervised` builds the command, the link carries the pid, and dropping the
+/// link ends the child. Running that command unelevated exercises every one of
+/// those and leaves out only the platform's authorization prompt — which cannot
+/// be driven from a test anyway, and which is the same call that shipped before
+/// this.
+#[cfg(all(test, any(unix, windows)))]
+mod supervisor_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+
+    /// Whether a pid is still alive. Asked about the *command*, which is not our
+    /// child and so cannot be waited on — only observed.
+    fn still_running(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            use limen_proto::NoConsole;
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+            let out = std::process::Command::new(format!(r"{root}\System32\tasklist.exe"))
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .no_console()
+                .output()
+                .expect("ask tasklist");
+            // With no match it says so in prose rather than listing nothing.
+            String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+        }
+        #[cfg(unix)]
+        {
+            std::path::Path::new(&format!("/proc/{pid}")).exists()
+        }
+    }
+
+    /// Something that runs long enough to still be there when we look.
+    fn slow_command() -> Vec<String> {
+        if cfg!(windows) {
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+            vec![
+                format!(r"{root}\System32\ping.exe"),
+                "-n".into(),
+                "30".into(),
+                "127.0.0.1".into(),
+            ]
+        } else {
+            vec!["/bin/sleep".to_string(), "30".to_string()]
+        }
+    }
+
+    #[test]
+    fn the_supervisor_reports_its_child_and_ends_it_when_the_link_closes() {
+        use limen_proto::NoConsole;
+
+        let Some((argv, server, sock)) = supervised(9001, &slow_command(), None) else {
+            // `cargo build` has not produced limen-cli yet; nothing to talk to.
+            eprintln!("skipped: no limen-cli beside the test binary — run `cargo build` first");
+            return;
+        };
+
+        // Run the supervisor as an ordinary child. Elevated it would be beyond a
+        // test's reach; everything the test is about is the same either way.
+        let mut sup = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .no_console()
+            .spawn()
+            .expect("start the supervisor");
+
+        let link = sup_accept(server).expect("the supervisor connects back");
+
+        // It reports the pid of the command it started, which is what a caller
+        // later stops by.
+        let mut line = String::new();
+        BufReader::new(link.try_clone().expect("clone the link"))
+            .read_line(&mut line)
+            .expect("read the pid it reports");
+        let mut words = line.split_whitespace();
+        assert_eq!(words.next(), Some("started"), "unexpected greeting: {line:?}");
+        let pid: u32 = words
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or_else(|| panic!("no pid in {line:?}"));
+        assert!(pid > 0);
+
+        // Still holding the link, so the command is still wanted — and running.
+        assert!(
+            sup.try_wait().expect("poll the supervisor").is_none(),
+            "the supervisor left while the link was open"
+        );
+        assert!(still_running(pid), "the command was not started");
+
+        // Closing the link is the whole mechanism — no message, no signal, and
+        // nothing that has to run on the way out.
+        drop(link);
+
+        let left = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            matches!(sup.try_wait(), Ok(Some(_)))
+        });
+        assert!(left, "the supervisor outlived the link");
+
+        // The point of all of it: the command goes too, rather than being
+        // orphaned to run on with nobody left to read its report.
+        let gone = (0..40).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            !still_running(pid)
+        });
+        assert!(gone, "the command outlived the supervisor: pid {pid}");
+        sup_cleanup(&sock);
+    }
 }
 
 #[cfg(test)]

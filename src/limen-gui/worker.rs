@@ -173,6 +173,18 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        // Ask, and do not wait. Waiting here is felt as the app hanging on the
+        // way out, and nothing needs it any more:
+        //
+        //   - an elevated command is held by a supervisor that ends it when this
+        //     process's sockets close, which the operating system does however
+        //     we exit;
+        //   - a scripted module reads from stdin, so its interpreter exits when
+        //     ours closes;
+        //   - a native module is in this process and goes with it.
+        //
+        // So shutdown is tidy-up that the operating system would do anyway, and
+        // the window has already gone.
         let _ = self.tx.send(Command::Quit);
     }
 }

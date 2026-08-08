@@ -59,6 +59,17 @@ pub struct Host {
     host_call: HostCallFn,
 }
 
+/// Where a started elevation has got to.
+#[derive(Debug, Clone)]
+pub enum ElevateState {
+    /// The operating system is asking the user, and nothing has run yet.
+    Authorizing,
+    /// It was authorized and the command is running.
+    Running,
+    /// It is over — well or badly.
+    Done(Elevated),
+}
+
 /// What [`Host::elevate`] came back with.
 ///
 /// `ran` distinguishes "the user refused" from "it ran and failed", which a bare
@@ -201,23 +212,62 @@ impl Host {
             .and_then(|v| v.get("id").and_then(Value::as_u64))
     }
 
-    /// Whether a started elevation is still going, and how it ended.
+    /// Where a started elevation has got to.
     ///
-    /// `None` while it is still running — including while the prompt is on
-    /// screen unanswered, which is what a module should be showing.
-    pub fn elevate_status(&self, id: u64) -> Option<Elevated> {
-        let v = self
-            .raw("host.elevate_status", json!({ "id": id }))
-            .ok()?;
+    /// The distinction that matters is between *asking* and *running*: a caller
+    /// showing "waiting for authorization" has to know when to stop, and the
+    /// program's own output is a poor proxy — it can lag the prompt by seconds,
+    /// leaving the message up long after the answer was given.
+    pub fn elevate_state(&self, id: u64) -> ElevateState {
+        let Ok(v) = self.raw("host.elevate_status", json!({ "id": id })) else {
+            return ElevateState::Running;
+        };
         if v.get("running").and_then(Value::as_bool).unwrap_or(false) {
-            return None;
+            return match v.get("phase").and_then(Value::as_str) {
+                Some("running") => ElevateState::Running,
+                _ => ElevateState::Authorizing,
+            };
         }
-        Some(Elevated {
+        ElevateState::Done(Self::elevated_from(&v))
+    }
+
+    /// Ask an elevation to stop.
+    ///
+    /// Best effort: once authorized the command runs as root, and an
+    /// unprivileged process cannot signal one. Returns whether it actually
+    /// stopped — `false` means it is still running and the user should be told
+    /// so rather than shown a screen that implies otherwise.
+    /// Returns `Ok(())` if it stopped, or the id of an elevation now asking the
+    /// user for the privileges to end it — poll that with
+    /// [`Host::elevate_state`], and show that it is asking.
+    pub fn elevate_stop(&self, id: u64) -> Result<(), Option<u64>> {
+        let Ok(v) = self.raw("host.elevate_stop", json!({ "id": id })) else {
+            return Err(None);
+        };
+        if v.get("stopped").and_then(Value::as_bool) == Some(true) {
+            return Ok(());
+        }
+        Err(v.get("pending").and_then(Value::as_u64))
+    }
+
+    /// Whether a started elevation has finished, and how it ended.
+    ///
+    /// `None` while it is still going. Prefer [`Host::elevate_state`] when the
+    /// difference between waiting for the prompt and running matters.
+    pub fn elevate_status(&self, id: u64) -> Option<Elevated> {
+        match self.elevate_state(id) {
+            ElevateState::Done(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    fn elevated_from(v: &Value) -> Elevated {
+        Elevated {
             ran: v.get("ran").and_then(Value::as_bool).unwrap_or(false),
             code: v.get("code").and_then(Value::as_i64).map(|c| c as i32),
             reason: v.get("reason").and_then(Value::as_str).unwrap_or("error").to_string(),
             message: v.get("message").and_then(Value::as_str).unwrap_or_default().to_string(),
-        })
+        }
     }
 
     fn elevate_call(&self, params: Value) -> Elevated {
