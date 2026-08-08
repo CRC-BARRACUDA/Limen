@@ -129,6 +129,8 @@ autoscroll = "Автопрокрутка"
 no_logs = "Ще немає журналів."
 
 [confirm]
+quit_title = "Вийти з Limen?"
+quit_yes = "Вийти"
 remove_title = "Видалити модуль?"
 remove_yes = "Видалити"
 cancel = "Скасувати"

@@ -131,6 +131,8 @@ autoscroll = "Autoscroll"
 no_logs = "No logs yet."
 
 [confirm]
+quit_title = "Quit Limen?"
+quit_yes = "Quit"
 remove_title = "Remove module?"
 remove_yes = "Remove"
 cancel = "Cancel"

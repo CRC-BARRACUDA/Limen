@@ -151,6 +151,10 @@ pub struct LimenApp {
     /// The consent dialog still on screen, which outlives `pending_action` by
     /// the length of its closing animation.
     consent_showing: Option<ui::Invoke>,
+    /// A close was asked for and is waiting on an answer.
+    quit_asking: bool,
+    /// The answer was yes, so the next close request goes through.
+    quit_confirmed: bool,
     /// The tab content area, as of the last frame that drew one. Pop-ups are
     /// scoped to it rather than to the window.
     content_rect: Option<egui::Rect>,
@@ -324,6 +328,8 @@ impl LimenApp {
             view: None,
             view_error: None,
             consent_showing: None,
+            quit_asking: false,
+            quit_confirmed: false,
             content_rect: None,
             module_pages: HashMap::new(),
             pending_confirm: None,
@@ -2000,6 +2006,47 @@ impl eframe::App for LimenApp {
                     self.dispatch(inv);
                 }
             }
+        }
+
+        // Closing asks first. Deliberately the *whole* window rather than a
+        // tab's content: quitting is not one tab's business, and everything
+        // behind the question should be inert until it is answered.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.quit_asking = true;
+        }
+        if self.quit_asking {
+            match ui::confirm_dialog(
+                ctx,
+                "quit",
+                true,
+                &i18n::t("confirm.quit_title"),
+                None,
+                &i18n::t("confirm.quit_yes"),
+                &i18n::t("confirm.cancel"),
+                // No bounds: this one covers the app, not a tab.
+                None,
+            ) {
+                Some(true) => {
+                    self.quit_asking = false;
+                    self.quit_confirmed = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Some(false) => self.quit_asking = false,
+                None => {}
+            }
+        } else {
+            // Keep driving it so it animates away after an answer.
+            let _ = ui::confirm_dialog(
+                ctx,
+                "quit",
+                false,
+                &i18n::t("confirm.quit_title"),
+                None,
+                &i18n::t("confirm.quit_yes"),
+                &i18n::t("confirm.cancel"),
+                None,
+            );
         }
 
         ctx.request_repaint_after(Duration::from_millis(150));
