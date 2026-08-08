@@ -174,6 +174,24 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         let _ = self.tx.send(Command::Quit);
+        // ...and wait for it to happen. Closing the window used to send this and
+        // exit, so the engine never got to stop what it had started and a scan
+        // carried on with nothing left to report to.
+        //
+        // The worker drops its event sender as it ends, so the channel closing
+        // is the signal. Bounded, because a module that will not stop must not
+        // stop the app from closing either.
+        // Long enough for shutdown to end an elevated scan — which may involve
+        // an authorization — but bounded, because a module that will not stop
+        // must not stop the app from closing either.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) =
+                self.rx.recv_timeout(std::time::Duration::from_millis(100))
+            {
+                break;
+            }
+        }
     }
 }
 

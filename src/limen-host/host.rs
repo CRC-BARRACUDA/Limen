@@ -344,11 +344,17 @@ impl Host {
             // module, so the check lives here rather than in the shared
             // dispatcher, which cannot tell who is calling.
             let may_elevate = spec.permissions.elevate;
+            // Elevation is the one thing here the user cannot watch happen: a
+            // prompt they answered, a command they never saw, run as root. It
+            // goes to the console so there is a record of what was asked for.
+            let log = logger.clone();
+            let who = spec.name.clone();
             Arc::new(move |method: &str, params: Value| match method {
                 "host.module_dir" => Ok(json!(dir.to_string_lossy())),
-                "host.elevate" => host_elevate(params, may_elevate),
+                "host.elevate" => host_elevate(params, may_elevate, &log, &who),
                 "host.can_elevate" => Ok(host_can_elevate()),
                 "host.elevate_status" => host_elevate_status(params),
+                "host.elevate_stop" => host_elevate_stop(params, &log, &who),
                 _ => shared(method, params),
             })
         };
@@ -457,6 +463,10 @@ impl Host {
 
     /// Shut modules down in reverse dependency order.
     pub fn shutdown(&mut self) {
+        // Anything elevated on a module's behalf is still running, and closing
+        // the window is not a reason to leave a root process chewing through a
+        // disk with nothing left to report to.
+        stop_all_elevations(&self.logger);
         for conn in self.connections.iter().rev() {
             conn.shutdown();
         }
@@ -528,6 +538,148 @@ fn elevations() -> &'static Elevations {
     E.get_or_init(Default::default)
 }
 
+/// End every elevation still running, on the way out.
+///
+/// They are our own children, but root ones — the kernel refuses an
+/// unprivileged signal — so this asks for the privileges to end them, which
+/// polkit usually grants without a second prompt so soon after the first.
+fn stop_all_elevations(log: &Logger) {
+    let live: Vec<(u64, u32)> = elevations()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(id, st)| {
+            let v = st.lock().unwrap();
+            (v.get("running").and_then(Value::as_bool) == Some(true))
+                .then(|| v.get("pid").and_then(Value::as_u64).map(|p| (*id, p as u32)))
+                .flatten()
+        })
+        .collect();
+    for (_, pid) in &live {
+        log(&format!("[elevate] closing: stopping {pid}"));
+        kill_pid(*pid);
+    }
+    if live.is_empty() {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // Whatever is left is running as root, and an unprivileged parent cannot
+    // signal it — so ask for the privileges to end it. Closing the window has to
+    // mean the scan is over: leaving one grinding through a disk with nothing
+    // left to report to is worse than a prompt on the way out.
+    //
+    // In practice there is usually no prompt: polkit keeps the authorization
+    // from the one that started the scan for a few minutes. If there is, and it
+    // goes unanswered, the wait below gives up and the app closes anyway.
+    #[cfg(unix)]
+    {
+        let survivors: Vec<u32> = live
+            .iter()
+            .map(|(_, pid)| *pid)
+            .filter(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+            .collect();
+        if survivors.is_empty() {
+            return;
+        }
+        let kill = program_on_path("kill").unwrap_or_else(|| std::path::PathBuf::from("/bin/kill"));
+        for pid in &survivors {
+            log(&format!("[elevate] closing: asking to stop {pid} as root"));
+            let argv = vec![
+                kill.to_string_lossy().into_owned(),
+                "-TERM".to_string(),
+                pid.to_string(),
+            ];
+            start_elevation(argv, None, log, "closing");
+        }
+        // Bounded: a prompt nobody answers must not hold the window open.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            if survivors
+                .iter()
+                .all(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists())
+            {
+                log("[elevate] closing: stopped");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        for pid in survivors {
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                log(&format!(
+                    "[elevate] closing: {pid} would not stop — end it with: sudo kill {pid}"
+                ));
+            }
+        }
+    }
+}
+
+/// Stop an elevation that is still running.
+///
+/// Best effort, and honest about it: once authorized the program runs as root,
+/// and an unprivileged process cannot signal one — the kernel refuses. So this
+/// reports whether it actually stopped, and a caller that gets `false` has to
+/// say so rather than pretend.
+fn host_elevate_stop(params: Value, log: &Logger, who: &str) -> std::result::Result<Value, RpcError> {
+    let id = params.get("id").and_then(Value::as_u64).unwrap_or(0);
+    let slot = elevations().lock().unwrap().get(&id).cloned();
+    let Some(state) = slot else {
+        return Ok(json!({ "stopped": false }));
+    };
+    let pid = state.lock().unwrap().get("pid").and_then(Value::as_u64);
+    let Some(pid) = pid.filter(|p| *p > 0) else {
+        // Nothing to signal — macOS runs it inside osascript, which gives us no
+        // handle at all.
+        return Ok(json!({ "stopped": false }));
+    };
+    let still_running = |state: &Arc<std::sync::Mutex<Value>>| {
+        state.lock().unwrap().get("running").and_then(Value::as_bool) == Some(true)
+    };
+
+    // The polite attempt first: it works when the command was never elevated,
+    // or when we are root already.
+    kill_pid(pid as u32);
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    if !still_running(&state) {
+        log(&format!("[elevate] {who}: stopped {pid}"));
+        return Ok(json!({ "stopped": true }));
+    }
+
+    // It is running as root, so the kernel refused us. Ask for the privileges to
+    // end it — in the background, with an id to poll, because the operating
+    // system may put a prompt on screen and the caller has to be able to say so
+    // rather than freeze with nothing showing.
+    log(&format!(
+        "[elevate] {who}: {pid} would not stop unprivileged, asking to stop it as root"
+    ));
+    let kill = program_on_path("kill").unwrap_or_else(|| std::path::PathBuf::from("/bin/kill"));
+    let argv = vec![
+        kill.to_string_lossy().into_owned(),
+        "-TERM".to_string(),
+        pid.to_string(),
+    ];
+    let pending = start_elevation(argv, None, log, who);
+    Ok(json!({ "stopped": false, "pending": pending }))
+}
+
+#[cfg(unix)]
+fn kill_pid(pid: u32) {
+    use limen_proto::NoConsole;
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .no_console()
+        .status();
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: u32) {
+    use limen_proto::NoConsole;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .no_console()
+        .status();
+}
+
 /// How an elevation started with `wait: false` is going.
 fn host_elevate_status(params: Value) -> std::result::Result<Value, RpcError> {
     let id = params.get("id").and_then(Value::as_u64).unwrap_or(0);
@@ -547,8 +699,14 @@ fn host_elevate_status(params: Value) -> std::result::Result<Value, RpcError> {
     }
 }
 
-fn host_elevate(params: Value, may_elevate: bool) -> std::result::Result<Value, RpcError> {
+fn host_elevate(
+    params: Value,
+    may_elevate: bool,
+    log: &Logger,
+    who: &str,
+) -> std::result::Result<Value, RpcError> {
     if !may_elevate {
+        log(&format!("[elevate] {who}: refused, no `elevate` permission"));
         return Err(RpcError::new(
             limen_proto::rpc::INVALID_REQUEST,
             "this module does not declare the `elevate` permission",
@@ -567,30 +725,79 @@ fn host_elevate(params: Value, may_elevate: bool) -> std::result::Result<Value, 
         return Err(RpcError::new(limen_proto::rpc::INVALID_PARAMS, "argv must be non-empty"));
     }
     let cwd = params.get("cwd").and_then(Value::as_str).map(str::to_string);
+    // The whole command, so a scan that fails inside an elevated child can be
+    // reproduced by hand from the console.
+    log(&format!(
+        "[elevate] {who}: {}{}",
+        argv.join(" "),
+        cwd.as_deref()
+            .map(|d| format!("   (in {d})"))
+            .unwrap_or_default()
+    ));
 
     // The default waits and returns the outcome, which is what a short command
     // wants. `wait: false` returns an id instead, for something long enough that
     // the caller has to stay responsive while it runs — the authorization prompt
     // and then, often, minutes of work.
     if params.get("wait").and_then(Value::as_bool).unwrap_or(true) {
-        return elevate_native(&argv, cwd.as_deref());
+        return elevate_native(&argv, cwd.as_deref(), &|| {}, &|_| {});
     }
 
+    Ok(json!({ "id": start_elevation(argv, cwd, log, who), "running": true }))
+}
+
+/// Start an elevated command in the background and return the id to poll it by.
+fn start_elevation(argv: Vec<String>, cwd: Option<String>, log: &Logger, who: &str) -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let state = Arc::new(std::sync::Mutex::new(
-        json!({ "running": true, "ran": false, "reason": "", "message": "" }),
-    ));
+    // `phase` is what a caller shows: while the prompt is up there is nothing to
+    // report but the asking, and once the program is running its own progress
+    // takes over. Guessing at that from the program's output is what a caller
+    // has to do otherwise, and it guesses wrong — output can lag the prompt by
+    // seconds, leaving "waiting for authorization" on screen long after it was
+    // given.
+    let state = Arc::new(std::sync::Mutex::new(json!({
+        "running": true, "phase": "authorizing",
+        "ran": false, "reason": "", "message": ""
+    })));
     elevations().lock().unwrap().insert(id, state.clone());
 
+    let log = log.clone();
+    let who = who.to_string();
     std::thread::spawn(move || {
-        let done = elevate_native(&argv, cwd.as_deref())
+        let running = state.clone();
+        let announce = log.clone();
+        let name = who.clone();
+        let started = move || {
+            let mut slot = running.lock().unwrap();
+            slot["phase"] = json!("running");
+            announce(&format!("[elevate] {name}: authorized, running"));
+        };
+        let noted = state.clone();
+        let note_pid = move |p: u32| {
+            noted.lock().unwrap()["pid"] = json!(p);
+        };
+        let done = elevate_native(&argv, cwd.as_deref(), &started, &note_pid)
             .unwrap_or_else(|e| elevate_result(false, None, "error", &e.to_string()));
+        log(&format!(
+            "[elevate] {who}: {} (code {:?}){}",
+            done.get("reason")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty())
+                .unwrap_or("ok"),
+            done.get("code").and_then(Value::as_i64),
+            done.get("message")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(|m| format!(" — {m}"))
+                .unwrap_or_default()
+        ));
         let mut slot = state.lock().unwrap();
         *slot = done;
         slot["running"] = json!(false);
+        slot["phase"] = json!("done");
     });
-    Ok(json!({ "id": id, "running": true }))
+    id
 }
 
 /// Result shape shared by every platform.
@@ -671,10 +878,30 @@ fn host_can_elevate() -> Value {
 /// environment must be given absolute paths. The working directory is set
 /// explicitly here for the same reason.
 #[cfg(target_os = "linux")]
-fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+fn elevate_native(
+    argv: &[String],
+    cwd: Option<&str>,
+    started: &dyn Fn(),
+    pid: &dyn Fn(u32),
+) -> std::result::Result<Value, RpcError> {
     // Already root — run it directly rather than asking for what we have.
     let how = host_can_elevate();
     let how = how.get("how").and_then(Value::as_str).unwrap_or("");
+    // The working directory has to survive the helper.
+    //
+    // `pkexec` runs the program from root's home unless told otherwise — its
+    // `--keep-cwd` exists but not in every polkit — so a program that resolves
+    // anything relative to `.` finds nothing and fails in a way that looks like
+    // a clean result. `env -C` sets it in the child itself, which works whatever
+    // the helper does, and passes the arguments as argv rather than through a
+    // shell that would have to quote them.
+    let env_bin = program_on_path("env").unwrap_or_else(|| std::path::PathBuf::from("/usr/bin/env"));
+    let with_cwd = |c: &mut std::process::Command| {
+        if let Some(d) = cwd {
+            c.arg(&env_bin).arg("-C").arg(d);
+        }
+    };
+
     let mut cmd = match how {
         "already-root" => std::process::Command::new(&argv[0]),
         "pkexec" => {
@@ -682,6 +909,7 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
             // The desktop's own polkit agent shows the dialog; the internal one
             // is a text prompt on a terminal that may not exist.
             c.arg("--disable-internal-agent");
+            with_cwd(&mut c);
             c.args(argv);
             c
         }
@@ -690,6 +918,7 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
             // -A uses $SUDO_ASKPASS, a graphical helper; -n would rather fail
             // than block, but with an askpass there is something to answer with.
             c.arg("-A");
+            with_cwd(&mut c);
             c.args(argv);
             c
         }
@@ -711,7 +940,57 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
-    match cmd.status() {
+    // Spawned rather than waited on, so the moment authentication finishes can
+    // be noticed: pkexec and sudo both `exec` the target program in their own
+    // process, so `/proc/<pid>/comm` changing away from the helper's name is
+    // exactly that moment. Nothing else tells us — the prompt belongs to the
+    // desktop, not to us.
+    // What the process is called until authentication finishes. With a cwd it
+    // is `env` that pkexec execs first, and `env` execs the target in turn — so
+    // either name means "not started yet".
+    let helpers: &[&str] = match (how, cwd.is_some()) {
+        ("pkexec", true) => &["pkexec", "env"],
+        ("pkexec", false) => &["pkexec"],
+        ("sudo-askpass", true) => &["sudo", "env"],
+        ("sudo-askpass", false) => &["sudo"],
+        _ => &[],
+    };
+    let helper = helpers.first().copied().unwrap_or("");
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(elevate_result(
+                false,
+                None,
+                "error",
+                &format!("the elevation helper could not be started: {e}"),
+            ))
+        }
+    };
+    if helper.is_empty() {
+        // Already root: there was never anything to authorize.
+        started();
+    }
+    pid(child.id());
+    let comm = std::path::PathBuf::from(format!("/proc/{}/comm", child.id()));
+    let mut announced = helper.is_empty();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Ok(st),
+            Err(e) => break Err(e),
+            Ok(None) => {}
+        }
+        if !announced {
+            let now = std::fs::read_to_string(&comm).unwrap_or_default();
+            let now = now.trim();
+            if !now.is_empty() && !helpers.contains(&now) {
+                announced = true;
+                started();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    };
+    match status {
         Ok(st) => {
             let code = st.code();
             // 126 is polkit's "not authorised" — the prompt was dismissed or the
@@ -742,7 +1021,12 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
 /// dialog. The command is embedded in AppleScript, so each argument is quoted
 /// for the shell it ends up in.
 #[cfg(target_os = "macos")]
-fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+fn elevate_native(
+    argv: &[String],
+    cwd: Option<&str>,
+    _started: &dyn Fn(),
+    _pid: &dyn Fn(u32),
+) -> std::result::Result<Value, RpcError> {
     // `do shell script` runs its argument through sh, so anything a caller
     // passes has to be quoted rather than trusted — a path with a space in it is
     // the ordinary case, not the attack.
@@ -801,7 +1085,12 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
 /// back and the call can wait for it; fire-and-forget would leave the caller
 /// unable to tell a finished scan from a refused prompt.
 #[cfg(target_os = "windows")]
-fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+fn elevate_native(
+    argv: &[String],
+    cwd: Option<&str>,
+    started: &dyn Fn(),
+    pid: &dyn Fn(u32),
+) -> std::result::Result<Value, RpcError> {
     use std::ffi::{c_void, OsStr};
     use std::os::windows::ffi::OsStrExt;
 
@@ -896,6 +1185,10 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
         };
         return Ok(elevate_result(false, None, reason, message));
     }
+    // The call returns only once the elevation prompt has been answered, so
+    // this is the exact moment authorization finished — the caller has been
+    // showing "waiting for authorization" until now.
+    started();
     if info.h_process.is_null() {
         // It launched but gave us nothing to wait on; report that honestly
         // rather than claim an exit status we do not have.
@@ -921,7 +1214,12 @@ fn elevate_native(argv: &[String], cwd: Option<&str>) -> std::result::Result<Val
 /// Everywhere else there is no agreed way to ask, so say so rather than run the
 /// command unprivileged and let the caller believe it was elevated.
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn elevate_native(_argv: &[String], _cwd: Option<&str>) -> std::result::Result<Value, RpcError> {
+fn elevate_native(
+    _argv: &[String],
+    _cwd: Option<&str>,
+    _started: &dyn Fn(),
+    _pid: &dyn Fn(u32),
+) -> std::result::Result<Value, RpcError> {
     Ok(elevate_result(
         false,
         None,
