@@ -11,15 +11,15 @@ use std::path::{Path};
 /// other close. Naming them once keeps the logic that uses them single-sourced
 /// rather than written twice and drifting.
 #[cfg(unix)]
-pub(crate) type SupLink = std::os::unix::net::UnixStream;
+pub type SupLink = std::os::unix::net::UnixStream;
 #[cfg(windows)]
-pub(crate) type SupLink = std::fs::File;
+pub type SupLink = std::fs::File;
 
 /// What waits for the supervisor to arrive.
 #[cfg(unix)]
-pub(crate) type SupServer = std::os::unix::net::UnixListener;
+pub type SupServer = std::os::unix::net::UnixListener;
 #[cfg(windows)]
-pub(crate) type SupServer = PipeServer;
+pub type SupServer = PipeServer;
 
 /// Live supervisors, by elevation id.
 ///
@@ -69,7 +69,7 @@ pub fn sup_cleanup(_path: &Path) {}
 /// to the thread that waits — a raw pointer is not `Send`, and this one is only
 /// ever used by the thread it is handed to.
 #[cfg(windows)]
-pub(crate) struct PipeServer(isize);
+pub struct PipeServer(isize);
 
 #[cfg(windows)]
 impl PipeServer {

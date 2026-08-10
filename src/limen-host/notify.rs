@@ -90,6 +90,10 @@ pub(crate) const APP_ID: &str = "Limen";
 /// file is not an error — it just means a toast without a picture.
 #[cfg(target_os = "windows")]
 pub(crate) fn icon_file() -> Option<std::path::PathBuf> {
+    // Imported here rather than at the top of the file: only this function wants
+    // it, and it exists only on Windows, so a file-level `use` would be an
+    // unused import everywhere else.
+    use crate::sdk::limen_home;
     let path = limen_home().join("state").join("icon.png");
     path.is_file().then_some(path)
 }

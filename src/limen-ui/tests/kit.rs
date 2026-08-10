@@ -8,7 +8,12 @@ use limen_ui::*;
 #[test]
 fn the_ui_kit_shows_every_widget() {
 // The enum's own source, which is where the widget kinds are defined.
-let src = include_str!("../view.rs");
+//
+// Normalised first: this reads source *text*, and a Windows checkout has CRLF
+// endings that `include_str!` keeps verbatim — so the split below would find
+// nothing and the test would fail on line endings rather than on anything to
+// do with widgets.
+let src = include_str!("../view.rs").replace("\r\n", "\n");
 let body = src
     .split_once("pub enum Widget {")
     .expect("the Widget enum")

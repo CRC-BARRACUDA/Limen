@@ -37,7 +37,10 @@ pub use spec::{Launch, ModuleSpec};
 // outside. Hidden from the docs: these are internals the test is allowed to
 // see, not an offer.
 #[doc(hidden)]
-pub use supervisor::{sup_accept, sup_cleanup, supervised};
+// The link and server types travel in these functions' signatures, so they are
+// as public as the functions are — otherwise callers (the supervisor test among
+// them) cannot name what they are handed.
+pub use supervisor::{sup_accept, sup_cleanup, supervised, SupLink, SupServer};
 pub use module::{stderr_logger, IncomingHandler, Logger, Module};
 pub use native::NativeModule;
 pub use runtimes::{Runtime, RuntimeStatus};
