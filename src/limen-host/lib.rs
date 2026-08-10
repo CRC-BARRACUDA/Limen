@@ -31,6 +31,13 @@ pub use broker::Broker;
 pub use connection::ModuleConnection;
 pub use host::Host;
 pub use spec::{Launch, ModuleSpec};
+
+// Reachable so the supervisor's own test can start one and watch it die with
+// its parent — which is the whole behaviour, and cannot be observed from
+// outside. Hidden from the docs: these are internals the test is allowed to
+// see, not an offer.
+#[doc(hidden)]
+pub use supervisor::{sup_accept, sup_cleanup, supervised};
 pub use module::{stderr_logger, IncomingHandler, Logger, Module};
 pub use native::NativeModule;
 pub use runtimes::{Runtime, RuntimeStatus};
