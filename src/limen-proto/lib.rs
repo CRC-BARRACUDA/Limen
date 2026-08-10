@@ -13,6 +13,7 @@
 //! language SDKs) can depend on it without pulling in the host runtime.
 
 pub mod abi;
+pub mod date;
 pub mod locale;
 pub mod manifest;
 pub mod proc;

@@ -27,7 +27,6 @@ use crate::worker::{Command, Event, RunTag, Worker};
 #[derive(Clone, PartialEq, Debug)]
 enum Tab {
     About,
-    License,
     Modules,
     Module(String),
     Settings,
@@ -43,7 +42,6 @@ impl Tab {
     fn title(&self) -> String {
         match self {
             Tab::About => i18n::t("tab.about"),
-            Tab::License => i18n::t("tab.license"),
             Tab::Modules => i18n::t("tab.modules"),
             Tab::Module(n) => n.clone(),
             Tab::Settings => i18n::t("tab.settings"),
@@ -235,7 +233,15 @@ pub struct LimenApp {
     /// Reveal timers for the Settings/Developer/License tab entrance animations.
     settings_revealed_at: Option<f64>,
     developer_revealed_at: Option<f64>,
-    license_revealed_at: Option<f64>,
+    /// Whether the changelog pop-up is showing, and whether it is still on
+    /// screen finishing its exit.
+    changes_open: bool,
+    changes_alive: bool,
+    /// Whether the license pop-up is showing.
+    license_open: bool,
+    /// Whether it is still on screen — it has an exit animation to finish after
+    /// it stops being open.
+    license_alive: bool,
     /// Which module the current view entrance was armed for, and when it began.
     /// Switching to a *different* module rearms it, so each module plays its
     /// staggered entrance rather than snapping into place.
@@ -364,7 +370,10 @@ impl LimenApp {
             about_revealed_at: None,
             settings_revealed_at: None,
             developer_revealed_at: None,
-            license_revealed_at: None,
+            changes_open: false,
+            changes_alive: false,
+            license_open: false,
+            license_alive: false,
             module_reveal: None,
             file_pick: mpsc::channel(),
             shown_dev_tab: DevTab::DevMode,
@@ -1159,6 +1168,10 @@ impl eframe::App for LimenApp {
 
         // Intents collected while rendering, applied after.
         let mut open_tab: Option<Tab> = None;
+        // The license is a pop-up, not a tab: it is something you glance at and
+        // dismiss, and as a tab it stayed open behind you every time.
+        let mut open_license = false;
+        let mut open_changes = false;
         let mut switch_to: Option<usize> = None;
         let mut close_idx: Option<usize> = None;
         let mut scale_changed = false;
@@ -1530,11 +1543,6 @@ impl eframe::App for LimenApp {
         } else {
             self.developer_revealed_at = None;
         }
-        if active_tab == Some(Tab::License) {
-            self.license_revealed_at.get_or_insert(now_t);
-        } else {
-            self.license_revealed_at = None;
-        }
         let module_reveal = match &active_tab {
             Some(Tab::Module(n)) => {
                 if self.module_reveal.as_ref().map(|(m, _)| m.as_str()) != Some(n.as_str()) {
@@ -1549,7 +1557,6 @@ impl eframe::App for LimenApp {
         };
         let about_reveal = self.about_revealed_at.unwrap_or(now_t);
         let settings_reveal = self.settings_revealed_at.unwrap_or(now_t);
-        let license_reveal = self.license_revealed_at.unwrap_or(now_t);
         {
             let LimenApp {
                 modules,
@@ -1613,10 +1620,9 @@ impl eframe::App for LimenApp {
                         }
                         Some(Tab::About) => {
                             if about_view(ui, about_reveal) {
-                                open_tab = Some(Tab::License);
+                                open_license = true;
                             }
                         }
-                        Some(Tab::License) => license_view(ui, license_reveal),
                         Some(Tab::Modules) => modules_page(
                             ui,
                             modules,
@@ -1676,7 +1682,13 @@ impl eframe::App for LimenApp {
                             shown_dev_tab,
                         ),
                         Some(Tab::Update) => {
-                            update_view(ui, update_info.as_ref(), updating, &mut do_update)
+                            update_view(
+                                ui,
+                                update_info.as_ref(),
+                                updating,
+                                &mut do_update,
+                                &mut open_changes,
+                            )
                         }
                     }
                 });
@@ -1703,6 +1715,12 @@ impl eframe::App for LimenApp {
         if let Some(i) = close_idx {
             self.close_tab(i);
         }
+        if open_license {
+            self.license_open = true;
+        }
+        if open_changes {
+            self.changes_open = true;
+        }
         if let Some(tab) = open_tab {
             match tab {
                 Tab::Module(name) => self.select_module(name),
@@ -1724,7 +1742,6 @@ impl eframe::App for LimenApp {
             self.about_revealed_at = None;
             self.settings_revealed_at = None;
             self.developer_revealed_at = None;
-            self.license_revealed_at = None;
             self.modules_revealed_at = None;
             // Installed cards re-resolve their description in-place (localized_desc
             // reads the module's locales/ folder, cached per language) — no engine
@@ -1750,6 +1767,28 @@ impl eframe::App for LimenApp {
         if let Some(name) = remove_module {
             self.pending_remove = Some(name);
         }
+        // The changelog pop-up.
+        if self.changes_open || self.changes_alive {
+            let notes = self
+                .update
+                .as_ref()
+                .map(|u| (u.latest.clone(), u.notes.clone()));
+            let out = changes_dialog(ctx, self.changes_open, notes.as_ref());
+            if out.close || out.back {
+                self.changes_open = false;
+            }
+            self.changes_alive = !out.closed;
+        }
+
+        // The license pop-up. Drawn over everything, like the other dialogs.
+        if self.license_open || self.license_alive {
+            let out = license_dialog(ctx, self.license_open);
+            if out.close || out.back {
+                self.license_open = false;
+            }
+            self.license_alive = !out.closed;
+        }
+
         if let Some(name) = self.confirmed_removal(ctx) {
             self.status = format!("removing {name}…");
             if self.animations {
@@ -2061,6 +2100,7 @@ fn update_view(
     info: Option<&limen_core::UpdateInfo>,
     updating: bool,
     do_update: &mut bool,
+    show_changes: &mut bool,
 ) {
     ui.add_space(4.0);
     ui.heading(i18n::t("update.title"));
@@ -2085,15 +2125,6 @@ fn update_view(
         ui.add_space(2.0);
         ui.hyperlink_to(i18n::t("update.release_notes"), &info.url);
     }
-    if !info.notes.trim().is_empty() {
-        ui.add_space(8.0);
-        egui::ScrollArea::vertical()
-            .max_height(240.0)
-            .show(ui, |ui| {
-                ui::markdown(ui, info.notes.trim());
-            });
-    }
-
     ui.add_space(14.0);
     ui.horizontal(|ui| {
         let clicked = ui
@@ -2104,6 +2135,15 @@ fn update_view(
             .clicked();
         if clicked {
             *do_update = true;
+        }
+        // The changelog is a thing you consult and dismiss, not a thing the
+        // page has to carry. Inline it was a small scrolling box under the
+        // heading, which is the worst of both: too short to read, tall enough
+        // to push the button that matters off the fold.
+        if !info.notes.trim().is_empty()
+            && ui::outline_button(ui, &i18n::t("update.changes"), egui::Vec2::ZERO).clicked()
+        {
+            *show_changes = true;
         }
         if updating {
             ui.add_space(6.0);
@@ -3818,33 +3858,143 @@ fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
     license_clicked
 }
 
-/// The License page — the embedded GPLv3 text, scrollable.
-fn license_view(ui: &mut egui::Ui, reveal_at: f64) {
-    let now = ui.input(|i| i.time);
-    let animate = ui::animations_enabled();
-    // Center the license in a fixed-width column.
-    ui.vertical_centered(|ui| {
-        ui.set_max_width(720.0);
-        reveal_item(ui, 0, reveal_at, now, animate, |ui| {
-            ui.heading(i18n::t("license.title"));
-            ui.label(egui::RichText::new(i18n::t("license.intro")).color(ui::color::TEXT_MUTED));
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(6.0);
-        });
-        reveal_item(ui, 1, reveal_at, now, animate, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let mut text = LICENSE_TEXT;
+/// What changed in the release on offer.
+///
+/// The same pop-up as the license, for the same reason: it is something you
+/// open, read, and dismiss. Inline it was a 240pt scrolling box wedged between
+/// the version line and the Update button — too short to read a changelog in,
+/// and tall enough to push the button below the fold.
+fn changes_dialog(
+    ctx: &egui::Context,
+    open: bool,
+    release: Option<&(String, String)>,
+) -> ui::Overlay {
+    let opts = ui::OverlayOpts {
+        width: 760.0,
+        max_height: 560.0,
+        title: None,
+        close: true,
+        ..Default::default()
+    };
+    ui::overlay(ctx, egui::Id::new("limen_changes"), open, &opts, |ui| {
+        let (version, notes) = match release {
+            Some((v, n)) => (v.as_str(), n.as_str()),
+            // The update can land while the pop-up is open — say so rather than
+            // showing an empty box.
+            None => {
+                ui.label(egui::RichText::new(i18n::t("update.no_changes")).strong());
+                return;
+            }
+        };
+        ui::typed_label(
+            ui,
+            egui::Id::new("changes_heading_type"),
+            &i18n::t("update.changes_title").replace("{version}", version),
+            &ui::Typed {
+                font: egui::FontId::proportional(19.0),
+                align: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // Bounded, so this scroll area cannot grow past the pop-up and leave
+        // the outer one to do the scrolling.
+        const BODY_H: f32 = 400.0;
+        egui::ScrollArea::vertical()
+            .max_height(BODY_H)
+            .min_scrolled_height(BODY_H)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // A GitHub release body is Markdown, and reads as one.
+                ui::markdown(ui, notes.trim());
+            });
+    })
+}
+
+/// The license, as a pop-up rather than a tab.
+///
+/// It is something you open, read a line of and dismiss — as a tab it stayed
+/// open behind you, and the one thing nobody wants two of is a copy of the GPL.
+fn license_dialog(ctx: &egui::Context, open: bool) -> ui::Overlay {
+    let opts = ui::OverlayOpts {
+        width: 760.0,
+        max_height: 560.0,
+        // No title bar text: the heading inside says which license this is,
+        // and "License" above it said the same thing twice.
+        title: None,
+        close: true,
+        ..Default::default()
+    };
+    ui::overlay(ctx, egui::Id::new("limen_license"), open, &opts, |ui| {
+        // Everything types out a letter at a time, and centred: the layout is
+        // measured once and revealed by clipping, so a centred line does not
+        // slide about as it fills in.
+        ui::typed_label(
+            ui,
+            egui::Id::new("license_heading_type"),
+            &i18n::t("license.heading"),
+            &ui::Typed {
+                font: egui::FontId::proportional(19.0),
+                align: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+        ui.add_space(4.0);
+        ui::typed_label(
+            ui,
+            egui::Id::new("license_intro_type"),
+            &i18n::t("license.intro"),
+            &ui::Typed {
+                color: ui::color::TEXT_MUTED,
+                align: egui::Align::Center,
+                per_sec: 260.0,
+                ..Default::default()
+            },
+        );
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // The license is not typed out: it is thirty-five thousand characters,
+        // and nobody opens a license to watch it arrive. A plain label, so it
+        // reads as the document it is and can be copied.
+        //
+        // The block is centred; the lines inside it are not. That distinction
+        // is the whole point — the text is pre-wrapped monospace, and its own
+        // indentation is what lines the headings and the numbered terms up.
+        // Centring each line would take that apart. Centring the block just
+        // stops it hugging the left edge of a window twice its width.
+        //
+        // The height is fixed, and that is load-bearing. The overlay already
+        // puts its content in a scroll area; an unbounded one nested inside it
+        // grows without limit, so it is the *outer* one that ends up scrolling
+        // and the heading rides up out of the box. Bounded, the content fits,
+        // the outer area never scrolls, and only the license moves.
+        const BODY_H: f32 = 400.0;
+        egui::ScrollArea::vertical()
+            .max_height(BODY_H)
+            .min_scrolled_height(BODY_H)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // `vertical_centered` centres the widget, and the widget is the
+                // whole block: its width is that of the longest line, because
+                // nothing in it is long enough to wrap at this width.
+                ui.vertical_centered(|ui| {
                     ui.add(
-                        egui::TextEdit::multiline(&mut text)
-                            .desired_width(f32::INFINITY)
-                            .code_editor(),
+                        egui::Label::new(
+                            egui::RichText::new(LICENSE_TEXT)
+                                .monospace()
+                                .size(11.5)
+                                .color(ui::color::TEXT_MUTED),
+                        )
+                        .selectable(true),
                     );
                 });
-        });
-    });
+            });
+    })
 }
 
 /// Draw the Limen brand mark — the diamond ring with a solid core — retinted to

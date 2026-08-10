@@ -85,6 +85,12 @@ impl Widget {
     pub fn placeholder(self, text: impl Into<String>) -> Self {
         self.set("placeholder", json!(text.into()))
     }
+    /// Carry a time of day as well as a day. Off by default: most questions
+    /// are about a day, and the ones that are not usually say so.
+    pub fn with_time(self) -> Self {
+        self.set("time", json!(true))
+    }
+
     pub fn multiline(self) -> Self {
         self.set("multiline", json!(true))
     }
@@ -170,6 +176,23 @@ impl Widget {
     }
     /// Invoke `capability`.`method` when a row is double-clicked, opening the
     /// returned view in a new tab.
+    /// Call `capability`/`method` as soon as a [`select`] changes, so the module
+    /// can answer with a different screen rather than only recording the answer.
+    ///
+    /// The chosen value arrives in the params under the select's own id, along
+    /// with anything passed to [`Widget::args`].
+    pub fn on_change(self, capability: impl Into<String>, method: impl Into<String>) -> Self {
+        let args = self.0.get("args").cloned().unwrap_or_else(|| json!({}));
+        self.set(
+            "on_change",
+            json!({
+                "capability": capability.into(),
+                "method": method.into(),
+                "args": args,
+            }),
+        )
+    }
+
     pub fn on_activate(self, capability: impl Into<String>, method: impl Into<String>) -> Self {
         self.set(
             "on_activate",
@@ -295,6 +318,16 @@ pub fn file(id: impl Into<String>) -> Widget {
 }
 
 /// A dropdown; its `id` keys the value passed back in params.
+/// A date, typed or picked off a calendar.
+///
+/// Whichever way it is given, the value that reaches the module is canonical —
+/// `2024-01-31` and `2024-01-31T00:00:00` are the two forms, chosen by
+/// [`Widget::with_time`], and anything else the user typed is rejected at the
+/// field rather than by whatever the module hands it to.
+pub fn date(id: impl Into<String>) -> Widget {
+    Widget::of_kind("date").set("id", json!(id.into()))
+}
+
 pub fn select(id: impl Into<String>, options: Vec<String>) -> Widget {
     Widget::of_kind("select")
         .set("id", json!(id.into()))
@@ -339,6 +372,18 @@ pub fn step(label: impl Into<String>, state: impl Into<String>) -> Widget {
 }
 
 /// A horizontal group of widgets.
+/// Widgets that belong to the module rather than to the screen — a title, a
+/// version, the picker that chooses which screen you are on.
+///
+/// They take no part in the entrance animation. A module that swaps one screen
+/// for another gets that entrance so the change reads as a change; anything
+/// wrapped here is the part that did not change, and replaying it makes the
+/// header flinch every time.
+pub fn chrome(children: Vec<Widget>) -> Widget {
+    let kids: Vec<Value> = children.into_iter().map(Widget::into_value).collect();
+    Widget::of_kind("chrome").set("children", Value::Array(kids))
+}
+
 pub fn row(children: Vec<Widget>) -> Widget {
     let kids: Vec<Value> = children.into_iter().map(Widget::into_value).collect();
     Widget::of_kind("row").set("children", Value::Array(kids))
