@@ -2,19 +2,10 @@
 // (Debug keeps the console so the stderr host/module logs stay visible.)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Limen desktop GUI entry point.
-//!
-//! Discovers modules the same way the CLI does (configured search paths plus a
-//! local `./modules` for development), then runs the egui app. All engine work
-//! is on a background thread — see [`worker`].
+//! Limen desktop GUI entry point: window options, startup failures, and where
+//! to look for modules. Everything else is the library beside it.
 
-mod app;
-mod i18n;
-mod worker;
-
-/// The widget toolkit, under the name the rest of the crate has always used for
-/// it. It is a crate of its own now; this keeps `ui::` meaning what it meant.
-pub(crate) use limen_ui as ui;
+use limen_gui::{app, i18n, ui};
 
 use std::path::PathBuf;
 

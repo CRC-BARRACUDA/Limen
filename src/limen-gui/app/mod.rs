@@ -35,11 +35,11 @@ mod pages;
 mod search;
 mod tabs;
 
-pub(crate) use brand::*;
+pub use brand::*;
 pub(crate) use dialogs::*;
 pub(crate) use pages::*;
-pub(crate) use search::*;
-pub(crate) use tabs::*;
+pub use search::*;
+pub use tabs::*;
 
 /// A path a file dialog returned: `(widget id, chosen path)`.
 pub(crate) type FilePick = (String, String);

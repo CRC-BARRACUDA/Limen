@@ -6,6 +6,10 @@ license.workspace = true
 description = "Limen desktop GUI (egui/eframe)"
 build = "build.rs"
 
+[lib]
+name = "limen_gui"
+path = "lib.rs"
+
 [[bin]]
 name = "Limen"
 path = "main.rs"

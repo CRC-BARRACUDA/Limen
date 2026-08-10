@@ -10,10 +10,10 @@ pub(crate) const BARRACUDA_SVG: &str = include_str!("../../../resources/barracud
 
 /// Parsed Barracuda artwork: each facet as a polygon of points, plus the overall
 /// bounding box (for aspect-correct fitting into any target rect).
-pub(crate) struct Barracuda {
-    pub(crate) polys: Vec<Vec<[f32; 2]>>,
-    pub(crate) min: egui::Pos2,
-    pub(crate) max: egui::Pos2,
+pub struct Barracuda {
+    pub polys: Vec<Vec<[f32; 2]>>,
+    pub min: egui::Pos2,
+    pub max: egui::Pos2,
 }
 
 /// Parse one SVG path `d` string into a polyline of absolute points. Supports the
@@ -138,7 +138,7 @@ pub(crate) fn parse_facet(d: &str) -> Vec<[f32; 2]> {
 }
 
 /// Parse (once) the embedded Barracuda SVG into paintable facets.
-pub(crate) fn barracuda_art() -> &'static Barracuda {
+pub fn barracuda_art() -> &'static Barracuda {
     static ART: std::sync::OnceLock<Barracuda> = std::sync::OnceLock::new();
     ART.get_or_init(|| {
         let mut polys: Vec<Vec<[f32; 2]>> = Vec::new();
@@ -417,25 +417,4 @@ pub(crate) fn rounded_rect_mesh(
         mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
     }
     mesh
-}
-
-#[cfg(test)]
-mod barracuda_tests {
-    use super::*;
-
-    #[test]
-    fn barracuda_svg_parses_into_facets() {
-        let art = barracuda_art();
-        // All 53 <path> facets parse into drawable polygons (curves flattened).
-        assert_eq!(art.polys.len(), 53, "expected 53 drawable facets");
-        assert!(art.polys.iter().all(|p| p.len() >= 3));
-        // Bounding box must sit inside the SVG viewBox (418,31 .. 1118,731).
-        assert!(art.min.x >= 418.0 && art.min.y >= 31.0, "min {:?}", art.min);
-        assert!(
-            art.max.x <= 1118.0 && art.max.y <= 731.0,
-            "max {:?}",
-            art.max
-        );
-        assert!(art.max.x - art.min.x > 100.0 && art.max.y - art.min.y > 100.0);
-    }
 }
