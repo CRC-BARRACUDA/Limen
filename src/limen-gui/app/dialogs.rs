@@ -1,0 +1,145 @@
+//! The pop-up windows the shell itself puts up: the licence, the changelog.
+
+use super::*;
+
+/// The full license text, embedded so it's always in sync with the repo.
+pub(crate) const LICENSE_TEXT: &str = include_str!("../../../LICENSE");
+
+/// What changed in the release on offer.
+///
+/// The same pop-up as the license, for the same reason: it is something you
+/// open, read, and dismiss. Inline it was a 240pt scrolling box wedged between
+/// the version line and the Update button — too short to read a changelog in,
+/// and tall enough to push the button below the fold.
+pub(crate) fn changes_dialog(
+    ctx: &egui::Context,
+    open: bool,
+    release: Option<&(String, String)>,
+) -> ui::Overlay {
+    let opts = ui::OverlayOpts {
+        width: 760.0,
+        max_height: 560.0,
+        title: None,
+        close: true,
+        ..Default::default()
+    };
+    ui::overlay(ctx, egui::Id::new("limen_changes"), open, &opts, |ui| {
+        let (version, notes) = match release {
+            Some((v, n)) => (v.as_str(), n.as_str()),
+            // The update can land while the pop-up is open — say so rather than
+            // showing an empty box.
+            None => {
+                ui.label(egui::RichText::new(i18n::t("update.no_changes")).strong());
+                return;
+            }
+        };
+        ui::typed_label(
+            ui,
+            egui::Id::new("changes_heading_type"),
+            &i18n::t("update.changes_title").replace("{version}", version),
+            &ui::Typed {
+                font: egui::FontId::proportional(19.0),
+                align: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // Bounded, so this scroll area cannot grow past the pop-up and leave
+        // the outer one to do the scrolling.
+        const BODY_H: f32 = 400.0;
+        egui::ScrollArea::vertical()
+            .max_height(BODY_H)
+            .min_scrolled_height(BODY_H)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // A GitHub release body is Markdown, and reads as one.
+                ui::markdown(ui, notes.trim());
+            });
+    })
+}
+
+/// The license, as a pop-up rather than a tab.
+///
+/// It is something you open, read a line of and dismiss — as a tab it stayed
+/// open behind you, and the one thing nobody wants two of is a copy of the GPL.
+pub(crate) fn license_dialog(ctx: &egui::Context, open: bool) -> ui::Overlay {
+    let opts = ui::OverlayOpts {
+        width: 760.0,
+        max_height: 560.0,
+        // No title bar text: the heading inside says which license this is,
+        // and "License" above it said the same thing twice.
+        title: None,
+        close: true,
+        ..Default::default()
+    };
+    ui::overlay(ctx, egui::Id::new("limen_license"), open, &opts, |ui| {
+        // Everything types out a letter at a time, and centred: the layout is
+        // measured once and revealed by clipping, so a centred line does not
+        // slide about as it fills in.
+        ui::typed_label(
+            ui,
+            egui::Id::new("license_heading_type"),
+            &i18n::t("license.heading"),
+            &ui::Typed {
+                font: egui::FontId::proportional(19.0),
+                align: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+        ui.add_space(4.0);
+        ui::typed_label(
+            ui,
+            egui::Id::new("license_intro_type"),
+            &i18n::t("license.intro"),
+            &ui::Typed {
+                color: ui::color::TEXT_MUTED,
+                align: egui::Align::Center,
+                per_sec: 260.0,
+                ..Default::default()
+            },
+        );
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // The license is not typed out: it is thirty-five thousand characters,
+        // and nobody opens a license to watch it arrive. A plain label, so it
+        // reads as the document it is and can be copied.
+        //
+        // The block is centred; the lines inside it are not. That distinction
+        // is the whole point — the text is pre-wrapped monospace, and its own
+        // indentation is what lines the headings and the numbered terms up.
+        // Centring each line would take that apart. Centring the block just
+        // stops it hugging the left edge of a window twice its width.
+        //
+        // The height is fixed, and that is load-bearing. The overlay already
+        // puts its content in a scroll area; an unbounded one nested inside it
+        // grows without limit, so it is the *outer* one that ends up scrolling
+        // and the heading rides up out of the box. Bounded, the content fits,
+        // the outer area never scrolls, and only the license moves.
+        const BODY_H: f32 = 400.0;
+        egui::ScrollArea::vertical()
+            .max_height(BODY_H)
+            .min_scrolled_height(BODY_H)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // `vertical_centered` centres the widget, and the widget is the
+                // whole block: its width is that of the longest line, because
+                // nothing in it is long enough to wrap at this width.
+                ui.vertical_centered(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(LICENSE_TEXT)
+                                .monospace()
+                                .size(11.5)
+                                .color(ui::color::TEXT_MUTED),
+                        )
+                        .selectable(true),
+                    );
+                });
+            });
+    })
+}
