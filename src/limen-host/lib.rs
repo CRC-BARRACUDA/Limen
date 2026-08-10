@@ -17,13 +17,20 @@
 mod broker;
 mod connection;
 mod host;
+mod elevate;
+mod files;
+mod notify;
+mod sdk;
+mod spec;
+mod supervisor;
 mod module;
 mod native;
 pub mod runtimes;
 
 pub use broker::Broker;
 pub use connection::ModuleConnection;
-pub use host::{Host, Launch, ModuleSpec};
+pub use host::Host;
+pub use spec::{Launch, ModuleSpec};
 pub use module::{stderr_logger, IncomingHandler, Logger, Module};
 pub use native::NativeModule;
 pub use runtimes::{Runtime, RuntimeStatus};

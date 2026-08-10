@@ -155,11 +155,16 @@ mod tests {
         assert!(missing.is_empty(), "Ukrainian catalog missing keys: {missing:?}");
     }
 
+    /// The chosen language is one global, so a test that sets it cannot run
+    /// beside another that reads it. They take turns.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Every string the calendar draws comes from the catalog, in both
     /// languages. A month or a weekday missing renders as `cal.month_9`, in a
     /// grid where there is no room to notice it is not a word.
     #[test]
     fn the_calendar_is_translated() {
+        let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         for lang in [Lang::En, Lang::Uk] {
             set_locale(lang);
             for m in 1..=12 {
@@ -194,6 +199,7 @@ mod tests {
     /// date in the grid sits under the wrong heading.
     #[test]
     fn the_weekday_headings_match_the_grid() {
+        let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         set_locale(Lang::En);
         // August 2026 opens on a Saturday, which is the sixth column.
         assert_eq!(limen_proto::date::weekday(2026, 8, 1), 5);
