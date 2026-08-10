@@ -75,9 +75,13 @@ pub fn render_plain_table(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<Str
     // frame grows while the title bar stays at the declared width, leaving the
     // close control stranded short of the corner. A table scrolls inside its
     // container; it does not widen it.
+    // Fill the width (so it scrolls rather than stretching its container), but
+    // shrink to the rows vertically. `false` on the y axis takes every pixel
+    // left in the view, which a table with a handful of rows spends on empty
+    // space — and anything after it is pushed off the bottom.
     egui::ScrollArea::horizontal()
         .id_source(id)
-        .auto_shrink([false, false])
+        .auto_shrink([false, true])
         .show(ui, |ui| {
         egui::Grid::new(id)
             .striped(true)
