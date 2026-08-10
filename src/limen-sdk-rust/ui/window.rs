@@ -73,3 +73,22 @@ pub fn window_auto(
     }
     v
 }
+
+/// Attach a passing notice to a view: what just happened, said in the corner
+/// when this view arrives.
+///
+/// `level` is "info", "ok", "warning" or "error". It is raised once, when the
+/// view is accepted — a redraw of the same screen does not raise it again.
+///
+/// For an event, not for a state: "installed" belongs here, "not installed"
+/// belongs on the screen, where it stays until it stops being true.
+pub fn notice(view: Value, level: &str, text: impl Into<String>) -> Value {
+    let mut v = view;
+    if let Value::Object(m) = &mut v {
+        m.insert(
+            "notice".into(),
+            json!({ "level": level, "text": text.into() }),
+        );
+    }
+    v
+}

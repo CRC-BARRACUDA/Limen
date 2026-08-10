@@ -12,6 +12,7 @@ use crate::*;
 /// page is opened - and a widget the SDK cannot express is a widget nobody can
 /// use, however well the engine renders it.
 pub fn demo_view() -> Value {
+    use limen_sdk_rust::json;
     use limen_sdk_rust::ui::*;
 
     // Every button in the gallery answers to the same made-up capability.
@@ -81,13 +82,15 @@ pub fn demo_view() -> Value {
                 btn("default", "default"),
                 btn("danger", "danger").danger(),
                 btn("disabled", "disabled").enabled(false),
+                // A button can carry arguments to the method it calls.
+                btn("carries args", "with_args").args(json!({ "which": "the third one" })),
                 spacer(),
                 btn("trash", "icon").icon("trash"),
             ]),
             row(vec![
                 btn("asks first", "confirmed").confirm("Really?", "the thing"),
                 btn("opens a tab", "tab").open_in_tab(),
-                btn("dismisses a pop-up", "dismiss").dismiss(),
+                btn("open a pop-up", "popup"),
             ]),
             label("row — a text field shares its width with its neighbours").weak(),
             row(vec![
@@ -120,8 +123,31 @@ pub fn demo_view() -> Value {
             .row_menu(vec![
                 menu_item("Open", "ui.kit", "open"),
                 menu_item("Open in a tab", "ui.kit", "open").open_in_tab(),
+                submenu(
+                    "More ▸",
+                    vec![
+                        menu_item("Copy the rule", "ui.kit", "copy"),
+                        menu_item("Copy the artefact", "ui.kit", "copy"),
+                    ],
+                ),
+            ])
+            // Per-row menus override the shared one, so a row can offer
+            // something different — or, as here, nothing at all.
+            .row_menus(vec![
+                vec![],
+                vec![menu_item("Only this row has this", "ui.kit", "row")],
+                vec![],
             ])
             .on_activate_here("ui.kit", "activate"),
+            separator(),
+            label("toast — a passing notice, top-right; click one to dismiss it early")
+                .strong(),
+            row(vec![
+                btn("info", "toast.info"),
+                btn("ok", "toast.ok"),
+                btn("warning", "toast.warning"),
+                btn("error", "toast.error"),
+            ]),
             separator(),
             chart(
                 "chart",
@@ -134,6 +160,90 @@ pub fn demo_view() -> Value {
             ),
         ],
     )
+}
+
+/// Where the gallery keeps what it is showing: a pop-up, a question.
+fn demo_state() -> egui::Id {
+    egui::Id::new("limen_kit_demo")
+}
+
+/// Carry out what a gallery button asked for.
+///
+/// The toast buttons raise a toast; the confirm button asks; the pop-up button
+/// opens one, and the dismiss button inside it closes it. Opening a tab is the
+/// one that cannot be shown here — the gallery is not a module, and has no view
+/// of its own to send anywhere — so it says so rather than doing nothing.
+fn demo_action(ctx: &egui::Context, inv: &Invoke) {
+    let say = |level, text: &str| toast::notify(ctx, level, text);
+    match inv.action.method.as_str() {
+        "toast.info" => say(toast::Level::Info, "An info notice, raised from the UI Kit."),
+        "toast.ok" => say(toast::Level::Ok, "An ok notice, raised from the UI Kit."),
+        "toast.warning" => say(toast::Level::Warning, "A warning notice, raised from the UI Kit."),
+        "toast.error" => say(toast::Level::Error, "An error notice, raised from the UI Kit."),
+        "tab" => say(
+            toast::Level::Info,
+            "A module's view would open in a tab of its own. The gallery has no \
+             view to send, so this is only a description.",
+        ),
+        "popup" => ctx.data_mut(|d| d.insert_temp(demo_state(), true)),
+        // A button marked `confirm` is answered by the host: the question goes
+        // up, and the module is called only if the answer is yes.
+        _ if inv.confirm.is_some() => {
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new("limen_kit_ask"), true))
+        }
+        // `dismiss` is answered by the host before the module ever hears about
+        // it, so a button marked with it closes the pop-up it is in.
+        "dismiss" => ctx.data_mut(|d| d.insert_temp(demo_state(), false)),
+        _ => {}
+    }
+}
+
+/// The pop-up the gallery opens, and the confirm question it asks.
+///
+/// Drawn after the page, so it sits over it.
+fn demo_overlays(ctx: &egui::Context) {
+    let open: bool = ctx.data(|d| d.get_temp(demo_state()).unwrap_or(false));
+    let opts = OverlayOpts {
+        width: 420.0,
+        title: Some("A pop-up".into()),
+        close: true,
+        ..Default::default()
+    };
+    let out = overlay(ctx, egui::Id::new("limen_kit_popup"), open, &opts, |ui| {
+        ui.label(styled(
+            "Anything a module can draw, it can draw in here. The button below \
+             carries `dismiss`, which the host answers itself — the module is \
+             never called.",
+            LabelStyle::Weak,
+        ));
+        ui.add_space(10.0);
+        if primary_button(ui, "Dismiss", egui::Vec2::ZERO).clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(demo_state(), false));
+        }
+    });
+    if out.close || out.back {
+        ctx.data_mut(|d| d.insert_temp(demo_state(), false));
+    }
+
+    // And the question a button marked `confirm` puts up before it runs.
+    let asking: bool = ctx.data(|d| d.get_temp(egui::Id::new("limen_kit_ask")).unwrap_or(false));
+    if let Some(yes) = confirm_dialog(
+        ctx,
+        "kit",
+        asking,
+        "Really?",
+        Some("the thing"),
+        "Do it",
+        "Cancel",
+        None,
+    ) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("limen_kit_ask"), false));
+        toast::notify(
+            ctx,
+            if yes { toast::Level::Ok } else { toast::Level::Info },
+            if yes { "Answered yes." } else { "Answered no." },
+        );
+    }
 }
 
 /// The component gallery — the UI Kit shown in the Developer window, and the
@@ -162,6 +272,11 @@ pub fn render_demo_ui(ui: &mut egui::Ui, inputs: &mut HashMap<String, String>) {
             match serde_json::from_value::<View>(demo_view()) {
                 Ok(view) => {
                     if let Some(inv) = render_view(ui, &view, inputs, None, 0.0) {
+                        // Every button here does the thing it is showing. A
+                        // gallery that displays a feature without performing it
+                        // is a picture of the feature, which is what this page
+                        // exists to stop being.
+                        demo_action(ui.ctx(), &inv);
                         let args = if inv.args.is_empty() {
                             String::new()
                         } else {
@@ -212,4 +327,7 @@ pub fn render_demo_ui(ui: &mut egui::Ui, inputs: &mut HashMap<String, String>) {
                 }
             });
         });
+
+    // The pop-up and the question those buttons open, drawn over the page.
+    demo_overlays(ui.ctx());
 }

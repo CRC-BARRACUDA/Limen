@@ -86,6 +86,7 @@ mod markdown;
 mod overlay;
 mod table;
 mod theme;
+pub mod toast;
 mod typing;
 mod view;
 mod widgets;

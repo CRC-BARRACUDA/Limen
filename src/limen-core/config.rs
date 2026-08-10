@@ -34,6 +34,10 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub animations: bool,
 
+    /// Whether passing notices are shown in the corner. Defaults to on.
+    #[serde(default = "default_true")]
+    pub alerts: bool,
+
     /// UI language code (e.g. `"en"`, `"uk"`). Absent = detect from the OS locale,
     /// falling back to English.
     #[serde(default)]
@@ -55,6 +59,7 @@ impl Default for Config {
             default_org: None,
             ui_scale_percent: 0,
             animations: true,
+            alerts: true,
             language: None,
             github_token: None,
         }

@@ -16,6 +16,13 @@ pub struct View {
     /// one.
     #[serde(default)]
     pub auto: Option<AutoAction>,
+    /// A passing notice to raise when this view arrives — the module reporting
+    /// what just happened, rather than finding room for it on the screen.
+    ///
+    /// Raised once, when the view is accepted, not on every frame that draws
+    /// it: a notice is an event, and a redraw is not one.
+    #[serde(default)]
+    pub notice: Option<Notice>,
     /// Show this view as a pop-up over whatever is already on screen, instead of
     /// replacing it. The value is the pop-up's identity.
     ///
@@ -38,6 +45,28 @@ pub struct View {
     /// How tall it may grow before its contents scroll, in points. Also clamped.
     #[serde(default)]
     pub modal_height: Option<f32>,
+}
+
+/// What a module wants said in the corner: how serious, and in what words.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Notice {
+    /// "info", "ok", "warning" or "error". Anything else is read as info — a
+    /// misspelt level should still deliver the message.
+    #[serde(default)]
+    pub level: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+impl Notice {
+    pub fn level(&self) -> crate::toast::Level {
+        match self.level.as_str() {
+            "ok" | "success" => crate::toast::Level::Ok,
+            "warning" | "warn" => crate::toast::Level::Warning,
+            "error" => crate::toast::Level::Error,
+            _ => crate::toast::Level::Info,
+        }
+    }
 }
 
 /// The capability + method a button invokes.

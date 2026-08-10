@@ -10,6 +10,8 @@ pub(crate) fn settings_view(
     changed: &mut bool,
     animations: &mut bool,
     anim_changed: &mut bool,
+    alerts: &mut bool,
+    alerts_changed: &mut bool,
     lang: &mut i18n::Lang,
     lang_changed: &mut bool,
     reveal_at: f64,
@@ -74,6 +76,18 @@ pub(crate) fn settings_view(
         ui.add_space(6.0);
         if ui::toggle(ui, animations, &i18n::t("settings.animations_toggle")).changed() {
             *anim_changed = true;
+        }
+    });
+
+    ui.add_space(16.0);
+    reveal_item(ui, 4, reveal_at, now, animate, |ui| {
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(i18n::t("settings.alerts")).strong());
+        hint(ui, "settings.alerts_hint");
+        ui.add_space(6.0);
+        if ui::toggle(ui, alerts, &i18n::t("settings.alerts_toggle")).changed() {
+            *alerts_changed = true;
         }
     });
 }

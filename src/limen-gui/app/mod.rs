@@ -141,6 +141,8 @@ pub struct LimenApp {
 
     /// Whether UI animations are enabled (persisted in settings).
     pub(crate) animations: bool,
+    /// Whether passing notices are shown (persisted in settings).
+    pub(crate) alerts: bool,
 
     /// The active UI language (persisted in settings; mirrors `i18n`'s global).
     pub(crate) language: i18n::Lang,
@@ -155,6 +157,9 @@ pub struct LimenApp {
     pub(crate) changes_open: bool,
     pub(crate) changes_alive: bool,
     /// Whether the license pop-up is showing.
+    /// A notice a module asked for, waiting for a frame to raise it in — a
+    /// view arrives on the worker's message, which has no egui context.
+    pub(crate) pending_notice: Option<(ui::toast::Level, String)>,
     pub(crate) license_open: bool,
     /// Whether it is still on screen — it has an exit animation to finish after
     /// it stops being open.
@@ -214,6 +219,19 @@ impl LimenApp {
             .map(|c| c.animations)
             .unwrap_or(true);
         ui::set_animations(animations);
+        let alerts = limen_core::Config::load().map(|c| c.alerts).unwrap_or(true);
+        ui::toast::set_enabled(alerts);
+        // `ui` holds no catalog, so it does not know what to call the four
+        // levels. It asks this, and asks again every frame — so a notice that is
+        // already up follows a change of language.
+        ui::toast::set_namer(|level| {
+            i18n::t(match level {
+                ui::toast::Level::Info => "toast.info",
+                ui::toast::Level::Ok => "toast.ok",
+                ui::toast::Level::Warning => "toast.warning",
+                ui::toast::Level::Error => "toast.error",
+            })
+        });
         // Resolve the UI language: saved choice → OS locale → English.
         let language = limen_core::Config::load()
             .ok()
@@ -283,12 +301,14 @@ impl LimenApp {
                 if pct == 0 { 100.0 } else { pct as f32 }
             },
             animations,
+            alerts,
             language,
             about_revealed_at: None,
             settings_revealed_at: None,
             developer_revealed_at: None,
             changes_open: false,
             changes_alive: false,
+            pending_notice: None,
             license_open: false,
             license_alive: false,
             module_reveal: None,
@@ -472,6 +492,13 @@ impl LimenApp {
     pub(crate) fn save_animations(&self) {
         if let Ok(mut cfg) = limen_core::Config::load() {
             cfg.animations = self.animations;
+            let _ = cfg.save();
+        }
+    }
+
+    pub(crate) fn save_alerts(&self) {
+        if let Ok(mut cfg) = limen_core::Config::load() {
+            cfg.alerts = self.alerts;
             let _ = cfg.save();
         }
     }
@@ -842,6 +869,12 @@ impl LimenApp {
     /// a fresh screen has moved on, so leaving a pop-up floating over it would
     /// strand the user on a form belonging to the previous one.
     pub(crate) fn accept_view(&mut self, view: ui::View) {
+        // Whatever the module wants said about this arriving. Taken here rather
+        // than at draw time: a view redraws many times, and each redraw is not
+        // a new event.
+        if let Some(n) = &view.notice {
+            self.pending_notice = Some((n.level(), n.text.clone()));
+        }
         if let Some(id) = view.modal.clone() {
             // Already open: redraw that pop-up where it stands, and close
             // anything that was opened over it — going back to a form means

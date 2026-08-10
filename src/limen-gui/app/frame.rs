@@ -109,6 +109,7 @@ impl eframe::App for LimenApp {
         let mut close_idx: Option<usize> = None;
         let mut scale_changed = false;
         let mut anim_changed = false;
+        let mut alerts_changed = false;
         let mut lang_changed = false;
         let mut dev_applied = false;
 
@@ -514,6 +515,7 @@ impl eframe::App for LimenApp {
                 log_autoscroll,
                 ui_scale,
                 animations,
+                alerts,
                 language,
                 dev_mode_on,
                 dev_limen_path,
@@ -597,6 +599,8 @@ impl eframe::App for LimenApp {
                             &mut scale_changed,
                             animations,
                             &mut anim_changed,
+                            alerts,
+                            &mut alerts_changed,
                             language,
                             &mut lang_changed,
                             settings_reveal,
@@ -667,6 +671,10 @@ impl eframe::App for LimenApp {
             ui::set_animations(self.animations);
             self.save_animations();
         }
+        if alerts_changed {
+            ui::toast::set_enabled(self.alerts);
+            self.save_alerts();
+        }
         if lang_changed {
             self.save_language();
             // Re-play the current page's staggered entrance so it animates into
@@ -721,6 +729,13 @@ impl eframe::App for LimenApp {
             }
             self.license_alive = !out.closed;
         }
+
+        if let Some((level, text)) = self.pending_notice.take() {
+            ui::toast::notify(ctx, level, text);
+        }
+        // Notices last, and above everything: one is usually about whatever the
+        // pop-up in front of it is doing.
+        ui::toast::draw(ctx);
 
         if let Some(name) = self.confirmed_removal(ctx) {
             self.status = format!("removing {name}…");
