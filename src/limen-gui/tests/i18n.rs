@@ -2,8 +2,13 @@
 
 use limen_gui::i18n::*;
 
+/// The chosen language is one global, so no two tests here may hold an opinion
+/// about it at once. Every test that sets or reads it takes this first — one
+/// that forgets makes the lock useless for the others, which is how this raced
+/// the first time.
 #[test]
 fn catalogs_parse_and_fall_back() {
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     // A known key resolves in both languages…
     set_locale(Lang::En);
     assert_eq!(t("nav.modules"), "Modules");
