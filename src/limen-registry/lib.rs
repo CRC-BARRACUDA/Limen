@@ -16,20 +16,24 @@
 //! installed module so tampering is at least detectable.
 
 mod github;
+mod http;
 mod lockfile;
 mod registry;
+mod release;
 mod source;
 mod trust;
 mod util;
 
 pub use github::{
     fetch_remote_module, list_org_module_repos, list_org_modules,
-    set_cache_dir as set_registry_cache_dir, set_token as set_github_token,
+    set_cache_dir as set_registry_cache_dir,
     test_token as test_github_token, RemoteModule, RepoCandidate,
 };
+pub use http::set_token as set_github_token;
 pub use lockfile::{LockEntry, Lockfile};
+pub use release::latest_release_version;
 pub use registry::{
-    latest_release_version, set_update_modules_dir, InstallReport, Registry, VerifyItem,
+    set_update_modules_dir, InstallReport, Registry, VerifyItem,
     VerifyStatus,
 };
 pub use source::SourceSpec;

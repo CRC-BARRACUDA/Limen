@@ -203,17 +203,9 @@ fn fetch_tarball(slug: &str, version: Option<&str>, dest: &Path) -> Result<GitMe
         Some(v) => format!("https://api.github.com/repos/{slug}/tarball/{v}"),
         None => format!("https://api.github.com/repos/{slug}/tarball"),
     };
-    let status = Command::new("curl")
-        .args(["-fsSL", "-H", "User-Agent: limen", "-o"])
-        .arg(&tarball)
-        .arg(&url)
-        .no_console()
-        .status()
-        .context("running curl (is it installed and on PATH?)")?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&tarball);
-        bail!("downloading {url} failed (curl exit {status})");
-    }
+    // Through the shared client, so a private repository's tarball is reachable
+    // with a token set — this call used to send none.
+    crate::http::download(&url, &tarball)?;
 
     std::fs::create_dir_all(&staging)
         .with_context(|| format!("creating {}", staging.display()))?;
@@ -271,18 +263,7 @@ fn single_child_dir(dir: &Path) -> Option<PathBuf> {
 /// The repo's default branch, via the GitHub API. `None` on any error.
 fn default_branch(slug: &str) -> Option<String> {
     let url = format!("https://api.github.com/repos/{slug}");
-    let out = Command::new("curl")
-        .args([
-            "-fsSL",
-            "-H",
-            "User-Agent: limen",
-            "-H",
-            "Accept: application/vnd.github+json",
-            &url,
-        ])
-        .no_console()
-        .output()
-        .ok()?;
+    let out = crate::http::get(&["-fsSL"], Some("application/vnd.github+json"), &url).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -337,35 +318,12 @@ fn git_out(dir: &Path, args: &[&str]) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// `github_slug` is private and stays that way: it is a small predicate whose
+/// whole point is being internal, and making it public to move one test out
+/// would be a poor trade.
 #[cfg(test)]
-mod spec_tests {
+mod tests {
     use super::*;
-
-    #[test]
-    fn from_lock_pins_version_but_update_does_not() {
-        // Normal reconstruction pins to the recorded version (reproducible).
-        match SourceSpec::from_lock("git", "owner/repo", "0.1.0") {
-            SourceSpec::Git { repo, version } => {
-                assert_eq!(repo, "owner/repo");
-                assert_eq!(version.as_deref(), Some("0.1.0"));
-            }
-            _ => panic!("expected a git spec"),
-        }
-        // Update must be UNPINNED so a module can move past its installed version
-        // (the bug fixed in 0.5.2 — pinned update could never reach a newer tag).
-        match SourceSpec::from_lock_latest("git", "owner/repo") {
-            SourceSpec::Git { repo, version } => {
-                assert_eq!(repo, "owner/repo");
-                assert_eq!(version, None, "update must not pin to the installed version");
-            }
-            _ => panic!("expected a git spec"),
-        }
-        // Path sources are identical either way.
-        assert!(matches!(
-            SourceSpec::from_lock_latest("path", "/some/dir"),
-            SourceSpec::Path { .. }
-        ));
-    }
 
     #[test]
     fn github_slug_recognizes_github_and_rejects_others() {
