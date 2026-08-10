@@ -9,10 +9,12 @@
 //! is on a background thread — see [`worker`].
 
 mod app;
-mod cursor;
 mod i18n;
-mod ui;
 mod worker;
+
+/// The widget toolkit, under the name the rest of the crate has always used for
+/// it. It is a crate of its own now; this keeps `ui::` meaning what it meant.
+pub(crate) use limen_ui as ui;
 
 use std::path::PathBuf;
 
@@ -43,6 +45,10 @@ fn prefer_x11() {}
 
 fn main() -> eframe::Result<()> {
     prefer_x11();
+    // The toolkit has strings of its own — month names, the words on pop-up
+    // buttons — but no catalogs and no opinion about language. It asks through
+    // this, and the application answers.
+    ui::set_translator(i18n::t);
     let dirs = resolve_search_dirs();
 
     let mut viewport = egui::ViewportBuilder::default()

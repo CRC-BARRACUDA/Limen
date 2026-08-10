@@ -1093,7 +1093,7 @@ impl eframe::App for LimenApp {
         self.drain_file_picks();
         // Keep the screen→UI mapping current, so a file drag (during which the
         // window system stops reporting the pointer) can still be located.
-        crate::cursor::calibrate(ctx);
+        ui::cursor::calibrate(ctx);
         // A file drag produces exactly one event — `HoveredFile` — and then
         // silence: no cursor motion is reported for its duration. egui would go
         // idle on the very next frame, freezing the cursor sample taken as the

@@ -91,6 +91,20 @@ impl Widget {
         self.set("time", json!(true))
     }
 
+    /// Mask what is typed, for a secret. Single-line only.
+    pub fn password(self) -> Self {
+        self.set("password", json!(true))
+    }
+
+    /// Draw the button, but do not let it be pressed.
+    ///
+    /// For a control that is real but not available yet — a Run with nothing
+    /// chosen to run on. Hiding it instead would make the screen change shape
+    /// as the form is filled in.
+    pub fn enabled(self, on: bool) -> Self {
+        self.set("enabled", json!(on))
+    }
+
     pub fn multiline(self) -> Self {
         self.set("multiline", json!(true))
     }

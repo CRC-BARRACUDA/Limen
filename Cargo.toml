@@ -6,6 +6,7 @@ members = [
     "src/limen-core",
     "src/limen-registry",
     "src/limen-sdk-rust",
+    "src/limen-ui",
     "src/limen-cli",
     "src/limen-gui",
 ]
@@ -34,3 +35,4 @@ limen-host = { path = "src/limen-host" }
 limen-core = { path = "src/limen-core" }
 limen-registry = { path = "src/limen-registry" }
 limen-sdk-rust = { path = "src/limen-sdk-rust" }
+limen-ui = { path = "src/limen-ui" }

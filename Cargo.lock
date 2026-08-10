@@ -1984,13 +1984,12 @@ dependencies = [
  "limen-core",
  "limen-proto",
  "limen-registry",
+ "limen-ui",
  "rfd",
  "serde",
  "serde_json",
  "toml 0.8.23",
- "windows-sys 0.52.0",
  "winresource",
- "x11rb",
 ]
 
 [[package]]
@@ -2034,6 +2033,19 @@ dependencies = [
  "limen-proto",
  "serde_json",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "limen-ui"
+version = "0.24.0"
+dependencies = [
+ "eframe",
+ "limen-proto",
+ "limen-sdk-rust",
+ "serde",
+ "serde_json",
+ "windows-sys 0.52.0",
+ "x11rb",
 ]
 
 [[package]]
