@@ -82,106 +82,62 @@ pub(crate) fn stop_all_elevations(log: &Logger) {
 
 /// Stop an elevation that is still running.
 ///
-/// Best effort, and honest about it: once authorized the program runs as root,
-/// and an unprivileged process cannot signal one — the kernel refuses. So this
-/// reports whether it actually stopped, and a caller that gets `false` has to
-/// say so rather than pretend.
+/// Asking the supervisor is the whole of it. It is elevated and it is the
+/// command's parent, so it can end a root process where we cannot — and it was
+/// authorized once, when the scan started. Stopping therefore never asks the
+/// user for anything: a second password prompt to end something they have just
+/// pressed Stop on is a prompt to undo, which is not a thing anyone agreed to.
+///
+/// The command is not dead by the time this returns — the supervisor has to
+/// notice, kill it, and reap it. That is what the caller's next poll is for.
+/// What is reported here is that the stop was *delivered*, and the only way it
+/// is not is that there was nothing to deliver it to.
 pub(crate) fn host_elevate_stop(params: Value, log: &Logger, who: &str) -> std::result::Result<Value, RpcError> {
     let id = params.get("id").and_then(Value::as_u64).unwrap_or(0);
     let slot = elevations().lock().unwrap().get(&id).cloned();
     let Some(state) = slot else {
         return Ok(json!({ "stopped": false }));
     };
+
+    // Taken, not borrowed: once it has been told to stop there is nothing more
+    // to say to it, and dropping the link says the same thing a second time —
+    // the supervisor treats the socket closing exactly as it treats `stop`, so
+    // a write that never lands still ends the command.
+    #[cfg(any(unix, windows))]
+    {
+        use std::io::Write;
+        let sup = supervisors().lock().unwrap().remove(&id);
+        if let Some(mut s) = sup {
+            let _ = writeln!(s, "stop");
+            let _ = s.flush();
+            drop(s);
+            log(&format!("[elevate] {who}: asked the supervisor to stop {id}"));
+            return Ok(json!({ "stopped": true }));
+        }
+    }
+
+    // No supervisor — the command was elevated directly, which happens only when
+    // there was no supervisor binary to use. Signal it ourselves: that works if
+    // it was never really elevated, or if we are root already, and otherwise the
+    // kernel refuses and there is nothing further to try that does not involve
+    // asking the user to authorize a kill.
     let pid = state.lock().unwrap().get("pid").and_then(Value::as_u64);
     let Some(pid) = pid.filter(|p| *p > 0) else {
         // Nothing to signal — macOS runs it inside osascript, which gives us no
         // handle at all.
         return Ok(json!({ "stopped": false }));
     };
-    let still_running = |state: &Arc<std::sync::Mutex<Value>>| {
-        state.lock().unwrap().get("running").and_then(Value::as_bool) == Some(true)
-    };
-
-    // A supervised command stops by being asked: the supervisor is elevated and
-    // is the command's parent, so it can do what we cannot. No second prompt.
-    #[cfg(any(unix, windows))]
-    {
-        use std::io::Write;
-        let sup = supervisors().lock().unwrap().get(&id).and_then(|s| s.try_clone().ok());
-        if let Some(mut s) = sup {
-            let _ = writeln!(s, "stop");
-            let _ = s.flush();
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            if state.lock().unwrap().get("running").and_then(Value::as_bool) != Some(true) {
-                log(&format!("[elevate] {who}: supervisor stopped {pid}"));
-                supervisors().lock().unwrap().remove(&id);
-                return Ok(json!({ "stopped": true }));
-            }
-        }
-    }
-
-    // The polite attempt first: it works when the command was never elevated,
-    // or when we are root already.
     kill_pid(pid as u32);
     std::thread::sleep(std::time::Duration::from_millis(250));
-    if !still_running(&state) {
+    let stopped = state.lock().unwrap().get("running").and_then(Value::as_bool) != Some(true);
+    if stopped {
         log(&format!("[elevate] {who}: stopped {pid}"));
-        return Ok(json!({ "stopped": true }));
+    } else {
+        log(&format!(
+            "[elevate] {who}: {pid} is elevated and unsupervised, so it cannot be stopped"
+        ));
     }
-
-    // It is running as root, so the kernel refused us. Ask for the privileges to
-    // end it — in the background, with an id to poll, because the operating
-    // system may put a prompt on screen and the caller has to be able to say so
-    // rather than freeze with nothing showing.
-    let argv = stop_argv(pid);
-    if argv.is_empty() {
-        // No way to ask on this platform; say so rather than report a stop that
-        // never happened.
-        return Ok(json!({ "stopped": false }));
-    }
-    log(&format!(
-        "[elevate] {who}: {pid} would not stop unprivileged, asking to stop it with privileges"
-    ));
-    let pending = start_elevation(argv, None, log, who);
-    Ok(json!({ "stopped": false, "pending": pending }))
-}
-
-/// The command that ends `pid`, to be run elevated.
-///
-/// Only reached when the unprivileged attempt was refused, which is also why it
-/// is a whole command rather than a signal: it has to survive being handed to
-/// the platform's elevation helper.
-#[cfg(unix)]
-pub(crate) fn stop_argv(pid: u64) -> Vec<String> {
-    let kill = program_on_path("kill").unwrap_or_else(|| std::path::PathBuf::from("/bin/kill"));
-    vec![
-        kill.to_string_lossy().into_owned(),
-        "-TERM".to_string(),
-        pid.to_string(),
-    ]
-}
-
-#[cfg(windows)]
-pub(crate) fn stop_argv(pid: u64) -> Vec<String> {
-    // Absolute, because what resolves this is the elevation prompt rather than
-    // our own environment, and `PATH` need not be the one we can see. `/T` takes
-    // the tree — a scanner that spawned workers leaves them running otherwise —
-    // and `/F` because a process being stopped against its will does not
-    // cooperate by definition.
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    vec![
-        format!(r"{root}\System32\taskkill.exe"),
-        "/PID".to_string(),
-        pid.to_string(),
-        "/T".to_string(),
-        "/F".to_string(),
-    ]
-}
-
-/// Nothing agreed to ask with, so nothing to ask.
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn stop_argv(_pid: u64) -> Vec<String> {
-    Vec::new()
+    Ok(json!({ "stopped": stopped }))
 }
 
 #[cfg(unix)]

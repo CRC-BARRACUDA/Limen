@@ -188,21 +188,20 @@ impl Host {
 
     /// Ask an elevation to stop.
     ///
-    /// Best effort: once authorized the command runs as root, and an
-    /// unprivileged process cannot signal one. Returns whether it actually
-    /// stopped — `false` means it is still running and the user should be told
-    /// so rather than shown a screen that implies otherwise.
-    /// Returns `Ok(())` if it stopped, or the id of an elevation now asking the
-    /// user for the privileges to end it — poll that with
-    /// [`Host::elevate_state`], and show that it is asking.
-    pub fn elevate_stop(&self, id: u64) -> Result<(), Option<u64>> {
-        let Ok(v) = self.raw("host.elevate_stop", json!({ "id": id })) else {
-            return Err(None);
-        };
-        if v.get("stopped").and_then(Value::as_bool) == Some(true) {
-            return Ok(());
-        }
-        Err(v.get("pending").and_then(Value::as_u64))
+    /// The host asks the supervisor, which is elevated and owns the command.
+    /// Nothing is asked of the *user*: stopping never raises a second
+    /// authorization prompt, whatever the answer here.
+    ///
+    /// `true` means the stop was delivered, not that the command is already
+    /// gone — it takes a moment to die, and the next poll is what sees it end.
+    /// `false` means there was nothing to deliver it to and it is still running,
+    /// which the user should be told rather than shown a screen implying it
+    /// stopped.
+    pub fn elevate_stop(&self, id: u64) -> bool {
+        self.raw("host.elevate_stop", json!({ "id": id }))
+            .ok()
+            .and_then(|v| v.get("stopped").and_then(Value::as_bool))
+            .unwrap_or(false)
     }
 
     /// Whether a started elevation has finished, and how it ended.

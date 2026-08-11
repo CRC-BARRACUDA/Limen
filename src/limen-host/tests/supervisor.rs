@@ -100,3 +100,63 @@ fn the_supervisor_reports_its_child_and_ends_it_when_the_link_closes() {
     assert!(gone, "the command outlived the supervisor: pid {pid}");
     sup_cleanup(&sock);
 }
+
+/// `stop` ends the command while the link is still open.
+///
+/// This is what pressing Stop on an elevated scan does, and all it does: the
+/// host writes one word and returns. It used to write that word, wait 300ms, and
+/// escalate to a second authorization prompt if the command had not finished
+/// dying yet — a password prompt to undo something the user had just asked for,
+/// on a race it could lose: the supervisor has to notice, kill, and be reaped,
+/// and only then does the elevation helper exit and the state flip.
+///
+/// The link is deliberately held open throughout, so what is proved here is the
+/// message doing the work rather than the socket closing behind it.
+#[test]
+fn the_supervisor_stops_its_child_when_asked() {
+    use limen_proto::NoConsole;
+    use std::io::Write;
+
+    let Some((argv, server, sock)) = supervised(9002, &slow_command(), None) else {
+        eprintln!("skipped: no limen-cli beside the test binary — run `cargo build` first");
+        return;
+    };
+
+    let mut sup = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .no_console()
+        .spawn()
+        .expect("start the supervisor");
+    let mut link = sup_accept(server).expect("the supervisor connects back");
+
+    let mut line = String::new();
+    BufReader::new(link.try_clone().expect("clone the link"))
+        .read_line(&mut line)
+        .expect("read the pid it reports");
+    let pid: u32 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no pid in {line:?}"));
+    assert!(still_running(pid), "the command was not started");
+
+    // One word, and no waiting on the other side of it.
+    writeln!(link, "stop").expect("ask it to stop");
+    link.flush().expect("flush the ask");
+
+    let gone = (0..60).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        !still_running(pid)
+    });
+    assert!(gone, "asked to stop, still running: pid {pid}");
+
+    // And the supervisor has nothing left to hold, so it leaves too.
+    let left = (0..60).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        matches!(sup.try_wait(), Ok(Some(_)))
+    });
+    assert!(left, "the supervisor stayed after its command went");
+
+    drop(link);
+    sup_cleanup(&sock);
+}
