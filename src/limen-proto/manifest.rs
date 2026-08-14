@@ -254,13 +254,23 @@ impl Manifest {
 }
 
 /// A `[module]` field (`title` / `description`) translated for `lang`, read from
-/// `<dir>/locales/<lang>.toml`. `None` for `"en"` (the manifest's own language)
-/// or when no such file/key exists — the caller then keeps the manifest default.
+/// the module's own catalog. `None` for `"en"` (the manifest's own language) or
+/// when no such file/key exists — the caller then keeps the manifest default.
+///
+/// Two places, because modules keep their catalogs in either: `resources/locales/`
+/// is where a module that separates sources from data puts them, and `locales/`
+/// is where the earlier ones do. A module's *own* screens are unaffected by the
+/// difference — it embeds its catalog with `include_str!` at compile time — so a
+/// module that moved its files would go on translating everything it draws while
+/// its card silently reverted to English, which is a confusing way to find out.
 fn localized_module_field(dir: &Path, lang: &str, field: &str) -> Option<String> {
     if lang == "en" {
         return None;
     }
-    let text = std::fs::read_to_string(dir.join("locales").join(format!("{lang}.toml"))).ok()?;
+    let name = format!("{lang}.toml");
+    let text = std::fs::read_to_string(dir.join("resources").join("locales").join(&name))
+        .or_else(|_| std::fs::read_to_string(dir.join("locales").join(&name)))
+        .ok()?;
     let val: toml::Value = toml::from_str(&text).ok()?;
     val.get("module")?.get(field)?.as_str().map(str::to_string)
 }

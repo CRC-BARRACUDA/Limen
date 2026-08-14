@@ -107,3 +107,42 @@ fn elevation_is_declared_or_refused() {
         asking.summary()
     );
 }
+
+/// A module's card is translated from the module's own catalog, and modules keep
+/// that catalog in one of two places: `resources/locales/` once sources and data
+/// are separated, `locales/` before that. Both must be read.
+///
+/// The failure this guards against is quiet. A module's own screens embed their
+/// catalog at compile time, so moving the files leaves every screen it draws
+/// still translated while its card alone reverts to English — which looks like a
+/// missing translation rather than a lookup that stopped finding one.
+#[test]
+fn a_card_is_translated_from_either_place_a_module_keeps_its_catalog() {
+    let base = std::env::temp_dir().join("limen-manifest-locales-test");
+    let _ = std::fs::remove_dir_all(&base);
+
+    let catalog = "[module]\ntitle = \"Пила\"\ndescription = \"Опис українською\"\n";
+    for (case, sub) in [("new", "resources/locales"), ("old", "locales")] {
+        let dir = base.join(case);
+        let locales = dir.join(sub);
+        std::fs::create_dir_all(&locales).expect("make the catalog directory");
+        std::fs::write(locales.join("uk.toml"), catalog).expect("write the catalog");
+
+        assert_eq!(
+            localized_description(&dir, "uk").as_deref(),
+            Some("Опис українською"),
+            "{case} layout: the description was not found"
+        );
+        assert_eq!(
+            localized_title(&dir, "uk").as_deref(),
+            Some("Пила"),
+            "{case} layout: the title was not found"
+        );
+        // English is the manifest's own language, so there is nothing to look up.
+        assert_eq!(localized_description(&dir, "en"), None);
+        // A language the module does not speak leaves the manifest's default.
+        assert_eq!(localized_description(&dir, "fr"), None);
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
+}
