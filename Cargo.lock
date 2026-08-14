@@ -1960,6 +1960,7 @@ dependencies = [
  "anyhow",
  "clap",
  "limen-core",
+ "limen-proto",
  "limen-registry",
  "serde_json",
 ]

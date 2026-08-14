@@ -160,3 +160,89 @@ fn the_supervisor_stops_its_child_when_asked() {
     drop(link);
     sup_cleanup(&sock);
 }
+
+/// The command a supervisor is given is often not the one doing the work.
+///
+/// An export runs as `cmd /c <script>`, and the copying is done by the
+/// `wevtutil` and `reg save` that script launches. Ending only the interpreter
+/// leaves those running, so the stop looks like it did nothing — the visible
+/// work carries on, and the run that was cancelled goes on producing files.
+///
+/// So the whole tree has to go, not just the process we hold.
+#[cfg(windows)]
+#[test]
+fn stopping_ends_what_the_command_started_too() {
+    use limen_proto::NoConsole;
+
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    // A shell that outlives nothing of its own, holding a child that would.
+    let argv = vec![
+        format!(r"{root}\System32\cmd.exe"),
+        "/c".into(),
+        format!(r"{root}\System32\ping.exe -n 60 127.0.0.1"),
+    ];
+
+    let Some((wrapped, server, sock)) = supervised(9002, &argv, None) else {
+        eprintln!("skipped: no limen-cli beside the test binary — run `cargo build` first");
+        return;
+    };
+    let mut sup = std::process::Command::new(&wrapped[0])
+        .args(&wrapped[1..])
+        .no_console()
+        .spawn()
+        .expect("start the supervisor");
+    let link = sup_accept(server).expect("the supervisor connects back");
+
+    let mut line = String::new();
+    BufReader::new(link.try_clone().expect("clone the link"))
+        .read_line(&mut line)
+        .expect("read the pid it reports");
+    let shell: u32 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no pid in {line:?}"));
+
+    // The grandchild: what the shell started, which is the thing actually working.
+    let child_of = |pid: u32| -> Option<u32> {
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("(Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}').ProcessId"),
+            ])
+            .no_console()
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).split_whitespace().next()?.parse().ok()
+    };
+    let mut worker = None;
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Some(p) = child_of(shell) {
+            worker = Some(p);
+            break;
+        }
+    }
+    let worker = worker.expect("the shell never started anything to supervise");
+    assert!(still_running(worker), "the worker was not running to begin with");
+
+    drop(link);
+
+    let gone = |pid: u32| {
+        (0..60).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            !still_running(pid)
+        })
+    };
+    assert!(gone(shell), "the shell outlived the link: pid {shell}");
+    // The point: killing the shell alone used to leave this one copying.
+    assert!(
+        gone(worker),
+        "what the command started outlived the stop: pid {worker}"
+    );
+
+    let _ = sup.wait();
+    sup_cleanup(&sock);
+}
