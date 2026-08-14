@@ -17,13 +17,30 @@
 mod broker;
 mod connection;
 mod host;
+mod elevate;
+mod files;
+mod notify;
+mod sdk;
+mod spec;
+mod supervisor;
 mod module;
 mod native;
 pub mod runtimes;
 
 pub use broker::Broker;
 pub use connection::ModuleConnection;
-pub use host::{Host, Launch, ModuleSpec};
+pub use host::Host;
+pub use spec::{Launch, ModuleSpec};
+
+// Reachable so the supervisor's own test can start one and watch it die with
+// its parent — which is the whole behaviour, and cannot be observed from
+// outside. Hidden from the docs: these are internals the test is allowed to
+// see, not an offer.
+#[doc(hidden)]
+// The link and server types travel in these functions' signatures, so they are
+// as public as the functions are — otherwise callers (the supervisor test among
+// them) cannot name what they are handed.
+pub use supervisor::{sup_accept, sup_cleanup, supervised, SupLink, SupServer};
 pub use module::{stderr_logger, IncomingHandler, Logger, Module};
 pub use native::NativeModule;
 pub use runtimes::{Runtime, RuntimeStatus};

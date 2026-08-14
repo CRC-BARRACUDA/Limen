@@ -6,6 +6,7 @@ members = [
     "src/limen-core",
     "src/limen-registry",
     "src/limen-sdk-rust",
+    "src/limen-ui",
     "src/limen-cli",
     "src/limen-gui",
 ]
@@ -14,7 +15,7 @@ members = [
 # the executable's `modules/` directory.
 
 [workspace.package]
-version = "0.24.0"
+version = "0.25.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
@@ -34,3 +35,4 @@ limen-host = { path = "src/limen-host" }
 limen-core = { path = "src/limen-core" }
 limen-registry = { path = "src/limen-registry" }
 limen-sdk-rust = { path = "src/limen-sdk-rust" }
+limen-ui = { path = "src/limen-ui" }

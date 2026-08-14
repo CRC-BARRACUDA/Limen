@@ -68,7 +68,7 @@ pub fn run(socket: &str, cwd: Option<&str>, argv: &[String]) -> Result<i32> {
             let _ = asked;
             stop.store(true, Ordering::Relaxed);
             if let Ok(mut c) = child.lock() {
-                let _ = c.kill();
+                end_tree(&mut c);
             }
         });
     }
@@ -80,6 +80,44 @@ pub fn run(socket: &str, cwd: Option<&str>, argv: &[String]) -> Result<i32> {
         return Ok(143);
     }
     Ok(code)
+}
+
+/// End the child **and whatever it started**.
+///
+/// `Child::kill` ends one process, and the supervised command is very often not
+/// the one doing the work: an export runs as `cmd /c <script>`, and killing the
+/// interpreter leaves the `wevtutil` and `reg save` it launched still copying —
+/// so the stop appears to do nothing, because the visible work carries on.
+///
+/// Windows has no parent-child kill, so `taskkill /T` is what walks the tree.
+/// `/F` because a process being ended against its will does not cooperate by
+/// definition, and the direct kill stays as the fallback for when taskkill
+/// cannot be run at all.
+#[cfg(windows)]
+fn end_tree(child: &mut Child) {
+    use limen_proto::NoConsole;
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let killed = Command::new(format!(r"{root}\System32\taskkill.exe"))
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .no_console()
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !killed {
+        let _ = child.kill();
+    }
+}
+
+/// The same, where a signal is the only tool to hand.
+///
+/// This ends the command itself and not its grandchildren, which is the same
+/// gap Windows had — a shell's children outlive the shell here too. Left alone
+/// deliberately rather than changed blind: doing it properly means putting the
+/// command in its own process group at spawn and signalling the group, and that
+/// is a change to the platform this path is actually exercised on.
+#[cfg(unix)]
+fn end_tree(child: &mut Child) {
+    let _ = child.kill();
 }
 
 fn wait_for(child: &Arc<std::sync::Mutex<Child>>) -> Result<i32> {

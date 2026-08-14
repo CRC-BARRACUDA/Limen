@@ -12,6 +12,9 @@ path = "main.rs"
 [dependencies]
 limen-core = { workspace = true }
 limen-registry = { workspace = true }
+# For `NoConsole`. The supervisor is launched hidden by the GUI, so anything it
+# spawns must be created without a console of its own.
+limen-proto = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

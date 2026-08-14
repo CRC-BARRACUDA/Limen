@@ -58,7 +58,7 @@ static UK_TOML: &str = include_str!("../../resources/locales/uk.toml");
 static LOCALE: RwLock<Lang> = RwLock::new(Lang::En);
 
 /// The parsed catalogs, flattened to dotted keys, built once on first use.
-fn catalogs() -> &'static HashMap<Lang, HashMap<String, String>> {
+pub fn catalogs() -> &'static HashMap<Lang, HashMap<String, String>> {
     static C: OnceLock<HashMap<Lang, HashMap<String, String>>> = OnceLock::new();
     C.get_or_init(|| {
         let mut m = HashMap::new();
@@ -129,29 +129,4 @@ pub fn detect() -> Lang {
         }
     }
     Lang::En
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn catalogs_parse_and_fall_back() {
-        // A known key resolves in both languages…
-        set_locale(Lang::En);
-        assert_eq!(t("nav.modules"), "Modules");
-        set_locale(Lang::Uk);
-        assert_ne!(t("nav.modules"), "nav.modules"); // has a Ukrainian value
-        // …an unknown key falls through to the key itself.
-        assert_eq!(t("does.not.exist"), "does.not.exist");
-        set_locale(Lang::En);
-    }
-
-    #[test]
-    fn every_english_key_has_a_ukrainian_translation() {
-        let c = catalogs();
-        let (en, uk) = (&c[&Lang::En], &c[&Lang::Uk]);
-        let missing: Vec<&String> = en.keys().filter(|k| !uk.contains_key(*k)).collect();
-        assert!(missing.is_empty(), "Ukrainian catalog missing keys: {missing:?}");
-    }
 }

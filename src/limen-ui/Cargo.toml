@@ -1,0 +1,30 @@
+[package]
+name = "limen-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Limen's widget toolkit: the painted controls, the pop-up windows, and the module view renderer"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+limen-proto = { workspace = true }
+# The UI Kit gallery is built with the same builders a module uses, so it shows
+# what a module can actually ask for - and fails when the two disagree.
+limen-sdk-rust = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+eframe = { workspace = true }
+
+# Ask the OS where the cursor is during a file drag — winit reports the drag but
+# never its position, on any backend. X11 only; a Wayland session simply gets
+# `None` and falls back to focus-based drop routing.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

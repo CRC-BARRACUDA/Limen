@@ -1,35 +1,20 @@
-//! UI builder for native Rust modules — mirrors the scripted SDKs' builders so
-//! you don't hand-write the JSON view spec.
-//!
-//! ```ignore
-//! use limen_sdk_rust::ui::*;
-//!
-//! fn view() -> serde_json::Value {
-//!     window("Hello", vec![
-//!         label("Pick a name and greet.").weak(),
-//!         text("name").label("Name").placeholder("world"),
-//!         button("Greet", "demo.hello", "greet").primary(),
-//!     ])
-//! }
-//! ```
-//!
-//! Every constructor returns a [`Widget`]; fluent methods tweak it. [`window`]
-//! collects widgets into the final view value the GUI core renders.
+//! A widget under construction, and the menu items a table row can offer.
 
 use serde_json::{json, Map, Value};
+
 
 /// A single widget being built. Fluent setters return `Self`.
 #[derive(Debug, Clone)]
 pub struct Widget(Map<String, Value>);
 
 impl Widget {
-    fn of_kind(kind: &str) -> Self {
+    pub(crate) fn of_kind(kind: &str) -> Self {
         let mut m = Map::new();
         m.insert("kind".into(), json!(kind));
         Widget(m)
     }
 
-    fn set(mut self, key: &str, val: Value) -> Self {
+    pub(crate) fn set(mut self, key: &str, val: Value) -> Self {
         self.0.insert(key.into(), val);
         self
     }
@@ -85,6 +70,26 @@ impl Widget {
     pub fn placeholder(self, text: impl Into<String>) -> Self {
         self.set("placeholder", json!(text.into()))
     }
+    /// Carry a time of day as well as a day. Off by default: most questions
+    /// are about a day, and the ones that are not usually say so.
+    pub fn with_time(self) -> Self {
+        self.set("time", json!(true))
+    }
+
+    /// Mask what is typed, for a secret. Single-line only.
+    pub fn password(self) -> Self {
+        self.set("password", json!(true))
+    }
+
+    /// Draw the button, but do not let it be pressed.
+    ///
+    /// For a control that is real but not available yet — a Run with nothing
+    /// chosen to run on. Hiding it instead would make the screen change shape
+    /// as the form is filled in.
+    pub fn enabled(self, on: bool) -> Self {
+        self.set("enabled", json!(on))
+    }
+
     pub fn multiline(self) -> Self {
         self.set("multiline", json!(true))
     }
@@ -170,6 +175,23 @@ impl Widget {
     }
     /// Invoke `capability`.`method` when a row is double-clicked, opening the
     /// returned view in a new tab.
+    /// Call `capability`/`method` as soon as a [`select`] changes, so the module
+    /// can answer with a different screen rather than only recording the answer.
+    ///
+    /// The chosen value arrives in the params under the select's own id, along
+    /// with anything passed to [`Widget::args`].
+    pub fn on_change(self, capability: impl Into<String>, method: impl Into<String>) -> Self {
+        let args = self.0.get("args").cloned().unwrap_or_else(|| json!({}));
+        self.set(
+            "on_change",
+            json!({
+                "capability": capability.into(),
+                "method": method.into(),
+                "args": args,
+            }),
+        )
+    }
+
     pub fn on_activate(self, capability: impl Into<String>, method: impl Into<String>) -> Self {
         self.set(
             "on_activate",
@@ -197,7 +219,10 @@ impl Widget {
         )
     }
 
-    fn into_value(self) -> Value {
+    /// The JSON this widget becomes — what a module actually sends. Public
+    /// because a caller assembling a view by hand, or a test inspecting one,
+    /// has no other way to see it.
+    pub fn into_value(self) -> Value {
         Value::Object(self.0)
     }
 }
@@ -273,216 +298,4 @@ pub fn menu_item(
 /// A submenu entry containing `children` (e.g. Windows "Open path ▸").
 pub fn submenu(label: impl Into<String>, children: Vec<MenuItem>) -> MenuItem {
     MenuItem::new(label).submenu(children)
-}
-
-/// A text label.
-pub fn label(text: impl Into<String>) -> Widget {
-    Widget::of_kind("label").set("text", json!(text.into())).style("normal")
-}
-
-/// A text input; its `id` keys the value passed back in params.
-pub fn text(id: impl Into<String>) -> Widget {
-    Widget::of_kind("text").set("id", json!(id.into()))
-}
-
-/// A filesystem path input; its `id` keys the chosen path in params.
-///
-/// The user can type a path, drag a file onto the field, or press Browse for the
-/// OS picker. Chain [`Widget::directory`] to pick a folder instead, and
-/// [`Widget::browse`] to localize the button.
-pub fn file(id: impl Into<String>) -> Widget {
-    Widget::of_kind("file").set("id", json!(id.into()))
-}
-
-/// A dropdown; its `id` keys the value passed back in params.
-pub fn select(id: impl Into<String>, options: Vec<String>) -> Widget {
-    Widget::of_kind("select")
-        .set("id", json!(id.into()))
-        .set("options", json!(options))
-}
-
-/// An on/off checkbox; its `id` keys a boolean returned in params. Unchecked
-/// unless `.checked()` is called.
-pub fn checkbox(id: impl Into<String>, label: impl Into<String>) -> Widget {
-    Widget::of_kind("checkbox")
-        .set("id", json!(id.into()))
-        .set("label", json!(label.into()))
-}
-
-/// A button that invokes `capability`.`method` when clicked.
-pub fn button(text: impl Into<String>, capability: impl Into<String>, method: impl Into<String>) -> Widget {
-    Widget::of_kind("button")
-        .set("text", json!(text.into()))
-        .set("action", json!({ "capability": capability.into(), "method": method.into() }))
-}
-
-/// A horizontal divider.
-pub fn separator() -> Widget {
-    Widget::of_kind("separator")
-}
-
-/// Inside a [`row`], pushes everything after it to the right edge.
-///
-/// What makes a column of trailing buttons line up when the text before them
-/// does not — a delete button per row, say, which should sit at the same place
-/// on every line rather than wherever that line's text happened to end.
-pub fn spacer() -> Widget {
-    Widget::of_kind("spacer")
-}
-
-/// A progress step with an animated status icon — a loading spinner that morphs
-/// into a check when done. `state` is "pending", "loading", or "done".
-pub fn step(label: impl Into<String>, state: impl Into<String>) -> Widget {
-    Widget::of_kind("step")
-        .set("label", json!(label.into()))
-        .set("state", json!(state.into()))
-}
-
-/// A horizontal group of widgets.
-pub fn row(children: Vec<Widget>) -> Widget {
-    let kids: Vec<Value> = children.into_iter().map(Widget::into_value).collect();
-    Widget::of_kind("row").set("children", Value::Array(kids))
-}
-
-/// A table with a header row and string cells.
-pub fn table(columns: Vec<String>, rows: Vec<Vec<String>>) -> Widget {
-    Widget::of_kind("table")
-        .set("columns", json!(columns))
-        .set("rows", json!(rows))
-}
-
-/// A horizontal bar chart: `(label, value)` bars under an optional title.
-pub fn chart(title: impl Into<String>, data: Vec<(String, f64)>) -> Widget {
-    let bars: Vec<Value> = data
-        .into_iter()
-        .map(|(label, value)| json!({ "label": label, "value": value }))
-        .collect();
-    Widget::of_kind("chart")
-        .set("title", json!(title.into()))
-        .set("data", Value::Array(bars))
-}
-
-/// Build the final view value (a titled list of widgets) — return this from your
-/// module's `ui` method.
-pub fn window(title: impl Into<String>, widgets: Vec<Widget>) -> Value {
-    let ws: Vec<Value> = widgets.into_iter().map(Widget::into_value).collect();
-    json!({ "title": title.into(), "widgets": ws })
-}
-
-/// A view shown as a pop-up over the screen it came from, instead of replacing
-/// it.
-///
-/// The view underneath stays visible and stops responding, so settings or a
-/// sub-form can be put in front of the user without losing their place. Pop-ups
-/// stack — one can open another — and Esc always closes the top one, so give
-/// every pop-up a way out that the user would think to press.
-/// `id` is the pop-up's identity: returning a view with an id that is already
-/// open redraws that pop-up in place instead of opening another over it, so a
-/// form can refresh itself after every edit.
-/// A pop-up that asks for a particular size.
-///
-/// `width` is in points and the host clamps it to the window — a module cannot
-/// know how much room there is. Changing it between steps is the point: the
-/// pop-up animates from one size to the next, so a step that needs more room
-/// grows into it rather than reappearing at a different size.
-pub fn window_modal_sized(
-    title: impl Into<String>,
-    id: impl Into<String>,
-    width: f32,
-    widgets: Vec<Widget>,
-) -> Value {
-    let mut v = window_modal(title, id, widgets);
-    if let Value::Object(m) = &mut v {
-        m.insert("modal_width".into(), json!(width));
-    }
-    v
-}
-
-pub fn window_modal(
-    title: impl Into<String>,
-    id: impl Into<String>,
-    widgets: Vec<Widget>,
-) -> Value {
-    let mut v = window(title, widgets);
-    if let Value::Object(m) = &mut v {
-        m.insert("modal".into(), json!(id.into()));
-    }
-    v
-}
-
-/// A view that auto-invokes `capability`.`method` once, right after it renders
-/// (no user click). Use it to chain a multi-step flow — each step returns a view
-/// with the next step's `auto`, and the last step returns a plain [`window`] to
-/// stop. `args` are merged into the call.
-pub fn window_auto(
-    title: impl Into<String>,
-    widgets: Vec<Widget>,
-    capability: impl Into<String>,
-    method: impl Into<String>,
-    args: Value,
-) -> Value {
-    let mut v = window(title, widgets);
-    if let Value::Object(m) = &mut v {
-        m.insert(
-            "auto".into(),
-            json!({ "capability": capability.into(), "method": method.into(), "args": args }),
-        );
-    }
-    v
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builds_a_view_spec() {
-        let v = window(
-            "Hello",
-            vec![
-                label("hi").weak(),
-                text("name").label("Name").placeholder("world"),
-                separator(),
-                button("Go", "demo.hello", "greet").primary(),
-                table(vec!["A".into(), "B".into()], vec![vec!["1".into(), "2".into()]]),
-            ],
-        );
-        assert_eq!(v["title"], "Hello");
-        let ws = v["widgets"].as_array().unwrap();
-        assert_eq!(ws[0]["kind"], "label");
-        assert_eq!(ws[0]["style"], "weak");
-        assert_eq!(ws[1]["kind"], "text");
-        assert_eq!(ws[1]["label"], "Name");
-        assert_eq!(ws[3]["style"], "primary");
-        assert_eq!(ws[3]["action"]["method"], "greet");
-        assert_eq!(ws[4]["kind"], "table");
-        assert_eq!(ws[4]["columns"][1], "B");
-    }
-
-    #[test]
-    fn builds_an_interactive_table() {
-        let t = table(vec!["Name".into()], vec![vec!["hub".into()]])
-            .row_ids(vec!["usb:0bda".into()])
-            .on_activate("devices.local", "about")
-            .row_menu(vec![
-                menu_item("About", "devices.local", "about").open_in_tab(),
-                submenu(
-                    "Open path",
-                    vec![menu_item("File Explorer", "devices.local", "open_path")
-                        .args(json!({ "via": "explorer" }))],
-                ),
-            ])
-            .into_value();
-
-        assert_eq!(t["row_ids"][0], "usb:0bda");
-        assert_eq!(t["on_activate"]["action"]["method"], "about");
-        assert_eq!(t["on_activate"]["open_in_tab"], true);
-        assert_eq!(t["menu"][0]["label"], "About");
-        assert_eq!(t["menu"][0]["action"]["method"], "about");
-        assert_eq!(t["menu"][0]["open_in_tab"], true);
-        // Submenu: no action, has children carrying per-item args.
-        assert_eq!(t["menu"][1]["label"], "Open path");
-        assert_eq!(t["menu"][1]["children"][0]["args"]["via"], "explorer");
-        assert_eq!(t["menu"][1]["children"][0]["action"]["method"], "open_path");
-    }
 }

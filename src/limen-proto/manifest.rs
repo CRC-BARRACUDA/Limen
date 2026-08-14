@@ -254,13 +254,23 @@ impl Manifest {
 }
 
 /// A `[module]` field (`title` / `description`) translated for `lang`, read from
-/// `<dir>/locales/<lang>.toml`. `None` for `"en"` (the manifest's own language)
-/// or when no such file/key exists — the caller then keeps the manifest default.
+/// the module's own catalog. `None` for `"en"` (the manifest's own language) or
+/// when no such file/key exists — the caller then keeps the manifest default.
+///
+/// Two places, because modules keep their catalogs in either: `resources/locales/`
+/// is where a module that separates sources from data puts them, and `locales/`
+/// is where the earlier ones do. A module's *own* screens are unaffected by the
+/// difference — it embeds its catalog with `include_str!` at compile time — so a
+/// module that moved its files would go on translating everything it draws while
+/// its card silently reverted to English, which is a confusing way to find out.
 fn localized_module_field(dir: &Path, lang: &str, field: &str) -> Option<String> {
     if lang == "en" {
         return None;
     }
-    let text = std::fs::read_to_string(dir.join("locales").join(format!("{lang}.toml"))).ok()?;
+    let name = format!("{lang}.toml");
+    let text = std::fs::read_to_string(dir.join("resources").join("locales").join(&name))
+        .or_else(|_| std::fs::read_to_string(dir.join("locales").join(&name)))
+        .ok()?;
     let val: toml::Value = toml::from_str(&text).ok()?;
     val.get("module")?.get(field)?.as_str().map(str::to_string)
 }
@@ -275,121 +285,4 @@ pub fn localized_description(dir: &Path, lang: &str) -> Option<String> {
 /// manifest's `display_name`, then its `name`).
 pub fn localized_title(dir: &Path, lang: &str) -> Option<String> {
     localized_module_field(dir, lang, "title")
-}
-
-#[cfg(test)]
-mod elevate_tests {
-    use super::*;
-
-    /// Elevation is opt-in and must be visible. A module that never mentions it
-    /// cannot ask for root, and one that does has to show up on the consent
-    /// screen saying so — otherwise the permission is a formality.
-    #[test]
-    fn elevation_is_declared_or_refused() {
-        let silent: Permissions = toml::from_str("subprocess = true").unwrap();
-        assert!(!silent.elevate, "not asking is the default");
-        assert!(!silent.summary().iter().any(|p| p.contains("administrator")));
-
-        let asking: Permissions = toml::from_str("subprocess = true\nelevate = true").unwrap();
-        assert!(asking.elevate);
-        assert!(asking.sensitive(), "it must require consent");
-        assert!(
-            asking
-                .summary()
-                .iter()
-                .any(|p| p == "run commands as administrator"),
-            "and say so in words the consent screen shows: {:?}",
-            asking.summary()
-        );
-    }
-
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_a_full_manifest() {
-        let m = Manifest::from_toml_str(
-            r#"
-            [module]
-            name = "usb"
-            version = "0.1.0"
-            language = "python"
-            entry = "main.py"
-
-            [provides]
-            capabilities = ["usb.enumerate"]
-
-            [requires.capabilities]
-            "crowdstrike.rtr" = ">=1.0"
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(m.module.name, "usb");
-        assert_eq!(m.module.language, Language::Python);
-        assert_eq!(m.module.abi, Abi::Rpc); // defaulted
-        assert_eq!(m.provides.capabilities, vec!["usb.enumerate"]);
-        assert_eq!(m.requires.capabilities["crowdstrike.rtr"], ">=1.0");
-        // No [permissions] table => nothing sensitive.
-        assert!(!m.permissions.sensitive());
-        // Absent `tags` is an empty list, never an error — every manifest
-        // predating the field must still parse.
-        assert!(m.module.tags.is_empty());
-    }
-
-    /// Tags are optional metadata the module manager groups and filters by.
-    #[test]
-    fn parses_tags() {
-        let m = Manifest::from_toml_str(
-            r#"
-            [module]
-            name = "usb"
-            version = "0.1.0"
-            language = "python"
-            entry = "main.py"
-            tags = ["security", "inventory"]
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(m.module.tags, vec!["security", "inventory"]);
-    }
-
-    #[test]
-    fn parses_permissions_and_flags_sensitive() {
-        let m = Manifest::from_toml_str(
-            r#"
-            [module]
-            name = "crowdstrike"
-            version = "0.1.0"
-            language = "native"
-            entry = "crowdstrike"
-            abi = "native"
-
-            [permissions]
-            run_hosts = true
-            network = ["api.crowdstrike.com"]
-            "#,
-        )
-        .unwrap();
-
-        assert!(m.permissions.run_hosts);
-        assert!(m.permissions.sensitive());
-        assert!(m.permissions.summary().iter().any(|s| s.contains("fleet hosts")));
-    }
-
-    #[test]
-    fn admin_is_sensitive_and_listed_first() {
-        let m = Manifest::from_toml_str(
-            "[module]\nname=\"a\"\nversion=\"0.1.0\"\nlanguage=\"python\"\nentry=\"m.py\"\n\
-             [permissions]\nadmin = true\n",
-        )
-        .unwrap();
-        assert!(m.permissions.admin);
-        assert!(m.permissions.sensitive());
-        assert_eq!(m.permissions.summary().first().map(String::as_str), Some("administrator privileges"));
-    }
 }

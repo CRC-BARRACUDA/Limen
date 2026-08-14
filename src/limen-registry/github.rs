@@ -13,25 +13,14 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Command;
 use std::sync::RwLock;
 
 use anyhow::{bail, Context, Result};
 use limen_proto::NoConsole;
 use serde::{Deserialize, Serialize};
 
-/// An optional GitHub token applied to every registry request when set — raising
-/// the rate limit from 60/hour (unauthenticated, per IP) to 5,000/hour and making
-/// conditional (304) requests free. Set from settings at startup and whenever an
-/// administrator changes it in Developer mode; `None` = unauthenticated (default).
-static TOKEN: RwLock<Option<String>> = RwLock::new(None);
 
-/// Set (or clear) the GitHub token used for registry requests. A blank token
-/// clears it — back to the unauthenticated default.
-pub fn set_token(token: Option<String>) {
-    let cleaned = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    *TOKEN.write().unwrap() = cleaned;
-}
 
 /// Verify a token by making one authenticated request (`GET /rate_limit`, which
 /// needs no scope). `Ok(())` if GitHub accepts it (HTTP 200); `Err(reason)` if it
@@ -42,17 +31,11 @@ pub fn test_token(token: &str) -> Result<(), String> {
     if t.is_empty() {
         return Err("empty token".into());
     }
-    let out = Command::new("curl")
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sS", "--max-time", "15"]);
+    crate::http::with_headers(&mut cmd, Some("application/vnd.github+json"), Some(t));
+    let out = cmd
         .args([
-            "-sS",
-            "--max-time",
-            "15",
-            "-H",
-            "User-Agent: limen",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            &format!("Authorization: Bearer {t}"),
             "-w",
             "\n@@LIMEN_META@@ %{http_code}",
             "https://api.github.com/rate_limit",
@@ -75,20 +58,6 @@ pub fn test_token(token: &str) -> Result<(), String> {
             Err(format!("token rejected (HTTP {code})"))
         }
     }
-}
-
-/// A registry `curl` GET: the given flags, the standard `User-Agent`, an optional
-/// `Accept`, an `Authorization: Bearer` header when a token is set, then the URL.
-fn curl_get(flags: &[&str], accept: Option<&str>, url: &str) -> std::io::Result<Output> {
-    let mut cmd = Command::new("curl");
-    cmd.args(flags).args(["-H", "User-Agent: limen"]);
-    if let Some(a) = accept {
-        cmd.arg("-H").arg(format!("Accept: {a}"));
-    }
-    if let Some(t) = TOKEN.read().unwrap().as_deref() {
-        cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
-    }
-    cmd.arg(url).no_console().output()
 }
 
 // --------------------------------------------------------------------------- //
@@ -140,13 +109,8 @@ fn conditional_get(flags: &[&str], accept: Option<&str>, url: &str) -> Option<St
     let prev = cache.get(url).cloned();
 
     let mut cmd = Command::new("curl");
-    cmd.args(flags).args(["-H", "User-Agent: limen"]);
-    if let Some(a) = accept {
-        cmd.arg("-H").arg(format!("Accept: {a}"));
-    }
-    if let Some(t) = TOKEN.read().unwrap().as_deref() {
-        cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
-    }
+    cmd.args(flags);
+    crate::http::with_headers(&mut cmd, accept, crate::http::token().as_deref());
     if let Some(p) = &prev
         && !p.etag.is_empty()
     {
@@ -354,7 +318,7 @@ fn fetch_locale_meta(
     let get = || -> Option<(Option<String>, Option<String>)> {
         let url =
             format!("https://raw.githubusercontent.com/{org}/{repo}/{branch}/locales/{lang}.toml");
-        let out = curl_get(&["-fsSL"], None, &url).ok()?;
+        let out = crate::http::get(&["-fsSL"], None, &url).ok()?;
         if !out.status.success() {
             return None;
         }
@@ -374,7 +338,7 @@ fn fetch_manifest(org: &str, repo: &str, branch: &str) -> Option<limen_proto::Ma
     let url = format!("https://raw.githubusercontent.com/{org}/{repo}/{branch}/limen.toml");
     // raw.githubusercontent is a CDN (not the rate-limited API); auth is harmless
     // and lets private-repo manifests resolve too.
-    let out = curl_get(&["-fsSL"], None, &url).ok()?;
+    let out = crate::http::get(&["-fsSL"], None, &url).ok()?;
     if !out.status.success() {
         return None;
     }

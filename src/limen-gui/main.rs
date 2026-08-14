@@ -2,17 +2,10 @@
 // (Debug keeps the console so the stderr host/module logs stay visible.)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Limen desktop GUI entry point.
-//!
-//! Discovers modules the same way the CLI does (configured search paths plus a
-//! local `./modules` for development), then runs the egui app. All engine work
-//! is on a background thread — see [`worker`].
+//! Limen desktop GUI entry point: window options, startup failures, and where
+//! to look for modules. Everything else is the library beside it.
 
-mod app;
-mod cursor;
-mod i18n;
-mod ui;
-mod worker;
+use limen_gui::{app, i18n, ui};
 
 use std::path::PathBuf;
 
@@ -43,6 +36,10 @@ fn prefer_x11() {}
 
 fn main() -> eframe::Result<()> {
     prefer_x11();
+    // The toolkit has strings of its own — month names, the words on pop-up
+    // buttons — but no catalogs and no opinion about language. It asks through
+    // this, and the application answers.
+    ui::set_translator(i18n::t);
     let dirs = resolve_search_dirs();
 
     let mut viewport = egui::ViewportBuilder::default()
