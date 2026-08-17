@@ -41,6 +41,17 @@ impl Tab {
 /// dropped; a `to` of `None` means the tab being opened is not a module tab and
 /// starts empty — otherwise the last module's view would show behind an About
 /// page.
+/// Whether a restored tab picks its chain back up.
+///
+/// Resuming exists for a *loop* — a scan being polled, an install stepping
+/// through — which a restored snapshot has stopped running. A step that opens a
+/// tab is not a loop but a handover, and it has already happened: run again on
+/// every return to the tab, it would open another copy of the same report each
+/// time the user came back.
+pub fn resumes(auto: &ui::AutoAction) -> bool {
+    !auto.open_in_tab
+}
+
 /// Where the answer to a click belongs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {

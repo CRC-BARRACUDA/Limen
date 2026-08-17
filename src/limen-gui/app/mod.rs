@@ -476,6 +476,9 @@ impl LimenApp {
     /// mid-progress on return.
     pub(crate) fn resume_page(&mut self) {
         if let Some(a) = self.view.as_ref().and_then(|v| v.auto.clone()) {
+            if !resumes(&a) {
+                return;
+            }
             self.dispatch(a.into_invoke());
         }
     }

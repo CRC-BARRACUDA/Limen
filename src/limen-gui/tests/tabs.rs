@@ -137,3 +137,58 @@ fn a_click_inside_a_tab_is_answered_in_that_tab() {
     );
     assert_eq!(answer_goes_to(None, false), Answer::Screen);
 }
+
+/// A long job's chain polls in the tab that started it, and what it ends with is
+/// a result rather than another step — so a module can ask for that last answer
+/// to open in its own tab, leaving the screen that ran the job ready for the
+/// next one.
+#[test]
+fn an_auto_action_can_hand_its_result_to_a_new_tab() {
+    let poll: ui::View = serde_json::from_str(
+        r#"{"title":"Scanning","widgets":[],
+            "auto":{"capability":"scan.ioc","method":"s_poll","args":{}}}"#,
+    )
+    .unwrap();
+    let auto = poll.auto.expect("the chain continues");
+    assert!(
+        !auto.clone().into_invoke().open_in_tab,
+        "a step of the chain stays where the chain is"
+    );
+
+    let done: ui::View = serde_json::from_str(
+        r#"{"title":"Loki","widgets":[],
+            "auto":{"capability":"scan.ioc","method":"report_tab","args":{},
+                    "open_in_tab":true}}"#,
+    )
+    .unwrap();
+    let auto = done.auto.expect("one last step");
+    let invoke = auto.into_invoke();
+    assert!(invoke.open_in_tab, "the report opens beside the scan");
+    assert_eq!(invoke.action.method, "report_tab");
+}
+
+/// Coming back to a tab restarts the loop it was in the middle of — that is
+/// what resuming is for. It must not restart a handover: the step that opened
+/// the scan report already ran, and running it again on every visit would open
+/// another copy of the same report each time.
+#[test]
+fn returning_to_a_tab_resumes_a_loop_but_not_a_handover() {
+    let auto = |json: &str| {
+        serde_json::from_str::<ui::View>(json)
+            .unwrap()
+            .auto
+            .expect("an auto action")
+    };
+    let polling = auto(
+        r#"{"title":"Scanning","widgets":[],
+            "auto":{"capability":"scan.ioc","method":"s_poll","args":{}}}"#,
+    );
+    assert!(resumes(&polling), "a scan left running has to be picked up");
+
+    let handover = auto(
+        r#"{"title":"Loki","widgets":[],
+            "auto":{"capability":"scan.ioc","method":"report_tab","args":{},
+                    "open_in_tab":true}}"#,
+    );
+    assert!(!resumes(&handover), "the report was already handed over");
+}
