@@ -113,3 +113,27 @@ fn a_reload_clears_what_every_tab_was_showing() {
     let after = swap_page(onscreen, &mut stored, None, Some("loki"));
     assert!(after.view.is_none(), "nothing survives a reload");
 }
+
+/// A view opened in a tab is interactive like any other, and the module answers
+/// a click with the next screen. That screen belongs in the tab the click was
+/// made in — sent to the module's own tab instead, it arrives behind the user
+/// while the tab they are looking at goes on showing what they clicked out of.
+#[test]
+fn a_click_inside_a_tab_is_answered_in_that_tab() {
+    let detail = Tab::Detail { id: 7 };
+    assert_eq!(answer_goes_to(Some(&detail), false), Answer::SameTab(7));
+
+    // Asking for a tab still opens a new one, wherever it was asked from.
+    assert_eq!(answer_goes_to(Some(&detail), true), Answer::NewTab);
+    assert_eq!(
+        answer_goes_to(Some(&Tab::Module("loki".into())), true),
+        Answer::NewTab
+    );
+
+    // And a click on the module's own screen is answered there.
+    assert_eq!(
+        answer_goes_to(Some(&Tab::Module("loki".into())), false),
+        Answer::Screen
+    );
+    assert_eq!(answer_goes_to(None, false), Answer::Screen);
+}

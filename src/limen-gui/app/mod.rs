@@ -977,27 +977,44 @@ impl LimenApp {
         let params = serde_json::Value::Object(params);
         let ui::Action { capability, method } = invoke.action.clone();
 
-        if invoke.open_in_tab {
+        match answer_goes_to(self.active_tab().as_ref(), invoke.open_in_tab) {
             // Open (or focus) a fresh detail tab and load it in the background.
-            let id = self.next_detail_id;
-            self.next_detail_id += 1;
-            self.detail_tabs.insert(
-                id,
-                DetailTab {
-                    title: method.clone(),
-                    busy: true,
-                    ..Default::default()
-                },
-            );
-            self.open_tab(Tab::Detail { id });
-            self.status = format!("{capability}.{method}");
-            self.worker.send(Command::Run {
-                tag: RunTag::Detail { id },
-                capability,
-                method,
-                params,
-            });
-            return;
+            Answer::NewTab => {
+                let id = self.next_detail_id;
+                self.next_detail_id += 1;
+                self.detail_tabs.insert(
+                    id,
+                    DetailTab {
+                        title: method.clone(),
+                        busy: true,
+                        ..Default::default()
+                    },
+                );
+                self.open_tab(Tab::Detail { id });
+                self.status = format!("{capability}.{method}");
+                self.worker.send(Command::Run {
+                    tag: RunTag::Detail { id },
+                    capability,
+                    method,
+                    params,
+                });
+                return;
+            }
+            // A button pressed *inside* a tab answers into that tab.
+            Answer::SameTab(id) => {
+                if let Some(tab) = self.detail_tabs.get_mut(&id) {
+                    tab.busy = true;
+                }
+                self.status = format!("{capability}.{method}");
+                self.worker.send(Command::Run {
+                    tag: RunTag::Detail { id },
+                    capability,
+                    method,
+                    params,
+                });
+                return;
+            }
+            Answer::Screen => {}
         }
 
         self.busy = true;
