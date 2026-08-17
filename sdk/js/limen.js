@@ -107,6 +107,24 @@ class Host {
   notify(title, body = "", urgency = "normal") {
     this._m._request("host.notify", { title: String(title), body: String(body), urgency });
   }
+  // Show a native "open file" dialog on the host; returns the chosen path, or
+  // null if the user cancelled.
+  pickFile() {
+    const r = this._m._request("host.pick_file", null);
+    return r && typeof r.path === "string" ? r.path : null;
+  }
+  // Show a native "save as" dialog, opening on `suggested` as the file name;
+  // returns the chosen path, or null if the user cancelled.
+  //
+  // Where a file the module produces should land is the user's to say, in the
+  // file manager they already know — not a directory the module picked for
+  // them. Null also covers a machine with no dialog to show, so a caller with
+  // somewhere sensible to fall back to should say so rather than treat it as a
+  // refusal.
+  saveFile(suggested = "") {
+    const r = this._m._request("host.save_file", { name: String(suggested) });
+    return r && typeof r.path === "string" ? r.path : null;
+  }
   log(message) {
     this._m._request("host.log", String(message));
   }

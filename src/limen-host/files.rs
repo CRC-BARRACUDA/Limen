@@ -62,6 +62,91 @@ pub(crate) fn pick_file_native() -> Option<String> {
     None
 }
 
+/// Show a native "save as" dialog and return the chosen path as
+/// `{ "path": "..." }`, or `Null` if the user cancelled.
+///
+/// The counterpart of [`host_pick_file`], and needed for the same reason: a
+/// module that writes a file the user did not choose a place for is a module
+/// that decides, on its own, where things land on their disk. `params`:
+/// `{ "name": "suggested-file-name" }`.
+pub(crate) fn host_save_file(params: Value) -> Value {
+    let suggested = params.get("name").and_then(Value::as_str).unwrap_or("");
+    match save_file_native(suggested) {
+        Some(path) if !path.is_empty() => json!({ "path": path }),
+        _ => Value::Null,
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn save_file_native(suggested: &str) -> Option<String> {
+    let mut args = vec![
+        "--file-selection".to_string(),
+        "--save".to_string(),
+        // The dialog asks before replacing something; the module is not the
+        // place to discover a name is taken.
+        "--confirm-overwrite".to_string(),
+        "--title=Save as".to_string(),
+    ];
+    if !suggested.is_empty() {
+        args.push(format!("--filename={suggested}"));
+    }
+    let out = std::process::Command::new("zenity").args(&args).output().ok()?;
+    if !out.status.success() {
+        return None; // non-zero on cancel
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn save_file_native(suggested: &str) -> Option<String> {
+    // The name is quoted into the script, so a quote in it would end the string
+    // early — an attachment names itself, and that name comes from the message.
+    let safe = suggested.replace('\\', "").replace('"', "");
+    let script = if safe.is_empty() {
+        "POSIX path of (choose file name with prompt \"Save as\")".to_string()
+    } else {
+        format!("POSIX path of (choose file name with prompt \"Save as\" default name \"{safe}\")")
+    };
+    let out = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // user cancelled
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn save_file_native(suggested: &str) -> Option<String> {
+    use limen_proto::NoConsole;
+    // Single-quoted into PowerShell, where the escape for one is doubling it.
+    let safe = suggested.replace('\'', "''");
+    let ps = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $d = New-Object System.Windows.Forms.SaveFileDialog; \
+         $d.FileName = '{safe}'; \
+         $d.Filter = 'All files (*.*)|*.*'; \
+         $d.OverwritePrompt = $true; \
+         if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) \
+           {{ [Console]::Out.Write($d.FileName) }}"
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", &ps])
+        .no_console()
+        .output()
+        .ok()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub(crate) fn save_file_native(_suggested: &str) -> Option<String> {
+    None
+}
+
 /// Open something in the OS on a module's behalf (e.g. the devices module's
 /// "Open path" / "Registry" / "Device Manager"). `params`:
 /// `{ "target": "path"|"url"|"registry"|"device_manager", "value": "..." }`.
