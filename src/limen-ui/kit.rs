@@ -124,7 +124,7 @@ pub fn demo_view() -> Value {
                 menu_item("Open", "ui.kit", "open"),
                 menu_item("Open in a tab", "ui.kit", "open").open_in_tab(),
                 submenu(
-                    "More ▸",
+                    "More",
                     vec![
                         menu_item("Copy the rule", "ui.kit", "copy"),
                         menu_item("Copy the artefact", "ui.kit", "copy"),

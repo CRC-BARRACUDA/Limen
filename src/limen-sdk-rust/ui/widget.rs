@@ -295,7 +295,8 @@ pub fn menu_item(
     m
 }
 
-/// A submenu entry containing `children` (e.g. Windows "Open path ▸").
+/// A submenu entry containing `children` (e.g. a Windows "Open path" submenu).
+/// The host draws the arrow that says it opens one; the label should not.
 pub fn submenu(label: impl Into<String>, children: Vec<MenuItem>) -> MenuItem {
     MenuItem::new(label).submenu(children)
 }

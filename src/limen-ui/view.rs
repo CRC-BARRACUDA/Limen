@@ -112,7 +112,7 @@ pub struct RowAction {
 }
 
 /// One right-click menu entry on a table row. A leaf carries an `action`; an
-/// entry with `children` is a submenu (e.g. the Windows "Open path ▸" submenu).
+/// entry with `children` is a submenu (e.g. the Windows "Open path" submenu).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MenuItem {
     pub label: String,

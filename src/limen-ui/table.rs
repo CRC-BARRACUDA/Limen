@@ -220,16 +220,8 @@ pub fn render_interactive_table(
             }
             let row_id = row_ids.get(r).cloned().unwrap_or_default();
             // A non-empty per-row menu overrides the shared one for this row.
-            let this_menu: &[MenuItem] = match row_menus.get(r) {
-                Some(m) if !m.is_empty() => m,
-                _ => menu,
-            };
-            if !this_menu.is_empty() {
-                let mut picked: Option<Invoke> = None;
-                resp.context_menu(|ui| render_row_menu(ui, this_menu, &row_id, &mut picked));
-                if picked.is_some() {
-                    *clicked = picked;
-                }
+            if !menu_for(menu, row_menus, r).is_empty() && resp.secondary_clicked() {
+                open_row_menu(ui, id, r);
             }
             if let Some(act) = on_activate
                 && resp.double_clicked()
@@ -246,38 +238,10 @@ pub fn render_interactive_table(
                 });
             }
         }
-    });
-}
 
-/// Build a table row's right-click menu, recursing into submenus. Writes the
-/// chosen [`Invoke`] (with the row's `id` merged in) into `out`.
-pub fn render_row_menu(ui: &mut egui::Ui, items: &[MenuItem], row_id: &str, out: &mut Option<Invoke>) {
-    for item in items {
-        if !item.children.is_empty() {
-            let mut sub: Option<Invoke> = None;
-            ui.menu_button(&item.label, |ui| {
-                render_row_menu(ui, &item.children, row_id, &mut sub)
-            });
-            if sub.is_some() {
-                *out = sub;
-                ui.close_menu();
-            }
-        } else if let Some(action) = &item.action {
-            if ui.button(&item.label).clicked() {
-                let mut args = item.args.clone();
-                args.insert("id".into(), Value::String(row_id.to_string()));
-                *out = Some(Invoke {
-                    dismiss: false,
-                    // A menu entry can carry a question just as a button can.
-                    confirm: item.confirm.clone(),
-                    action: action.clone(),
-                    args,
-                    open_in_tab: item.open_in_tab,
-                });
-                ui.close_menu();
-            }
-        } else {
-            ui.label(&item.label);
-        }
-    }
+        // The menu stands over the rows, so it is drawn after them — and it
+        // outlives the right-click that opened it, being drawn on every frame
+        // until it has finished animating away. See [`row_menu_layer`].
+        row_menu_layer(ui, id, menu, row_menus, row_ids, clicked);
+    });
 }
