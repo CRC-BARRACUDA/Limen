@@ -795,21 +795,33 @@ impl LimenApp {
                     }
                     RunTag::Detail { id } => {
                         // Fill the detail tab, if it's still open.
-                        if let Some(tab) = self.detail_tabs.get_mut(&id) {
-                            tab.busy = false;
-                            match result {
-                                Ok(v) => match serde_json::from_value::<ui::View>(v) {
-                                    Ok(view) => {
+                        let Some(tab) = self.detail_tabs.get_mut(&id) else {
+                            return;
+                        };
+                        tab.busy = false;
+                        match result {
+                            Ok(v) => match serde_json::from_value::<ui::View>(v) {
+                                Ok(view) => {
+                                    tab.error = None;
+                                    // A view that says it is a pop-up is one
+                                    // wherever it was asked for. Put in place of
+                                    // the tab's screen it would replace the very
+                                    // thing it is meant to stand over — a row's
+                                    // details covering the table they came from.
+                                    // The pop-up layer is drawn over whichever
+                                    // tab is showing, so it belongs there.
+                                    if view.modal.is_some() {
+                                        self.accept_view(view);
+                                    } else {
                                         if !view.title.is_empty() {
                                             tab.title = view.title.clone();
                                         }
                                         tab.view = Some(view);
-                                        tab.error = None;
                                     }
-                                    Err(e) => tab.error = Some(format!("invalid view: {e}")),
-                                },
-                                Err(e) => tab.error = Some(format!("error: {e}")),
-                            }
+                                }
+                                Err(e) => tab.error = Some(format!("invalid view: {e}")),
+                            },
+                            Err(e) => tab.error = Some(format!("error: {e}")),
                         }
                     }
                 },
