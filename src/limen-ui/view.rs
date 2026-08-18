@@ -84,10 +84,19 @@ pub struct AutoAction {
     /// Extra params merged into the call.
     #[serde(default)]
     pub args: serde_json::Map<String, Value>,
+    /// Put what comes back in a tab of its own, instead of on this screen.
+    ///
+    /// The chain that polls a long job runs in the tab that started it, and what
+    /// it ends with is often not another step but a *result* — a scan report, a
+    /// generated document. That belongs beside the screen that produced it
+    /// rather than on top of it: the tab that ran the job goes back to being
+    /// ready for the next one, and the result keeps its own place.
+    #[serde(default)]
+    pub open_in_tab: bool,
 }
 
 impl AutoAction {
-    /// The [`Invoke`] this auto-action dispatches (always in the same tab).
+    /// The [`Invoke`] this auto-action dispatches.
     pub fn into_invoke(self) -> Invoke {
         Invoke {
             dismiss: false,
@@ -97,7 +106,7 @@ impl AutoAction {
                 method: self.method,
             },
             args: self.args,
-            open_in_tab: false,
+            open_in_tab: self.open_in_tab,
         }
     }
 }
@@ -112,7 +121,7 @@ pub struct RowAction {
 }
 
 /// One right-click menu entry on a table row. A leaf carries an `action`; an
-/// entry with `children` is a submenu (e.g. the Windows "Open path ▸" submenu).
+/// entry with `children` is a submenu (e.g. the Windows "Open path" submenu).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MenuItem {
     pub label: String,

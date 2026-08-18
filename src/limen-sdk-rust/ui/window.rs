@@ -74,6 +74,53 @@ pub fn window_auto(
     v
 }
 
+/// [`window_auto`], with what comes back opening in a tab of its own.
+///
+/// For the end of a chain rather than the middle of one: a long job's last step
+/// is often a *result* — a scan report, a generated document — and this leaves it
+/// beside the screen that produced it instead of replacing that screen with it.
+/// The tab that ran the job goes back to being ready for the next one.
+///
+/// Once, not on every render: the view carrying this opens a tab each time the
+/// host accepts it, so a module that returns it from `ui` opens another one every
+/// time the user comes back to that tab.
+pub fn window_auto_in_tab(
+    title: impl Into<String>,
+    widgets: Vec<Widget>,
+    capability: impl Into<String>,
+    method: impl Into<String>,
+    args: Value,
+) -> Value {
+    let mut v = window_auto(title, widgets, capability, method, args);
+    if let Some(auto) = v.get_mut("auto").and_then(Value::as_object_mut) {
+        auto.insert("open_in_tab".into(), json!(true));
+    }
+    v
+}
+
+/// Attach [`window_auto_in_tab`]'s auto-action to a view that is already built —
+/// a screen assembled elsewhere, which now has a result to hand over.
+pub fn auto_in_tab(
+    view: Value,
+    capability: impl Into<String>,
+    method: impl Into<String>,
+    args: Value,
+) -> Value {
+    let mut v = view;
+    if let Value::Object(m) = &mut v {
+        m.insert(
+            "auto".into(),
+            json!({
+                "capability": capability.into(),
+                "method": method.into(),
+                "args": args,
+                "open_in_tab": true,
+            }),
+        );
+    }
+    v
+}
+
 /// Attach a passing notice to a view: what just happened, said in the corner
 /// when this view arrives.
 ///

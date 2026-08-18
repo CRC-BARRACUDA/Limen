@@ -41,6 +41,43 @@ impl Tab {
 /// dropped; a `to` of `None` means the tab being opened is not a module tab and
 /// starts empty — otherwise the last module's view would show behind an About
 /// page.
+/// Whether a restored tab picks its chain back up.
+///
+/// Resuming exists for a *loop* — a scan being polled, an install stepping
+/// through — which a restored snapshot has stopped running. A step that opens a
+/// tab is not a loop but a handover, and it has already happened: run again on
+/// every return to the tab, it would open another copy of the same report each
+/// time the user came back.
+pub fn resumes(auto: &ui::AutoAction) -> bool {
+    !auto.open_in_tab
+}
+
+/// Where the answer to a click belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// A tab of its own — the click asked for one.
+    NewTab,
+    /// The tab the click was made in.
+    SameTab(u64),
+    /// The module's own screen.
+    Screen,
+}
+
+/// Which of those, for a click made on `active`.
+///
+/// A view opened in a tab is interactive like any other — a row's details, a
+/// form's buttons — and a module answers a click with the next screen. Sent to
+/// the module's own tab, that screen arrived somewhere behind the user, while
+/// the tab they were looking at went on showing the thing they had just clicked
+/// out of.
+pub fn answer_goes_to(active: Option<&Tab>, open_in_tab: bool) -> Answer {
+    match (open_in_tab, active) {
+        (true, _) => Answer::NewTab,
+        (false, Some(Tab::Detail { id })) => Answer::SameTab(*id),
+        (false, _) => Answer::Screen,
+    }
+}
+
 pub fn swap_page(
     current: ModulePage,
     stored: &mut HashMap<String, ModulePage>,

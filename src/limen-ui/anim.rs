@@ -35,8 +35,14 @@ pub fn smoothstep(t: f32) -> f32 {
 /// Eased 0→1 for a boolean (hover, selection, …) keyed by `id`. Snaps to the
 /// target when animations are off. The building block for the rest.
 pub fn anim_bool(ui: &egui::Ui, id: egui::Id, on: bool, time: f32) -> f32 {
+    anim_bool_ctx(ui.ctx(), id, on, time)
+}
+
+/// [`anim_bool`] for something that has no `Ui` of its own — an overlay drawn
+/// straight onto the context, a menu whose panels are areas rather than widgets.
+pub fn anim_bool_ctx(ctx: &egui::Context, id: egui::Id, on: bool, time: f32) -> f32 {
     if animations_enabled() {
-        ui.ctx().animate_bool_with_time(id, on, time)
+        ctx.animate_bool_with_time(id, on, time)
     } else {
         on as u8 as f32
     }
@@ -157,6 +163,15 @@ pub fn animate_back(ctx: &egui::Context, id: egui::Id, target: f32, duration: f3
 /// reads as a glitch. `t` is the same 0→1 the opacity uses, so the scale, the
 /// fade and the rise are one motion.
 pub fn pop_layer(ctx: &egui::Context, layer: egui::LayerId, rect: egui::Rect, t: f32) {
+    pop_layer_about(ctx, layer, rect.center(), t);
+}
+
+/// [`pop_layer`], about a point of the caller's choosing.
+///
+/// A window scales about its middle because that is where it sits; a menu grows
+/// from the corner the pointer opened it at, so the motion starts where the
+/// gesture did rather than drifting out from a centre nobody pointed at.
+pub fn pop_layer_about(ctx: &egui::Context, layer: egui::LayerId, pivot: egui::Pos2, t: f32) {
     if !animations_enabled() {
         return;
     }
@@ -165,6 +180,6 @@ pub fn pop_layer(ctx: &egui::Context, layer: egui::LayerId, rect: egui::Rect, t:
         return;
     }
     // Scaling about a point: p' = s·p + c·(1 − s) keeps `c` where it is.
-    let c = rect.center().to_vec2();
+    let c = pivot.to_vec2();
     ctx.set_transform_layer(layer, egui::emath::TSTransform::new(c * (1.0 - s), s));
 }

@@ -476,6 +476,9 @@ impl LimenApp {
     /// mid-progress on return.
     pub(crate) fn resume_page(&mut self) {
         if let Some(a) = self.view.as_ref().and_then(|v| v.auto.clone()) {
+            if !resumes(&a) {
+                return;
+            }
             self.dispatch(a.into_invoke());
         }
     }
@@ -792,21 +795,33 @@ impl LimenApp {
                     }
                     RunTag::Detail { id } => {
                         // Fill the detail tab, if it's still open.
-                        if let Some(tab) = self.detail_tabs.get_mut(&id) {
-                            tab.busy = false;
-                            match result {
-                                Ok(v) => match serde_json::from_value::<ui::View>(v) {
-                                    Ok(view) => {
+                        let Some(tab) = self.detail_tabs.get_mut(&id) else {
+                            return;
+                        };
+                        tab.busy = false;
+                        match result {
+                            Ok(v) => match serde_json::from_value::<ui::View>(v) {
+                                Ok(view) => {
+                                    tab.error = None;
+                                    // A view that says it is a pop-up is one
+                                    // wherever it was asked for. Put in place of
+                                    // the tab's screen it would replace the very
+                                    // thing it is meant to stand over — a row's
+                                    // details covering the table they came from.
+                                    // The pop-up layer is drawn over whichever
+                                    // tab is showing, so it belongs there.
+                                    if view.modal.is_some() {
+                                        self.accept_view(view);
+                                    } else {
                                         if !view.title.is_empty() {
                                             tab.title = view.title.clone();
                                         }
                                         tab.view = Some(view);
-                                        tab.error = None;
                                     }
-                                    Err(e) => tab.error = Some(format!("invalid view: {e}")),
-                                },
-                                Err(e) => tab.error = Some(format!("error: {e}")),
-                            }
+                                }
+                                Err(e) => tab.error = Some(format!("invalid view: {e}")),
+                            },
+                            Err(e) => tab.error = Some(format!("error: {e}")),
                         }
                     }
                 },
@@ -977,27 +992,44 @@ impl LimenApp {
         let params = serde_json::Value::Object(params);
         let ui::Action { capability, method } = invoke.action.clone();
 
-        if invoke.open_in_tab {
+        match answer_goes_to(self.active_tab().as_ref(), invoke.open_in_tab) {
             // Open (or focus) a fresh detail tab and load it in the background.
-            let id = self.next_detail_id;
-            self.next_detail_id += 1;
-            self.detail_tabs.insert(
-                id,
-                DetailTab {
-                    title: method.clone(),
-                    busy: true,
-                    ..Default::default()
-                },
-            );
-            self.open_tab(Tab::Detail { id });
-            self.status = format!("{capability}.{method}");
-            self.worker.send(Command::Run {
-                tag: RunTag::Detail { id },
-                capability,
-                method,
-                params,
-            });
-            return;
+            Answer::NewTab => {
+                let id = self.next_detail_id;
+                self.next_detail_id += 1;
+                self.detail_tabs.insert(
+                    id,
+                    DetailTab {
+                        title: method.clone(),
+                        busy: true,
+                        ..Default::default()
+                    },
+                );
+                self.open_tab(Tab::Detail { id });
+                self.status = format!("{capability}.{method}");
+                self.worker.send(Command::Run {
+                    tag: RunTag::Detail { id },
+                    capability,
+                    method,
+                    params,
+                });
+                return;
+            }
+            // A button pressed *inside* a tab answers into that tab.
+            Answer::SameTab(id) => {
+                if let Some(tab) = self.detail_tabs.get_mut(&id) {
+                    tab.busy = true;
+                }
+                self.status = format!("{capability}.{method}");
+                self.worker.send(Command::Run {
+                    tag: RunTag::Detail { id },
+                    capability,
+                    method,
+                    params,
+                });
+                return;
+            }
+            Answer::Screen => {}
         }
 
         self.busy = true;

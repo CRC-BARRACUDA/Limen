@@ -352,6 +352,18 @@ class Host:
         r = self._m._request("host.pick_file", None)
         return r.get("path") if isinstance(r, dict) else None
 
+    def save_file(self, suggested=""):
+        """Show a native 'save as' dialog on the host, opening on `suggested` as
+        the file name; returns the chosen path, or None if the user cancelled.
+
+        Where a file the module produces should land is the user's to say, in the
+        file manager they already know — not a directory the module picked for
+        them. None also covers a machine with no dialog to show, so a caller with
+        somewhere sensible to fall back to should say so rather than treat it as
+        a refusal."""
+        r = self._m._request("host.save_file", {"name": str(suggested)})
+        return r.get("path") if isinstance(r, dict) else None
+
     def log(self, message):
         self._m._request("host.log", str(message))
 

@@ -305,6 +305,7 @@ pub(crate) fn host_handler(
         "host.open" => host_open(params),
         "host.notify" => host_notify(params),
         "host.pick_file" => Ok(host_pick_file()),
+        "host.save_file" => Ok(host_save_file(params)),
         "host.log" => {
             let msg = params.as_str().map(str::to_string).unwrap_or_else(|| params.to_string());
             logger(&format!("[module] {msg}"));

@@ -126,34 +126,68 @@ pub fn overlay(
                     let w = animate_back(ctx, id.with("w"), target_w, 0.22);
                     ui.set_width(w);
 
+                    // The header spans the frame, not the width that was asked
+                    // for. Content that will not fold to `w` — a row of buttons,
+                    // a wide table — makes the frame grow, and a header laid out
+                    // at `w` then leaves the close control stranded well short of
+                    // the corner it belongs in. Measured on the previous frame,
+                    // the same way the height is.
+                    let wkey = id.with("content_w");
+                    let measured_w: f32 = ui.data(|d| d.get_temp(wkey)).unwrap_or(0.0);
+                    let header_w = w.max(measured_w);
+
                     // The controls are not the title's to carry: a pop-up whose
                     // content names itself still needs a way out of it.
                     if opts.title.is_some() || opts.close || opts.back {
-                        ui.horizontal(|ui| {
-                            if let Some(title) = &opts.title {
-                                ui.label(egui::RichText::new(title).size(16.0).strong());
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    // Right-to-left, so close is placed first and
-                                    // ends up outermost — the corner it occupies
-                                    // on the window itself. Back sits just inside
-                                    // it, with the window controls rather than
-                                    // adrift on the other side of the title.
-                                    if opts.close
-                                        && window_button(ui, WinBtn::Close)
-                                            .on_hover_text("Esc")
-                                            .clicked()
-                                    {
-                                        out.close = true;
-                                    }
-                                    if opts.back && window_button(ui, WinBtn::Back).clicked() {
-                                        out.back = true;
-                                    }
-                                },
-                            );
-                        });
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(header_w, 0.0),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                // Right-to-left, so close is placed first and ends
+                                // up outermost — the corner it occupies on the
+                                // window itself. Back sits just inside it, with the
+                                // window controls rather than adrift on the other
+                                // side of the title.
+                                if opts.close
+                                    && window_button(ui, WinBtn::Close)
+                                        .on_hover_text("Esc")
+                                        .clicked()
+                                {
+                                    out.close = true;
+                                }
+                                if opts.back && window_button(ui, WinBtn::Back).clicked() {
+                                    out.back = true;
+                                }
+                                // The title is centred on the *frame*, not on
+                                // what the controls left behind — so it does not
+                                // drift left as controls are added. The same
+                                // width they took is kept back on the other side,
+                                // which leaves a band whose middle is the frame's
+                                // middle, and the title centres in that.
+                                //
+                                // Truncated, because the band is all it may have:
+                                // a long name — an installed program's, carrying
+                                // its version and architecture — is cut short
+                                // rather than run on under the very control it
+                                // would hide.
+                                if let Some(title) = &opts.title {
+                                    let taken = ui.min_rect().width();
+                                    let band = (header_w - taken * 2.0).max(48.0);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(band, 0.0),
+                                        egui::Layout::top_down(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(title).size(16.0).strong(),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
+                                    );
+                                }
+                            },
+                        );
                         ui.add_space(10.0);
                     }
 
@@ -179,8 +213,13 @@ pub fn overlay(
                         .show(ui, |ui| {
                             ui.set_width(w);
                             add(ui);
-                            let h = ui.min_rect().height();
-                            ui.data_mut(|d| d.insert_temp(hkey, h));
+                            let size = ui.min_rect().size();
+                            ui.data_mut(|d| {
+                                d.insert_temp(hkey, size.y);
+                                // What the content actually came to, so the header
+                                // above can span it next frame.
+                                d.insert_temp(wkey, size.x);
+                            });
                         });
                 });
         });

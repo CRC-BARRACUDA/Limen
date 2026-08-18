@@ -273,6 +273,20 @@ impl Host {
             .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
     }
 
+    /// Show a native "save as" dialog on the host, opening on `suggested` as the
+    /// file name; returns the chosen path, or `None` if the user cancelled.
+    ///
+    /// Where a file the module produces should land is the user's to say, in the
+    /// file manager they already know — not a directory the module picked for
+    /// them. `None` also covers a machine with no dialog to show (a headless
+    /// host, a Linux box without zenity), so a caller that has somewhere
+    /// sensible to fall back to should say so rather than treat it as a refusal.
+    pub fn save_file(&self, suggested: &str) -> Option<String> {
+        self.raw("host.save_file", json!({ "name": suggested }))
+            .ok()
+            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+    }
+
     /// The user's active UI language code (e.g. `"en"`, `"uk"`). Query this while
     /// building a view and translate your own strings (see [`Catalog`]) so the
     /// module's screens match the rest of the app. Defaults to `"en"`.

@@ -267,6 +267,26 @@ function M.Module(name, capabilities)
       if type(r) == "string" and r ~= "" then return r end
       return nil
     end,
+    -- Show a native "open file" dialog on the host; returns the chosen path,
+    -- or nil if the user cancelled.
+    pick_file = function(_)
+      local r = self:_request("host.pick_file", {})
+      if type(r) == "table" and type(r.path) == "string" then return r.path end
+      return nil
+    end,
+    -- Show a native "save as" dialog, opening on `suggested` as the file name;
+    -- returns the chosen path, or nil if the user cancelled.
+    --
+    -- Where a file the module produces should land is the user's to say, in the
+    -- file manager they already know — not a directory the module picked for
+    -- them. nil also covers a machine with no dialog to show, so a caller with
+    -- somewhere sensible to fall back to should say so rather than treat it as
+    -- a refusal.
+    save_file = function(_, suggested)
+      local r = self:_request("host.save_file", { name = tostring(suggested or "") })
+      if type(r) == "table" and type(r.path) == "string" then return r.path end
+      return nil
+    end,
     -- Raise a desktop notification on the machine running Limen, for work the
     -- user is not watching. `urgency` is "low" | "normal" | "critical".
     -- Best-effort: a session with no notification daemon shows nothing.
