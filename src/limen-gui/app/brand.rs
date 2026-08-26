@@ -425,10 +425,25 @@ pub(crate) fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32) 
 }
 
 /// Linear blend between two colors, `t` clamped to `0..=1`.
-pub(crate) fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+pub fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    egui::Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+    // Alpha is carried, and the channels are blended as they are stored.
+    //
+    // This used to end in `from_rgb`, which drops alpha and hands back an
+    // opaque colour. Every caller passed opaque colours, so it never showed —
+    // until the splash faded the mark: `rounded_rect_mesh` blends the colours
+    // it is given, so the gap marks came back at full alpha carrying the
+    // *premultiplied* channels of a nearly-invisible colour. They painted as
+    // solid near-black shapes over the desktop for the frames before the fade
+    // caught up. `Color32` is premultiplied, so blending it channel-wise —
+    // alpha included — is exactly right.
+    egui::Color32::from_rgba_premultiplied(
+        m(a.r(), b.r()),
+        m(a.g(), b.g()),
+        m(a.b(), b.b()),
+        m(a.a(), b.a()),
+    )
 }
 
 /// A rounded rectangle as a colored mesh, filled with a vertical `top`→`bottom`

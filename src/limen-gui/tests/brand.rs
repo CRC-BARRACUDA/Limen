@@ -166,3 +166,43 @@ fn the_icon_script_draws_the_same_mark() {
         assert!((a - b).abs() < 0.001, "gap marks differ: {ours:?} vs {theirs:?}");
     }
 }
+
+/// Fading the mark must fade it, not darken it.
+///
+/// The splash paints the mark on a transparent window with a rising alpha. The
+/// gap marks go through `rounded_rect_mesh`, which blends the colours it is
+/// handed — so if the blend drops alpha, a colour that should be nearly
+/// invisible comes back opaque, carrying the premultiplied channels of a dim
+/// colour: solid near-black shapes over the desktop, for the frames before the
+/// fade catches up. That is what this pins.
+#[test]
+fn fading_a_colour_never_makes_it_opaque() {
+    use eframe::egui::Color32;
+
+    let amber = Color32::from_rgb(0xf4, 0xc0, 0x78);
+    for step in 0..=20 {
+        let alpha = step as f32 / 20.0;
+        let faded = Color32::from_rgba_unmultiplied(
+            amber.r(),
+            amber.g(),
+            amber.b(),
+            (255.0 * alpha).round() as u8,
+        );
+        // Blending a colour with itself is the case the gap marks hit: flat
+        // fill, top and bottom the same.
+        let blended = lerp_color(faded, faded, 0.5);
+        assert_eq!(
+            blended.a(),
+            faded.a(),
+            "alpha {alpha}: blending dropped it — {faded:?} became {blended:?}"
+        );
+        assert_eq!(blended, faded, "blending a colour with itself changed it");
+    }
+
+    // And a real blend still moves between the two, alpha included.
+    let a = Color32::from_rgba_unmultiplied(255, 0, 0, 0);
+    let b = Color32::from_rgba_unmultiplied(255, 0, 0, 255);
+    assert_eq!(lerp_color(a, b, 0.0).a(), 0);
+    assert_eq!(lerp_color(a, b, 1.0).a(), 255);
+    assert!((lerp_color(a, b, 0.5).a() as i32 - 128).abs() <= 1);
+}
