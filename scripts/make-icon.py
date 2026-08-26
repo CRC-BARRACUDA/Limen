@@ -3,10 +3,12 @@
 
     python3 scripts/make-icon.py        # rewrites resources/icon.png and icon.ico
 
-The mark is a rounded slab parted by a stepped seam — the two leaves of a door
-drawn apart, which is what a *limen* is. The geometry here is the same 256-unit
-grid `draw_brand` in `src/limen-gui/app/brand.rs` paints from: keep the two in
-step, or the window's mark and the taskbar's stop being the same drawing.
+The mark is two brackets with a lit gap between them. The brackets are drawn
+only to make that gap visible: a *limen* is not the door, it is the threshold,
+the part you cross. The geometry here is the same 256-unit grid `draw_brand` in
+`src/limen-gui/app/brand.rs` paints from — and a test in that crate reads this
+file to check the numbers still agree, because the window's mark and the
+taskbar's have to be one drawing rather than two that resemble each other.
 
 Needs Pillow (`pip install --user pillow`); nothing else in the build does, so
 this is run by hand when the mark changes rather than from `build.rs`.
@@ -20,20 +22,17 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 LIGHT = (0xF4, 0xC0, 0x78)  # bright amber
 DARK = (0xF9, 0x73, 0x16)  # orange
-TILE_TOP = (0x24, 0x1A, 0x10)
-TILE_BOTTOM = (0x0D, 0x0A, 0x06)
 SHEEN = (0xFF, 0xE0, 0xB0)
 
 # ---- the geometry, on the 256-unit grid ------------------------------------ #
 
 GRID = 256
-TILE = 16.0  # the dark tile's inset, and its corner radius
-TILE_R = 44.0
-SLAB = 52.0  # the mark's own inset, and its corner radius
-SLAB_R = 30.0
-SEAM_JOG = 56.0  # how far the seam steps sideways...
-LEAF_NEAR = (93.0, 120.6, 144.6)  # ...and where each leaf's edge starts and
-LEAF_FAR = (107.0, 111.4, 135.4)  # the heights its step runs between
+THICK = 27.0  # how heavy a bracket's stroke is...
+OUT_NEAR = 32.0  # ...and the pair's outer edges, which are also each
+OUT_FAR = 224.0  # bracket's top and bottom
+ARM_NEAR = 105.0  # where the arms stop on each side — everything
+ARM_FAR = 151.0  # between the two is threshold
+MARK_R = 4.0  # the corner radius on the marks standing in the gap
 SHEEN_W = 1.4
 
 SS = 4  # supersampling: everything is drawn at 4x and filtered down
@@ -51,56 +50,64 @@ def lerp(a, b, t):
     return tuple(round(x + (y - x) * t) for x, y in zip(a, b))
 
 
-def seam_at(y, leaf):
-    """A leaf's seam edge at height `y`: down, a slanted step across, down."""
-    x, start, end = leaf
-    if y <= start:
-        return x
-    if y >= end:
-        return x + SEAM_JOG
-    return x + SEAM_JOG * (y - start) / (end - start)
+def bracket_rects(near):
+    """One bracket as three rectangles — spine, top arm, bottom arm — that share
+    edges but never overlap. Drawn overlapping, the mark would look identical at
+    full opacity and wrong the moment it fades."""
+    if near:
+        spine = OUT_NEAR + THICK
+        return [
+            (OUT_NEAR, OUT_NEAR, spine, OUT_FAR),
+            (spine, OUT_NEAR, ARM_NEAR, OUT_NEAR + THICK),
+            (spine, OUT_FAR - THICK, ARM_NEAR, OUT_FAR),
+        ]
+    spine = OUT_FAR - THICK
+    return [
+        (spine, OUT_NEAR, OUT_FAR, OUT_FAR),
+        (ARM_FAR, OUT_NEAR, spine, OUT_NEAR + THICK),
+        (ARM_FAR, OUT_FAR - THICK, spine, OUT_FAR),
+    ]
 
 
-def slab_inset(y):
-    """How far the slab's straight edge is pulled in by the rounding at `y`."""
-    far = SLAB + SLAB_R
-    d = max(far - y, y - (GRID - far), 0.0)
-    return SLAB_R - max(SLAB_R**2 - d**2, 0.0) ** 0.5
+def bracket_outline(near):
+    """The same bracket as one closed outline, clockwise — the sheen has to run
+    round the whole letter, not round each piece it is built from."""
+    if near:
+        spine = OUT_NEAR + THICK
+        return [
+            (OUT_NEAR, OUT_NEAR),
+            (ARM_NEAR, OUT_NEAR),
+            (ARM_NEAR, OUT_NEAR + THICK),
+            (spine, OUT_NEAR + THICK),
+            (spine, OUT_FAR - THICK),
+            (ARM_NEAR, OUT_FAR - THICK),
+            (ARM_NEAR, OUT_FAR),
+            (OUT_NEAR, OUT_FAR),
+        ]
+    spine = OUT_FAR - THICK
+    return [
+        (OUT_FAR, OUT_NEAR),
+        (ARM_FAR, OUT_NEAR),
+        (ARM_FAR, OUT_NEAR + THICK),
+        (spine, OUT_NEAR + THICK),
+        (spine, OUT_FAR - THICK),
+        (ARM_FAR, OUT_FAR - THICK),
+        (ARM_FAR, OUT_FAR),
+        (OUT_FAR, OUT_FAR),
+    ]
 
 
-def seam_rows():
-    """The heights the leaves are sampled at — an even sweep plus the exact
-    heights the steps turn at, so the seam's corners stay sharp."""
-    steps = 256
-    ys = [SLAB + (GRID - 2 * SLAB) * i / steps for i in range(steps + 1)]
-    ys += [LEAF_NEAR[1], LEAF_NEAR[2], LEAF_FAR[1], LEAF_FAR[2]]
-    return sorted(set(ys))
-
-
-def leaf_outline(leaf, keeps_near):
-    """One leaf as a closed polygon: down its outer edge, back up its seam."""
-    ys = seam_rows()
-
-    def edges(y):
-        cut = seam_at(y, leaf)
-        if keeps_near:
-            return SLAB + slab_inset(y), cut
-        return cut, GRID - SLAB - slab_inset(y)
-
-    left = [(edges(y)[0], y) for y in ys]
-    right = [(edges(y)[1], y) for y in reversed(ys)]
-    return left + right
+def gap_marks():
+    """A tick level with each pair of arms, and the crossing between them: the
+    old mark's seam, continued across the opening as a broken line."""
+    return [
+        (120.0, 46.0, 136.0, 54.0),
+        (124.0, 111.0, 132.0, 145.0),
+        (120.0, 202.0, 136.0, 210.0),
+    ]
 
 
 # ---- painting -------------------------------------------------------------- #
-
-
-def vertical_gradient(top, bottom):
-    img = Image.new("RGB", (W, W))
-    draw = ImageDraw.Draw(img)
-    for y in range(W):
-        draw.line([(0, y), (W, y)], fill=lerp(top, bottom, y / W))
-    return img
 
 
 def diagonal_gradient():
@@ -108,7 +115,7 @@ def diagonal_gradient():
     same normalization `shade` uses in `draw_brand`."""
     img = Image.new("RGB", (W, W))
     pixels = img.load()
-    span = 2.0 * (GRID / 2 - SLAB)
+    span = 2.0 * (GRID / 2 - OUT_NEAR)
     for y in range(W):
         v = (y / SS - GRID / 2) / span + 0.5
         row = [lerp(LIGHT, DARK, v + (x / SS - GRID / 2) / span) for x in range(W)]
@@ -120,27 +127,34 @@ def diagonal_gradient():
 def render():
     canvas = Image.new("RGBA", (W, W), (0, 0, 0, 0))
 
-    # The dark rounded tile the mark sits on.
-    tile = Image.new("L", (W, W), 0)
-    ImageDraw.Draw(tile).rounded_rectangle(
-        [px(TILE), px(TILE), px(GRID - TILE), px(GRID - TILE)],
-        radius=px(TILE_R),
-        fill=255,
-    )
-    canvas.paste(vertical_gradient(TILE_TOP, TILE_BOTTOM), (0, 0), tile)
+    # No tile: the icon is the mark on transparency, so it sits on whatever the
+    # taskbar, the dock or Explorer puts behind it rather than carrying its own
+    # dark square everywhere. The in-app mark still paints one (`show_tile`).
 
-    # Both leaves at once, so the gradient runs across the pair as one slab.
+    # Both brackets at once, so the gradient runs across the pair as one object.
     mask = Image.new("L", (W, W), 0)
     draw = ImageDraw.Draw(mask)
-    for leaf, keeps_near in [(LEAF_NEAR, True), (LEAF_FAR, False)]:
-        draw.polygon([(px(x), px(y)) for x, y in leaf_outline(leaf, keeps_near)], fill=255)
+    for near in (True, False):
+        draw.polygon([(px(x), px(y)) for x, y in bracket_outline(near)], fill=255)
     canvas.paste(diagonal_gradient(), (0, 0), mask)
 
     # The sheen just inside every edge: the mask minus the mask eroded by the
-    # stroke width, so the two leaves' facing edges each get their own gleam.
+    # stroke width, so each bracket's facing edge gets its own gleam.
     kernel = max(3, int(px(SHEEN_W)) | 1)
     edge = ImageChops.subtract(mask, mask.filter(ImageFilter.MinFilter(kernel)))
     canvas.paste(Image.new("RGB", (W, W), SHEEN), (0, 0), edge)
+
+    # What stands in the gap. Flat colour, not the gradient — these are the
+    # brightest things in the mark and should not dim as they go down it.
+    marks = Image.new("L", (W, W), 0)
+    mdraw = ImageDraw.Draw(marks)
+    crossing = Image.new("L", (W, W), 0)
+    cdraw = ImageDraw.Draw(crossing)
+    for i, (x0, y0, x1, y1) in enumerate(gap_marks()):
+        box = [px(x0), px(y0), px(x1), px(y1)]
+        (cdraw if i == 1 else mdraw).rounded_rectangle(box, radius=px(MARK_R), fill=255)
+    canvas.paste(Image.new("RGB", (W, W), LIGHT), (0, 0), marks)
+    canvas.paste(Image.new("RGB", (W, W), DARK), (0, 0), crossing)
     return canvas
 
 

@@ -236,7 +236,7 @@ pub(crate) fn splash_screen(ctx: &egui::Context, t: f32, animated: bool) {
                 egui::Rect::from_center_size(egui::pos2(cx - half, cy), egui::vec2(mark, mark));
             let r2 =
                 egui::Rect::from_center_size(egui::pos2(cx + half, cy), egui::vec2(mark, mark));
-            draw_brand(painter, r1, vis, false);
+            draw_brand(painter, r1, vis);
             draw_barracuda(painter, r2, ui::with_alpha(ui::color::ACCENT_BRIGHT, vis));
             let dh = 92.0 * scale;
             painter.vline(
@@ -264,58 +264,99 @@ pub(crate) fn splash_screen(ctx: &egui::Context, t: f32, animated: bool) {
 
 /// The mark's geometry, written on the same 256-unit grid as the icon files.
 ///
-/// The slab's outer edges and its corner radius…
-pub const SLAB: f32 = 52.0;
-pub const SLAB_R: f32 = 30.0;
-/// …and the seam: how far it steps sideways, and, for each leaf, where its own
-/// edge starts and the heights the step runs between.
-pub const SEAM_JOG: f32 = 56.0;
-pub const LEAF_NEAR: (f32, f32, f32) = (93.0, 120.6, 144.6);
-pub const LEAF_FAR: (f32, f32, f32) = (107.0, 111.4, 135.4);
+/// Two brackets, and the space between them. The brackets are drawn only to
+/// make that space visible: a *limen* is not the door, it is the part you
+/// cross. `THICK` is how heavy a bracket's stroke is; `OUT_*` are the pair's
+/// outer edges, which are also the top and bottom of each bracket.
+pub const THICK: f32 = 27.0;
+pub const OUT_NEAR: f32 = 32.0;
+pub const OUT_FAR: f32 = 224.0;
+/// Where the arms stop, on each side — everything between the two is threshold.
+pub const ARM_NEAR: f32 = 105.0;
+pub const ARM_FAR: f32 = 151.0;
+/// The corner radius on the three marks standing in the gap.
+pub const MARK_R: f32 = 4.0;
 
-/// A leaf's seam edge at height `y`: straight down, a slanted step across, then
-/// straight down again.
-pub fn seam_at(y: f32, (x, from, to): (f32, f32, f32)) -> f32 {
-    if y <= from {
-        x
-    } else if y >= to {
-        x + SEAM_JOG
+/// One bracket as three rectangles — spine, top arm, bottom arm — given as
+/// `[x0, y0, x1, y1]` on the grid. `near` is the left-hand one.
+///
+/// They are cut so that no two of them overlap. Drawn as three overlapping
+/// pieces the mark would look identical at full opacity and wrong the moment it
+/// fades: the splash paints it translucent, and an overlap paints twice.
+pub fn bracket_rects(near: bool) -> [[f32; 4]; 3] {
+    if near {
+        let spine = OUT_NEAR + THICK;
+        [
+            [OUT_NEAR, OUT_NEAR, spine, OUT_FAR],
+            [spine, OUT_NEAR, ARM_NEAR, OUT_NEAR + THICK],
+            [spine, OUT_FAR - THICK, ARM_NEAR, OUT_FAR],
+        ]
     } else {
-        x + SEAM_JOG * (y - from) / (to - from)
+        let spine = OUT_FAR - THICK;
+        [
+            [spine, OUT_NEAR, OUT_FAR, OUT_FAR],
+            [ARM_FAR, OUT_NEAR, spine, OUT_NEAR + THICK],
+            [ARM_FAR, OUT_FAR - THICK, spine, OUT_FAR],
+        ]
     }
 }
 
-/// How far the slab's straight edge is pulled in by the corner rounding at `y`.
-pub fn slab_inset(y: f32) -> f32 {
-    let far = SLAB + SLAB_R;
-    let d = (far - y).max(y - (256.0 - far)).max(0.0);
-    SLAB_R - (SLAB_R * SLAB_R - d * d).max(0.0).sqrt()
+/// The same bracket as one closed outline, walked clockwise — used for the
+/// sheen, which has to run round the whole letter rather than round each of the
+/// three pieces it is built from.
+pub fn bracket_outline(near: bool) -> [[f32; 2]; 8] {
+    if near {
+        let spine = OUT_NEAR + THICK;
+        [
+            [OUT_NEAR, OUT_NEAR],
+            [ARM_NEAR, OUT_NEAR],
+            [ARM_NEAR, OUT_NEAR + THICK],
+            [spine, OUT_NEAR + THICK],
+            [spine, OUT_FAR - THICK],
+            [ARM_NEAR, OUT_FAR - THICK],
+            [ARM_NEAR, OUT_FAR],
+            [OUT_NEAR, OUT_FAR],
+        ]
+    } else {
+        let spine = OUT_FAR - THICK;
+        [
+            [OUT_FAR, OUT_NEAR],
+            [ARM_FAR, OUT_NEAR],
+            [ARM_FAR, OUT_NEAR + THICK],
+            [spine, OUT_NEAR + THICK],
+            [spine, OUT_FAR - THICK],
+            [ARM_FAR, OUT_FAR - THICK],
+            [ARM_FAR, OUT_FAR],
+            [OUT_FAR, OUT_FAR],
+        ]
+    }
 }
 
-/// The heights the leaves are sampled at: an even sweep down the slab, plus the
-/// exact heights the steps turn at, so the seam's corners stay sharp however
-/// coarse the sweep is.
-pub fn seam_rows() -> Vec<f32> {
-    const STEPS: usize = 64;
-    let mut ys: Vec<f32> = (0..=STEPS)
-        .map(|i| SLAB + (256.0 - 2.0 * SLAB) * i as f32 / STEPS as f32)
-        .chain([LEAF_NEAR.1, LEAF_NEAR.2, LEAF_FAR.1, LEAF_FAR.2])
-        .collect();
-    ys.sort_by(f32::total_cmp);
-    ys.dedup();
-    ys
+/// The three marks standing in the gap, as `[x0, y0, x1, y1]`: a tick level
+/// with each pair of arms, and the threshold itself between them.
+///
+/// The ticks are the seam of the old mark, continued across the opening as
+/// broken line — the way a doorway's sill is scored on a drawing. The middle
+/// bar is the crossing, and it is the one part painted in flat orange rather
+/// than in the gradient, so it stays the brightest thing in the device.
+pub fn gap_marks() -> [[f32; 4]; 3] {
+    [
+        [120.0, 46.0, 136.0, 54.0],
+        [124.0, 111.0, 132.0, 145.0],
+        [120.0, 202.0, 136.0, 210.0],
+    ]
 }
 
-/// Draw the Limen brand mark — a rounded slab parted by a stepped seam: the two
-/// leaves of a door drawn apart, which is what a *limen* is, the threshold you
-/// stand on while it is open. Painted in the Barracuda amber-HUD palette (a warm
-/// near-black tile under an amber→orange diagonal gradient), so it reads as one
-/// product with the Barracuda logo.
+/// Draw the Limen brand mark — two brackets with a lit gap between them. The
+/// brackets are there to make the gap visible: a *limen* is not the door, it is
+/// the threshold, the part you cross. Painted in the Barracuda amber-HUD
+/// palette (a warm near-black tile under an amber→orange diagonal gradient), so
+/// it reads as one product with the Barracuda logo.
 ///
 /// Written on the icon's own 256-unit grid and scaled into `rect`, so this and
 /// `resources/icon.png`/`.ico` — regenerated by `scripts/make-icon.py` from the
 /// same numbers — are one drawing rather than two that resemble each other.
-pub(crate) fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32, show_tile: bool) {
+pub(crate) fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32) {
     use egui::{Color32, Mesh, Pos2, Shape};
 
     // Scale every colour's alpha by `alpha` (1.0 = opaque) so the mark can fade
@@ -324,32 +365,19 @@ pub(crate) fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32, 
         Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * alpha).round() as u8)
     };
     // One diagonal gradient across the whole device — light at the top-left,
-    // dark at the bottom-right — so the leaves are lit as one slab and the seam
-    // reads as a cut through it rather than as two separate shapes.
+    // dark at the bottom-right — so the two brackets are lit as one object and
+    // the gap reads as a cut through it rather than as a space between two
+    // separate shapes.
     let light = Color32::from_rgb(0xf4, 0xc0, 0x78); // bright amber
     let dark = Color32::from_rgb(0xf9, 0x73, 0x16); // orange
 
     let s = rect.width().min(rect.height()) / 256.0;
     let c = rect.center();
 
-    // The dark rounded tile (the app-icon background). Skipped for the splash,
-    // where the mark floats transparently beside the Barracuda logo.
-    if show_tile {
-        let tile_top = fa(Color32::from_rgb(0x24, 0x1a, 0x10));
-        let tile_bottom = fa(Color32::from_rgb(0x0d, 0x0a, 0x06));
-        let tile = egui::Rect::from_center_size(rect.center(), egui::vec2(224.0 * s, 224.0 * s));
-        painter.add(Shape::mesh(rounded_rect_mesh(
-            tile,
-            44.0 * s,
-            tile_top,
-            tile_bottom,
-        )));
-    }
-
     // Grid coordinates into the painter's, and the gradient at a grid point:
     // position along the top-left → bottom-right diagonal, normalized to 0..1.
     let at = |x: f32, y: f32| Pos2::new(c.x + (x - 128.0) * s, c.y + (y - 128.0) * s);
-    let span = 2.0 * (128.0 - SLAB);
+    let span = 2.0 * (128.0 - OUT_NEAR);
     let shade = |x: f32, y: f32| {
         fa(lerp_color(
             light,
@@ -358,29 +386,14 @@ pub(crate) fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32, 
         ))
     };
 
-    // Each leaf lies between two edges: the slab's rounded outside on one side,
-    // the seam on the other. `true` keeps the side left of the seam.
-    for (seam, keeps_near) in [(LEAF_NEAR, true), (LEAF_FAR, false)] {
-        let edges = |y: f32| {
-            let cut = seam_at(y, seam);
-            if keeps_near {
-                (SLAB + slab_inset(y), cut)
-            } else {
-                (cut, 256.0 - SLAB - slab_inset(y))
-            }
-        };
-        let ys = seam_rows();
-
-        // Drawn as a stack of horizontal bands. A leaf is not convex — the step
-        // notches it — so it cannot be fanned from a point the way the tile is;
-        // but every height crosses it exactly once, which is all a band needs.
+    for near in [true, false] {
+        // Each bracket is three rectangles that share edges but never overlap,
+        // so a half-faded mark has no seams where two pieces were painted over
+        // each other.
         let mut mesh = Mesh::default();
-        for w in ys.windows(2) {
-            let (top, bottom) = (w[0], w[1]);
-            let (l0, r0) = edges(top);
-            let (l1, r1) = edges(bottom);
+        for [x0, y0, x1, y1] in bracket_rects(near) {
             let base = mesh.vertices.len() as u32;
-            for (x, y) in [(l0, top), (r0, top), (r1, bottom), (l1, bottom)] {
+            for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
                 mesh.colored_vertex(at(x, y), shade(x, y));
             }
             mesh.add_triangle(base, base + 1, base + 2);
@@ -388,16 +401,26 @@ pub(crate) fn draw_brand(painter: &egui::Painter, rect: egui::Rect, alpha: f32, 
         }
         painter.add(Shape::mesh(mesh));
 
-        // A flat sheen runs just inside each leaf's edge — the one part of the
+        // A flat sheen runs just inside the bracket's edge — the one part of the
         // device that doesn't follow the gradient. It measures ~1.4px on the
         // icon's 256px grid, so at the sizes drawn here it lands sub-pixel and
-        // reads as a gleam along the edge rather than as a distinct line.
-        let mut outline: Vec<Pos2> = ys.iter().map(|&y| at(edges(y).0, y)).collect();
-        outline.extend(ys.iter().rev().map(|&y| at(edges(y).1, y)));
+        // reads as a gleam along the edge rather than as a distinct line. Taken
+        // from the outline rather than the three rectangles, or it would draw
+        // lines across the middle of the bracket where they meet.
+        let outline: Vec<Pos2> = bracket_outline(near).iter().map(|&[x, y]| at(x, y)).collect();
         painter.add(Shape::closed_line(
             outline,
             egui::Stroke::new(1.4 * s, fa(Color32::from_rgb(0xff, 0xe0, 0xb0))),
         ));
+    }
+
+    // What stands in the gap: two ticks level with the arms, and the crossing
+    // between them. Flat colour, not the gradient — these are the brightest
+    // things in the mark and they should not dim as they go down it.
+    for (i, [x0, y0, x1, y1]) in gap_marks().into_iter().enumerate() {
+        let colour = fa(if i == 1 { dark } else { light });
+        let r = egui::Rect::from_min_max(at(x0, y0), at(x1, y1));
+        painter.add(Shape::mesh(rounded_rect_mesh(r, MARK_R * s, colour, colour)));
     }
 }
 

@@ -30,7 +30,7 @@ pub(crate) fn about_view(ui: &mut egui::Ui, reveal_at: f64) -> bool {
                         ui.allocate_exact_size(egui::vec2(row_w, mark), egui::Sense::hover());
 
                     let r1 = egui::Rect::from_min_size(rect.left_top(), egui::vec2(mark, mark));
-                    draw_brand(ui.painter(), r1, 1.0, false);
+                    draw_brand(ui.painter(), r1, 1.0);
 
                     let sep_x = rect.left() + mark + gap + 0.5;
                     let half = 26.0_f32;
