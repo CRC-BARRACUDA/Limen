@@ -94,7 +94,7 @@ pub mod __rt {
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "unknown payload".to_string());
         RpcError::new(
-            rpc::INTERNAL_ERROR,
+            rpc::MODULE_PANIC,
             format!("module panicked in {method}: {what}"),
         )
     }

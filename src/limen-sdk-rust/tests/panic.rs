@@ -135,7 +135,7 @@ fn a_panicking_method_answers_with_an_error() {
     });
 
     assert_eq!(is_error, 1, "the host must be told this failed");
-    assert_eq!(v["code"], json!(-32603));
+    assert_eq!(v["code"], json!(limen_sdk_rust::rpc::MODULE_PANIC));
     let message = v["message"].as_str().unwrap_or_default();
     assert!(message.contains("panicked"), "{message}");
     assert!(message.contains("tripped over its own state"), "{message}");
