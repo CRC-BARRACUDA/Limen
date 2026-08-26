@@ -143,3 +143,42 @@ pub(crate) fn license_dialog(ctx: &egui::Context, open: bool) -> ui::Overlay {
             });
     })
 }
+
+/// What a module said as it panicked.
+///
+/// The SDK catches the unwind and hands the message back as an error, which
+/// means the text is a panic payload with a file and a line in it — useful to
+/// whoever maintains the module, noise to whoever is using it. So it is here,
+/// behind one button, rather than on the screen.
+pub(crate) fn panic_dialog(ctx: &egui::Context, open: bool, reason: Option<&Inactive>) -> ui::Overlay {
+    let (title, help, text) = match reason {
+        Some(r) => (i18n::t("module.panic_title"), i18n::t(r.help_key()), r.detail()),
+        None => (String::new(), String::new(), ""),
+    };
+    let opts = ui::OverlayOpts {
+        width: 720.0,
+        max_height: 420.0,
+        title: Some(title),
+        close: true,
+        ..Default::default()
+    };
+    ui::overlay(ctx, egui::Id::new("limen_module_panic"), open, &opts, |ui| {
+        ui.label(&help);
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Selectable and monospaced: this text is meant to be copied
+                // into a bug report, not read for pleasure.
+                let mut body = text;
+                ui.add(
+                    egui::TextEdit::multiline(&mut body)
+                        .desired_width(f32::INFINITY)
+                        .code_editor(),
+                );
+            });
+    })
+}

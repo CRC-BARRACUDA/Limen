@@ -265,6 +265,18 @@ pub(crate) fn badge(ui: &mut egui::Ui, text: &str) {
         });
 }
 
+/// The same chip in red: something about this module is not working.
+pub(crate) fn warn_badge(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::none()
+        .fill(ui::color::BG_WIDGET)
+        .stroke(egui::Stroke::new(1.0_f32, ui::color::ERROR))
+        .rounding(egui::Rounding::same(4.0))
+        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(text).size(11.0).color(ui::color::ERROR));
+        });
+}
+
 /// The About page. Returns `true` if the "License" button was clicked.
 /// Fade a single About-screen element in, staggered by `k`, so the block
 /// assembles itself one line at a time when the tab is shown.

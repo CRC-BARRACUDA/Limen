@@ -80,3 +80,23 @@ fn the_weekday_headings_match_the_grid() {
     assert_eq!(limen_proto::date::weekday(2024, 2, 1), 3);
     assert_eq!(t("cal.wd_4"), "Th");
 }
+
+/// The screen a panicked module shows is three strings and a button. A missing
+/// one would leave the tab reading `module.inactive` in red.
+#[test]
+fn the_panic_screen_is_translated() {
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for lang in [Lang::En, Lang::Uk] {
+        set_locale(lang);
+        for key in [
+            "module.inactive",
+            "module.show_panic",
+            "module.panic_title",
+            "module.panic_help",
+            "module.failed_start",
+        ] {
+            assert_ne!(t(key), key, "{lang:?}: {key} is not translated");
+        }
+    }
+    set_locale(Lang::En);
+}

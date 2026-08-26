@@ -8,6 +8,7 @@ use crate::app::*;
 pub(crate) fn modules_page(
     ui: &mut egui::Ui,
     modules: &[ModuleSpec],
+    inactive: &HashMap<String, Inactive>,
     git_installed: &HashSet<String>,
     git_meta: &HashMap<String, (String, String)>,
     available_updates: &HashMap<String, String>,
@@ -19,6 +20,7 @@ pub(crate) fn modules_page(
     filter: &mut ModuleFilter,
     search: &mut String,
     open: &mut Option<String>,
+    check_panic: &mut Option<String>,
     remove: &mut Option<String>,
     add: &mut Option<String>,
     update: &mut Option<String>,
@@ -115,12 +117,14 @@ pub(crate) fn modules_page(
                 module_card(
                     ui,
                     m,
+                    inactive.get(&m.name),
                     git_installed.contains(&m.name),
                     git_meta.get(&m.name),
                     available_updates.get(&m.name).map(String::as_str),
                     installing,
                     installing_runtime,
                     open,
+                    check_panic,
                     remove,
                     update,
                     &mut tag_click,
@@ -184,12 +188,16 @@ pub(crate) fn modules_page(
 pub(crate) fn module_card(
     ui: &mut egui::Ui,
     m: &ModuleSpec,
+    // The module cannot be used, and why. Said on the card: finding out by
+    // opening it means every module looks the same until you try one.
+    inactive: Option<&Inactive>,
     from_git: bool,
     git_meta: Option<&(String, String)>,
     latest: Option<&str>,
     installing: &Option<String>,
     installing_runtime: &Option<String>,
     open: &mut Option<String>,
+    check_panic: &mut Option<String>,
     remove: &mut Option<String>,
     update: &mut Option<String>,
     tag_click: &mut Option<String>,
@@ -238,6 +246,9 @@ pub(crate) fn module_card(
                             );
                             for cap in &m.capabilities {
                                 badge(ui, cap);
+                            }
+                            if inactive.is_some() {
+                                warn_badge(ui, &i18n::t("module.inactive"));
                             }
                         });
                         if let Some(desc) = localized_desc(ui, m) {
@@ -384,15 +395,23 @@ pub(crate) fn module_card(
                             );
                             return;
                         }
-                        // Open is disabled while this module's runtime downloads.
-                        let open_clicked = ui
-                            .add_enabled_ui(!runtime_busy, |ui| {
-                                ui::outline_button(ui, &open_lbl, bw)
-                            })
-                            .inner
-                            .clicked();
-                        if open_clicked {
-                            *open = Some(m.name.clone());
+                        if inactive.is_some() {
+                            // There is no screen behind Open — the module is not
+                            // running. The one thing left to do is read why.
+                            if ui::outline_button(ui, &i18n::t("module.show_panic"), bw).clicked() {
+                                *check_panic = Some(m.name.clone());
+                            }
+                        } else {
+                            // Open is disabled while this module's runtime downloads.
+                            let open_clicked = ui
+                                .add_enabled_ui(!runtime_busy, |ui| {
+                                    ui::outline_button(ui, &open_lbl, bw)
+                                })
+                                .inner
+                                .clicked();
+                            if open_clicked {
+                                *open = Some(m.name.clone());
+                            }
                         }
                         if runtime_busy {
                             ui.horizontal(|ui| {

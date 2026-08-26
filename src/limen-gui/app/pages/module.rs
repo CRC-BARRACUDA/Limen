@@ -60,11 +60,36 @@ pub(crate) fn module_view(
     reveal_at: f64,
     view: &Option<ui::View>,
     view_error: &Option<String>,
+    inactive: &Option<Inactive>,
     inputs: &mut HashMap<String, String>,
     output: &str,
     busy_action: Option<&ui::Action>,
     action: &mut Option<ui::Invoke>,
+    show_panic: &mut bool,
 ) {
+    // A module that cannot be talked to is shown as what it now is, whatever
+    // screen it had before. Widgets would still draw and still take clicks, and
+    // every one of them would reach a module that either never started or is
+    // running on state a panic left half-written — so the screen goes, and the
+    // one thing left to do is read why.
+    if inactive.is_some() {
+        ui.horizontal(|ui| {
+            ui.heading(name);
+            ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new(i18n::t("module.inactive"))
+                    .color(ui::color::ERROR)
+                    .strong(),
+            );
+        });
+        ui.separator();
+        ui.add_space(8.0);
+        if ui::outline_button(ui, &i18n::t("module.show_panic"), egui::vec2(220.0, 30.0)).clicked()
+        {
+            *show_panic = true;
+        }
+        return;
+    }
     match view {
         Some(v) => {
             ui.heading(if v.title.is_empty() { name } else { &v.title });

@@ -108,7 +108,11 @@ loading = "Loading…"
 
 [module]
 result = "Result"
-failed_start = "This module failed to start:"
+failed_start = "This module never started. Limen is fine; the module is not loaded, so there is nothing here to use."
+inactive = "Panic error"
+show_panic = "Check panic message"
+panic_title = "Panic error"
+panic_help = "This module stopped part-way through a call. Limen kept running, but the module is out of service until it is restarted."
 
 [dev]
 tab_dev_mode = "Dev mode"
