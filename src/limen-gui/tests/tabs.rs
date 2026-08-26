@@ -268,5 +268,5 @@ fn a_module_that_panicked_in_its_tab_is_inactive_in_the_manager_too() {
 
     assert!(matches!(all.get("devices"), Some(Inactive::FailedStart(_))));
     assert!(matches!(all.get("loki"), Some(Inactive::Panicked(_))));
-    assert!(all.get("banlist").is_none());
+    assert!(!all.contains_key("banlist"));
 }
