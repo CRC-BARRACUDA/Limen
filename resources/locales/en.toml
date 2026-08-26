@@ -101,6 +101,9 @@ no_changes = "The release notes are no longer available."
 # The pop-up has no title bar text; this heading names the licence.
 heading = "GNU General Public License v3"
 intro = "Limen is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License, version 3 or later."
+# Shown above the Ukrainian text only. The FSF approves no translation, so the
+# reader has to know which document actually governs before reading this one.
+unofficial = "Unofficial translation (draft rev. 0.9.2) — only the English text is legally binding."
 
 [detail]
 unavailable = "This detail view is no longer available."

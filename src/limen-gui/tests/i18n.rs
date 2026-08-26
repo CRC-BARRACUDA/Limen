@@ -100,3 +100,53 @@ fn the_panic_screen_is_translated() {
     }
     set_locale(Lang::En);
 }
+
+/// The licence pop-up in Ukrainian carries a translation the FSF has not
+/// approved. The line that says so is the one string in the app that must
+/// never be missing — without it the reader is looking at a draft and cannot
+/// tell.
+#[test]
+fn the_unofficial_translation_is_declared_in_both_languages() {
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for lang in [Lang::En, Lang::Uk] {
+        set_locale(lang);
+        let said = t("license.unofficial");
+        assert_ne!(said, "license.unofficial", "{lang:?} does not declare it");
+        assert!(said.contains("0.9.2"), "{lang:?} does not say which revision");
+    }
+    set_locale(Lang::En);
+}
+
+/// The Ukrainian licence is a file on disk compiled into the binary, so the
+/// ways it can go wrong are silent: truncated on save, missing its provenance,
+/// or quietly replaced by something that is not the GPL at all.
+#[test]
+fn the_ukrainian_licence_is_whole_and_says_where_it_came_from() {
+    let uk = include_str!("../../../resources/licenses/LICENSE.uk.txt");
+    let en = include_str!("../../../LICENSE");
+    // The file is wrapped to a fixed column, so any phrase longer than a few
+    // words is split across lines. Search the text as one run of words.
+    let flat = uk.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Provenance, in both languages, before any clause is read.
+    assert!(flat.contains("НЕОФІЦІЙНИЙ ПЕРЕКЛАД"), "the Ukrainian notice is gone");
+    assert!(
+        flat.contains("not officially approved by the Free Software Foundation"),
+        "the English notice is gone"
+    );
+    assert!(flat.contains("Андрій Рисін"), "the translator is not credited");
+
+    // The terms run 0 to 17; a truncated save would take the last of them.
+    for section in ["0. Означення", "8. Припинення угоди", "17. Тлумачення"] {
+        assert!(flat.contains(section), "missing section: {section}");
+    }
+
+    // And it is the same document, not a summary of one: the English runs
+    // ~35k characters, so anything under half of that is not a licence.
+    assert!(
+        uk.len() > en.len() / 2,
+        "the translation is {} chars against the original's {}",
+        uk.len(),
+        en.len()
+    );
+}
