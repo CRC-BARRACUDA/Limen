@@ -54,6 +54,19 @@ pub fn calibrate(ctx: &egui::Context) {
     if dragging {
         return;
     }
+    // No drag in flight, so forget what the last one learned about the OS
+    // pointer: the next drag has to prove the position moves before it is
+    // believed again.
+    //
+    // This lives here, and not only in `drag_pos`, because `drag_pos` is called
+    // *lazily* — a field asks for it only while something it accepts is being
+    // dragged over the window. Its own `if !dragging` cleanup could therefore
+    // never run, and `moved` survived from one drag into the next: the second
+    // drag trusted a pointer that had not moved since the first, hit-tested
+    // every field against a stale position, and no drop zone opened again for
+    // the life of the process. `calibrate` runs every frame whatever is on
+    // screen, so the reset cannot be skipped.
+    ctx.data_mut(|d| d.remove::<(egui::Pos2, bool)>(drag_probe_id()));
     // `hover_pos` — not `pointer_latest_pos` — because the latter keeps
     // returning the last in-window position after the cursor leaves. Pairing
     // that stale point with a live OS one teaches an offset wrong by however far
@@ -206,5 +219,39 @@ mod imp {
 
     pub fn screen_pos() -> Option<egui::Pos2> {
         None
+    }
+}
+
+/// In this file rather than in `tests/`, because the invariant is about a piece
+/// of state nothing outside the module can name: the probe that decides whether
+/// the OS cursor may be believed during a drag. An integration test can see the
+/// drop zone fail to open, but not why.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A drag must not inherit the previous one's verdict.
+    ///
+    /// `moved` says "the OS position has been seen to change, so it can be
+    /// trusted". Left set, the next drag skips the probe and hit-tests against
+    /// whatever the platform reports — which under XWayland is the position the
+    /// pointer held before the compositor took the grab. Every field then
+    /// decides the cursor is somewhere else and none of them open, for good.
+    #[test]
+    fn an_idle_frame_forgets_what_the_last_drag_learned() {
+        let ctx = egui::Context::default();
+        let probe = (egui::pos2(100.0, 100.0), true);
+
+        // As the end of a drag leaves it.
+        ctx.data_mut(|d| d.insert_temp(drag_probe_id(), probe));
+        assert!(ctx.data(|d| d.get_temp::<(egui::Pos2, bool)>(drag_probe_id())).is_some());
+
+        // One frame with nothing being dragged clears it.
+        calibrate(&ctx);
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<(egui::Pos2, bool)>(drag_probe_id())),
+            None,
+            "the next drag would trust a pointer it never watched move"
+        );
     }
 }
