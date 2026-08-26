@@ -20,6 +20,11 @@ pub enum Launch {
     Binary(String),
     /// A dynamic library loaded in-process (path to the `.so`/`.dll`/`.dylib`).
     Native(String),
+    /// The manifest read, but there is nothing to launch — the library was not
+    /// built, the entry names a file that is not there. The module is still
+    /// listed, because a module the user installed and cannot see is worse than
+    /// one that says why it will not run.
+    Unavailable(String),
 }
 
 /// Everything the host needs to launch and wire one module — derived from its
@@ -57,7 +62,12 @@ impl ModuleSpec {
     /// Build a spec from the `limen.toml` in `dir`.
     pub fn from_manifest_dir(dir: &Path) -> Result<Self> {
         let manifest = Manifest::from_dir(dir)?;
-        let launch = build_launch(dir, &manifest)?;
+        // A module that cannot be launched is still a module. Failing here
+        // would abort the whole load — one un-built folder among ten and the
+        // app has no modules at all — so the reason is carried on the spec and
+        // surfaced when the user opens it.
+        let launch =
+            build_launch(dir, &manifest).unwrap_or_else(|e| Launch::Unavailable(format!("{e:#}")));
         Ok(Self {
             name: manifest.module.name,
             display_name: manifest.module.display_name,
