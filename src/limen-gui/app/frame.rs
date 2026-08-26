@@ -153,7 +153,7 @@ impl eframe::App for LimenApp {
                     // App icon (the ◈ brand mark) in place of the wordmark.
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
-                    draw_brand(ui.painter(), rect, 1.0, false);
+                    draw_brand(ui.painter(), rect, 1.0);
                     ui.add_space(12.0);
                     let active = self.active_tab();
                     if ui::chip(ui, &i18n::t("nav.about"), active == Some(Tab::About)).clicked() {
@@ -448,6 +448,11 @@ impl eframe::App for LimenApp {
         let mut action: Option<ui::Invoke> = None;
         let mut open_module: Option<String> = None;
         let mut remove_module: Option<String> = None;
+        // Set by the one button an inactive module has — on its tab, or on its
+        // card in the manager, which names the module.
+        let mut show_panic = false;
+        let mut check_panic: Option<String> = None;
+        let inactive_modules = self.inactive_modules();
         let mut add_module: Option<String> = None;
         let mut update_module: Option<String> = None;
         let mut do_update = false;
@@ -499,6 +504,7 @@ impl eframe::App for LimenApp {
                 available_updates,
                 view,
                 view_error,
+                inactive,
                 inputs,
                 output,
                 busy_action,
@@ -561,6 +567,7 @@ impl eframe::App for LimenApp {
                         Some(Tab::Modules) => modules_page(
                             ui,
                             modules,
+                            &inactive_modules,
                             git_installed,
                             git_meta,
                             available_updates,
@@ -572,6 +579,7 @@ impl eframe::App for LimenApp {
                             filter,
                             search,
                             &mut open_module,
+                            &mut check_panic,
                             &mut remove_module,
                             &mut add_module,
                             &mut update_module,
@@ -587,10 +595,12 @@ impl eframe::App for LimenApp {
                             module_reveal,
                             view,
                             view_error,
+                            inactive,
                             inputs,
                             output,
                             busy_action.as_ref(),
                             &mut action,
+                            &mut show_panic,
                         ),
                         Some(Tab::Detail { id }) => detail_view(ui, id, detail_tabs, &mut action),
                         Some(Tab::Settings) => settings_view(
@@ -707,6 +717,27 @@ impl eframe::App for LimenApp {
         // both paths run exactly the same removal.
         if let Some(name) = remove_module {
             self.pending_remove = Some(name);
+        }
+        if show_panic {
+            self.panic_shown = self.inactive.clone();
+            self.panic_open = true;
+        }
+        // From the manager, where the module is named rather than open.
+        if let Some(name) = check_panic {
+            self.panic_shown = inactive_modules.get(&name).cloned();
+            self.panic_open = true;
+        }
+        // Why the module is out of service. A pop-up rather than the screen: a
+        // panic payload is a wall of Rust and a start failure is a stack of
+        // loader context, and the tab behind it should still say plainly, in
+        // one line, that there is nothing here to use.
+        if self.panic_open || self.panic_alive {
+            let reason = self.panic_shown.clone();
+            let out = panic_dialog(ctx, self.panic_open, reason.as_ref());
+            if out.close || out.back {
+                self.panic_open = false;
+            }
+            self.panic_alive = !out.closed;
         }
         // The changelog pop-up.
         if self.changes_open || self.changes_alive {

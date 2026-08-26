@@ -192,3 +192,81 @@ fn returning_to_a_tab_resumes_a_loop_but_not_a_handover() {
     );
     assert!(!resumes(&handover), "the report was already handed over");
 }
+
+/// A module that is out of service stays that way while you look at another
+/// tab. The tab keeps every other scrap of its state across a swap, and this is
+/// the one piece that decides whether the module is called at all.
+#[test]
+fn an_inactive_module_is_still_inactive_when_you_come_back() {
+    let mut stored = HashMap::new();
+    let mut dead = page("loki");
+    dead.inactive = Some(Inactive::Panicked(
+        "module panicked in invoke: index out of bounds".to_string(),
+    ));
+
+    let onscreen = swap_page(dead, &mut stored, Some("loki"), Some("banlist"));
+    assert!(onscreen.inactive.is_none(), "banlist is fine");
+
+    let back = swap_page(onscreen, &mut stored, Some("banlist"), Some("loki"));
+    assert!(back.inactive.unwrap().detail().contains("index out of bounds"));
+}
+
+/// The screen reads the same either way — one line and one button. What
+/// differs is behind the button: a bug in the module, or something missing on
+/// this machine, which are not the same thing to go and fix.
+#[test]
+fn each_reason_explains_itself_behind_the_button() {
+    let panic = Inactive::Panicked("boom".to_string());
+    let start = Inactive::FailedStart("library not found".to_string());
+    assert_ne!(panic.help_key(), start.help_key());
+    assert_eq!(panic.detail(), "boom");
+    assert_eq!(start.detail(), "library not found");
+}
+
+/// What the host reports and what the tab shows are the same fact. A module the
+/// host could not start opens onto its reason rather than onto a call it cannot
+/// make — and one that started is left alone.
+#[test]
+fn a_module_the_host_could_not_start_opens_onto_why() {
+    let failed: HashMap<String, String> = [(
+        "devices".to_string(),
+        "could not find native library for \"devices_nope\"".to_string(),
+    )]
+    .into_iter()
+    .collect();
+
+    match inactive_for(&failed, "devices") {
+        Some(Inactive::FailedStart(why)) => assert!(why.contains("could not find native library")),
+        other => panic!("expected a start failure, got {other:?}"),
+    }
+    assert!(inactive_for(&failed, "loki").is_none(), "loki started fine");
+    assert!(inactive_for(&HashMap::new(), "devices").is_none());
+}
+
+/// The manager needs one answer per module, from two places: the host's own
+/// list of what would not start, and the tabs, where a module that panicked
+/// while running is the only record there is.
+#[test]
+fn a_module_that_panicked_in_its_tab_is_inactive_in_the_manager_too() {
+    let failed: HashMap<String, String> =
+        [("devices".to_string(), "no library".to_string())].into_iter().collect();
+    let mut pages: HashMap<String, ModulePage> = HashMap::new();
+    let mut loki = page("loki");
+    loki.inactive = Some(Inactive::Panicked("boom".to_string()));
+    pages.insert("loki".to_string(), loki);
+
+    // What `inactive_modules` composes, in the order it composes it.
+    let mut all: HashMap<String, Inactive> = failed
+        .iter()
+        .map(|(n, e)| (n.clone(), Inactive::FailedStart(e.clone())))
+        .collect();
+    for (name, p) in &pages {
+        if let Some(r) = &p.inactive {
+            all.insert(name.clone(), r.clone());
+        }
+    }
+
+    assert!(matches!(all.get("devices"), Some(Inactive::FailedStart(_))));
+    assert!(matches!(all.get("loki"), Some(Inactive::Panicked(_))));
+    assert!(!all.contains_key("banlist"));
+}

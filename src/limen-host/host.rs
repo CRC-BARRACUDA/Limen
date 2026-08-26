@@ -5,7 +5,7 @@ use std::collections::{HashMap};
 use std::path::{PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use limen_proto::rpc::METHOD_NOT_FOUND;
 use limen_proto::{RpcError};
 use serde_json::{json, Value};
@@ -42,9 +42,22 @@ impl Host {
     pub fn load(dirs: &[PathBuf]) -> Result<Self> {
         let mut specs = Vec::with_capacity(dirs.len());
         let mut seen_names = std::collections::HashSet::new();
+        let mut unreadable: HashMap<String, String> = HashMap::new();
         for dir in dirs {
-            let spec = ModuleSpec::from_manifest_dir(dir)
-                .with_context(|| format!("loading module at {}", dir.display()))?;
+            let spec = match ModuleSpec::from_manifest_dir(dir) {
+                Ok(spec) => spec,
+                Err(e) => {
+                    // The manifest itself is unreadable, so there is no name to
+                    // file this under but the folder's. Recorded rather than
+                    // returned: one bad folder used to mean no app at all.
+                    let name = dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string());
+                    unreadable.insert(name, format!("{e:#}"));
+                    continue;
+                }
+            };
             // The same module can appear in several search dirs (e.g. the portable
             // base and a local ./modules). Keep the first; skip re-discoveries so
             // it isn't mistaken for a duplicate-capability conflict.
@@ -52,7 +65,8 @@ impl Host {
                 specs.push(spec);
             }
         }
-        let (order, failed) = resolve_order(&specs);
+        let (order, mut failed) = resolve_order(&specs);
+        failed.extend(unreadable);
         Ok(Self {
             broker: Broker::new(),
             order,
@@ -218,6 +232,9 @@ impl Host {
             }
             Launch::Native(path) => NativeModule::load(spec.name.clone(), path, handler.clone())
                 .with_context(|| format!("loading native module {}", spec.name))?,
+            // Recorded at load time; raised here so it lands in `failed` with
+            // every other module that could not be started.
+            Launch::Unavailable(why) => bail!("{why}"),
         };
 
         // Initialize BEFORE registering, so a module that fails to init is never

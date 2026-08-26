@@ -90,6 +90,48 @@ pub fn swap_page(
     to.and_then(|name| stored.remove(name)).unwrap_or_default()
 }
 
+/// Why a module's tab shows a wall instead of a screen.
+///
+/// Two different failures that leave the user in the same place: there is
+/// nothing here to use, and the only thing to do is read what happened. They
+/// are told apart because the answer differs — one is a bug in the module, the
+/// other is usually something missing on this machine.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Inactive {
+    /// It panicked part-way through a call and the SDK caught the unwind. It is
+    /// still loaded, but its state is whatever the panic left behind.
+    Panicked(String),
+    /// It never started: a manifest it could not read, a library that would not
+    /// load, a runtime that is not installed. There was never a connection.
+    FailedStart(String),
+}
+
+/// Why this module's tab has nothing to show, given what the host reported.
+///
+/// `Host::failed_modules` records every module that would not start, keyed by
+/// name; the tab and the manager card both read their answer from it.
+pub fn inactive_for(failed: &HashMap<String, String>, module: &str) -> Option<Inactive> {
+    failed.get(module).map(|e| Inactive::FailedStart(e.clone()))
+}
+
+impl Inactive {
+    /// The line above the detail in the pop-up. The screen itself says the same
+    /// thing either way — what differs is the explanation behind the button.
+    pub fn help_key(&self) -> &'static str {
+        match self {
+            Inactive::Panicked(_) => "module.panic_help",
+            Inactive::FailedStart(_) => "module.failed_start",
+        }
+    }
+
+    /// What the module (or the loader) actually said.
+    pub fn detail(&self) -> &str {
+        match self {
+            Inactive::Panicked(d) | Inactive::FailedStart(d) => d,
+        }
+    }
+}
+
 /// Everything a module tab holds while it is not the one on screen.
 ///
 /// The module page's state used to be the app's, so switching tabs threw it away
@@ -100,6 +142,9 @@ pub fn swap_page(
 pub struct ModulePage {
     pub view: Option<ui::View>,
     pub view_error: Option<String>,
+    /// The module cannot be talked to, and why. The tab shows this in place of
+    /// a screen and stops calling it.
+    pub inactive: Option<Inactive>,
     pub modal_stack: Vec<ui::View>,
     pub modal_closing: Option<ui::View>,
     pub inputs: HashMap<String, String>,

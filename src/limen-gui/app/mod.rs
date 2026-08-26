@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use limen_core::{ModuleSpec, Runtime};
+use limen_proto::rpc;
 use limen_registry::RemoteModule;
 
 use crate::i18n;
@@ -102,6 +103,14 @@ pub struct LimenApp {
 
     pub(crate) view: Option<ui::View>,
     pub(crate) view_error: Option<String>,
+    /// The active tab's module cannot be talked to, and why.
+    pub(crate) inactive: Option<Inactive>,
+    /// What the detail pop-up is showing — the tab's own reason, or the one
+    /// named by a card in the manager.
+    pub(crate) panic_shown: Option<Inactive>,
+    /// The detail pop-up is open / still animating away.
+    pub(crate) panic_open: bool,
+    pub(crate) panic_alive: bool,
     /// Module pop-ups, innermost last. A view that arrives with `modal` set is
     /// pushed here instead of replacing the screen behind it.
     pub(crate) modal_stack: Vec<ui::View>,
@@ -268,6 +277,10 @@ impl LimenApp {
             active: 0,
             view: None,
             view_error: None,
+            inactive: None,
+            panic_shown: None,
+            panic_open: false,
+            panic_alive: false,
             consent_showing: None,
             quit_asking: false,
             quit_confirmed: false,
@@ -342,6 +355,7 @@ impl LimenApp {
         ModulePage {
             view: self.view.take(),
             view_error: self.view_error.take(),
+            inactive: self.inactive.take(),
             modal_stack: std::mem::take(&mut self.modal_stack),
             modal_closing: self.modal_closing.take(),
             inputs: std::mem::take(&mut self.inputs),
@@ -355,6 +369,7 @@ impl LimenApp {
     pub(crate) fn put_page(&mut self, p: ModulePage) {
         self.view = p.view;
         self.view_error = p.view_error;
+        self.inactive = p.inactive;
         self.modal_stack = p.modal_stack;
         self.modal_closing = p.modal_closing;
         self.inputs = p.inputs;
@@ -731,7 +746,13 @@ impl LimenApp {
                                         page.view_error = Some(format!("invalid UI spec: {e}"))
                                     }
                                 },
-                                Err(e) => page.view_error = Some(e),
+                                Err(e) => {
+                                    if let Some(detail) = rpc::panic_detail(&e) {
+                                        page.inactive =
+                                            Some(Inactive::Panicked(detail.to_string()));
+                                    }
+                                    page.view_error = Some(e);
+                                }
                             }
                             return;
                         }
@@ -752,6 +773,7 @@ impl LimenApp {
                                     }
                                 },
                                 Err(e) => {
+                                    self.note_panic(&e);
                                     self.view_error = Some(if e.contains("unknown method") {
                                         "This module does not provide a UI.".to_string()
                                     } else {
@@ -789,7 +811,10 @@ impl LimenApp {
                                 self.output = serde_json::to_string_pretty(&v)
                                     .unwrap_or_else(|e| e.to_string())
                             }
-                            Err(e) => self.output = format!("error: {e}"),
+                            Err(e) => {
+                                self.note_panic(&e);
+                                self.output = format!("error: {e}");
+                            }
                         }
                         self.status = "done".to_string();
                     }
@@ -821,7 +846,14 @@ impl LimenApp {
                                 }
                                 Err(e) => tab.error = Some(format!("invalid view: {e}")),
                             },
-                            Err(e) => tab.error = Some(format!("error: {e}")),
+                            Err(e) => {
+                                tab.error = Some(format!("error: {e}"));
+                                // A row's details come from the same handler as
+                                // the screen they were opened from, so a panic
+                                // here retires the module just the same — the
+                                // detail tab keeps its own message.
+                                self.note_panic(&e);
+                            }
                         }
                     }
                 },
@@ -848,19 +880,62 @@ impl LimenApp {
         }
     }
 
+    /// Note a module panic, if that is what this error was.
+    ///
+    /// A panicked module keeps its handle but not its wits: the SDK caught the
+    /// unwind part-way through a method, so whatever that method was changing
+    /// stayed half-changed. Calling it again asks it to reason from a state it
+    /// never meant to be in, so the tab stops and says so instead.
+    pub(crate) fn note_panic(&mut self, err: &str) -> bool {
+        match rpc::panic_detail(err) {
+            Some(detail) => {
+                self.inactive = Some(Inactive::Panicked(detail.to_string()));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Every module that cannot be used, and why: the ones the host could not
+    /// start, plus any that panicked while the app has been running. The
+    /// manager reads this so a card can say so before it is opened.
+    pub(crate) fn inactive_modules(&self) -> HashMap<String, Inactive> {
+        let mut out: HashMap<String, Inactive> = self
+            .failed
+            .iter()
+            .map(|(n, e)| (n.clone(), Inactive::FailedStart(e.clone())))
+            .collect();
+        for (name, page) in &self.module_pages {
+            if let Some(reason) = &page.inactive {
+                out.insert(name.clone(), reason.clone());
+            }
+        }
+        // The tab on screen keeps its page in the app's own fields, not in
+        // `module_pages` — so the module the user is looking at is the one that
+        // would otherwise be missing from this.
+        if let (Some(Tab::Module(name)), Some(reason)) = (self.active_tab(), &self.inactive) {
+            out.insert(name, reason.clone());
+        }
+        out
+    }
+
     pub(crate) fn select_module(&mut self, name: String) {
         // Opening the tab restores whatever it was showing, pop-up included.
         self.open_tab(Tab::Module(name.clone()));
+        // A module that is out of service is not asked for anything, now or later.
+        if self.inactive.is_some() {
+            return;
+        }
         // Coming back to a tab that already has a screen: leave it alone. Asking
         // the module for a fresh `ui` would throw away where the user was — a
         // half-filled form, an open settings pop-up, a finished scan's results.
         if self.view.is_some() || self.view_error.is_some() || self.busy {
             return;
         }
-        // A module that failed to start has no live connection — show why, here,
-        // instead of trying to call it (or blocking the whole app).
-        if let Some(err) = self.failed.get(&name) {
-            self.view_error = Some(format!("{}\n\n{err}", i18n::t("module.failed_start")));
+        // A module that failed to start has no live connection — say so and
+        // offer the reason, instead of trying to call it (or blocking the app).
+        if let Some(reason) = inactive_for(&self.failed, &name) {
+            self.inactive = Some(reason);
             return;
         }
         match self.first_capability(&name) {
@@ -953,6 +1028,11 @@ impl LimenApp {
     }
 
     pub(crate) fn dispatch(&mut self, invoke: ui::Invoke) {
+        // Nothing reaches a module that is out of service — not a chained
+        // `auto` step, not a button still on a screen drawn before it stopped.
+        if self.inactive.is_some() {
+            return;
+        }
         // A button that carries a question is not run until it is answered. The
         // module is never told about the click, so it cannot skip asking.
         if invoke.confirm.is_some() {

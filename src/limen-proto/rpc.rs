@@ -28,6 +28,10 @@ pub const INTERNAL_ERROR: i64 = -32603;
 pub const MODULE_ERROR: i64 = -32000;
 /// No installed module provides the requested capability.
 pub const NO_PROVIDER: i64 = -32004;
+/// A module panicked and the SDK caught the unwind instead of letting it abort
+/// the host. The module is still loaded, but its state is whatever the panic
+/// left behind — the UI reads this as "stop calling it and say so".
+pub const MODULE_PANIC: i64 = -32005;
 
 /// A request. `id` is absent for a fire-and-forget notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +101,16 @@ impl std::fmt::Display for RpcError {
 }
 
 impl std::error::Error for RpcError {}
+
+/// The panic message inside an error text, if that error was a module panic.
+///
+/// The error crosses into the UI as a formatted string — the worker thread
+/// renders the chain with `{e:#}` — so the code has to be read back out of
+/// `[code] message` rather than matched on the type.
+pub fn panic_detail(error: &str) -> Option<&str> {
+    let marker = format!("[{MODULE_PANIC}] ");
+    error.find(&marker).map(|at| &error[at + marker.len()..])
+}
 
 /// Either side of the conversation. Deserialization is `untagged`: a frame with
 /// a `method` field parses as a [`Request`], otherwise as a [`Response`].

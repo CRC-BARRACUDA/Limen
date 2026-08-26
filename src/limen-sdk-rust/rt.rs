@@ -3,6 +3,7 @@
 //! A module author never names anything in here - `export_module!` does.
 
 use core::ffi::c_void;
+use std::panic::AssertUnwindSafe;
 use std::sync::Mutex;
 
 use crate::*;
@@ -26,11 +27,16 @@ pub mod __rt {
         host_ctx: *mut c_void,
         host_call: HostCallFn,
     ) -> *mut c_void {
-        let state = Box::new(State::<H> {
-            handler: Mutex::new(H::default()),
-            host: Host { host_ctx, host_call },
-        });
-        Box::into_raw(state) as *mut c_void
+        std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let state = Box::new(State::<H> {
+                handler: Mutex::new(H::default()),
+                host: Host { host_ctx, host_call },
+            });
+            Box::into_raw(state) as *mut c_void
+        }))
+        // The host reads null as "this module failed to load", which is what
+        // a `Default` that panicked means.
+        .unwrap_or(std::ptr::null_mut())
     }
 
     /// # Safety
@@ -49,10 +55,14 @@ pub mod __rt {
         let params: Value =
             serde_json::from_slice(bytes(params_ptr, params_len)).unwrap_or(Value::Null);
 
-        let result = {
-            let mut handler = state.handler.lock().unwrap();
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            // A panic under the lock poisons it. The handler may be in an odd
+            // state afterwards, but the next call must still be answered
+            // rather than aborting for a second time.
+            let mut handler = state.handler.lock().unwrap_or_else(|e| e.into_inner());
             dispatch(&mut *handler, &state.host, &method, params)
-        };
+        }))
+        .unwrap_or_else(|payload| Err(panicked(&method, payload)));
         let (is_error, out) = match result {
             Ok(v) => (0, serde_json::to_vec(&v).unwrap_or_default()),
             Err(e) => (1, serde_json::to_vec(&e).unwrap_or_default()),
@@ -63,8 +73,31 @@ pub mod __rt {
     /// # Safety
     /// `handle` must have come from [`init`] for the same `H`; not used after.
     pub unsafe fn shutdown<H: Handler + 'static>(handle: *mut c_void) { unsafe {
-        drop(Box::from_raw(handle as *mut State<H>));
+        let state = Box::from_raw(handle as *mut State<H>);
+        // A `Drop` can panic too, and this one runs while the host is tearing
+        // the module down — the least useful moment to lose the process.
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(move || drop(state)));
     }}
+
+    /// Turn a caught panic into the error the call answers with.
+    ///
+    /// The generated entry points are `extern "C"`, and a panic cannot unwind
+    /// out of one: the runtime aborts instead, which ends the host and every
+    /// other module loaded into it. A module is someone else's code with an
+    /// `unwrap()` in it somewhere, so the unwind stops here and the host gets
+    /// something it can show. The panic itself still reaches stderr through
+    /// the normal hook, backtrace and all.
+    fn panicked(method: &str, payload: Box<dyn std::any::Any + Send>) -> RpcError {
+        let what = payload
+            .downcast_ref::<&'static str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown payload".to_string());
+        RpcError::new(
+            rpc::MODULE_PANIC,
+            format!("module panicked in {method}: {what}"),
+        )
+    }
 
     /// Translate the host's lifecycle methods into [`Handler`] calls.
     fn dispatch<H: Handler>(

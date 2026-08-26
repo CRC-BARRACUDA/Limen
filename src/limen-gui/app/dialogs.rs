@@ -5,6 +5,26 @@ use super::*;
 /// The full license text, embedded so it's always in sync with the repo.
 pub(crate) const LICENSE_TEXT: &str = include_str!("../../../LICENSE");
 
+/// The same license in Ukrainian — an unofficial translation, carried so a
+/// Ukrainian-speaking analyst can read the terms in their own language rather
+/// than take them on trust.
+///
+/// It is *not* the licence. The FSF approves no translation, and this one is
+/// a draft (rev. 0.9.2, Andriy Rysin and the linux.org.ua community); the file
+/// says so in both languages before its first clause. `LICENSE` in the repo
+/// root is the text that governs, which is why the pop-up names the English
+/// one whichever language it is showing.
+pub(crate) const LICENSE_TEXT_UK: &str = include_str!("../../../resources/licenses/LICENSE.uk.txt");
+
+/// Which text to show: the reader's language if there is one for it, and the
+/// English otherwise.
+pub(crate) fn license_text(lang: i18n::Lang) -> &'static str {
+    match lang {
+        i18n::Lang::Uk => LICENSE_TEXT_UK,
+        _ => LICENSE_TEXT,
+    }
+}
+
 /// What changed in the release on offer.
 ///
 /// The same pop-up as the license, for the same reason: it is something you
@@ -101,6 +121,18 @@ pub(crate) fn license_dialog(ctx: &egui::Context, open: bool) -> ui::Overlay {
                 ..Default::default()
             },
         );
+        // Whose translation this is, said before it is read rather than after.
+        // Only in Ukrainian: in English there is nothing to disclaim.
+        if i18n::locale() == i18n::Lang::Uk {
+            ui.add_space(4.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new(i18n::t("license.unofficial"))
+                        .size(11.5)
+                        .color(ui::color::WARNING),
+                );
+            });
+        }
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(6.0);
@@ -109,11 +141,11 @@ pub(crate) fn license_dialog(ctx: &egui::Context, open: bool) -> ui::Overlay {
         // and nobody opens a license to watch it arrive. A plain label, so it
         // reads as the document it is and can be copied.
         //
-        // The block is centred; the lines inside it are not. That distinction
-        // is the whole point — the text is pre-wrapped monospace, and its own
-        // indentation is what lines the headings and the numbered terms up.
-        // Centring each line would take that apart. Centring the block just
-        // stops it hugging the left edge of a window twice its width.
+        // Left-aligned, and flush with the rest of the pop-up. The block was
+        // centred, which set it adrift: its left edge moved with the longest
+        // line in it, so the licence started at a different place from the
+        // heading above it and from the Ukrainian text, which wraps to a
+        // different width. A document reads from a fixed left margin.
         //
         // The height is fixed, and that is load-bearing. The overlay already
         // puts its content in a scroll area; an unbounded one nested inside it
@@ -126,20 +158,54 @@ pub(crate) fn license_dialog(ctx: &egui::Context, open: bool) -> ui::Overlay {
             .min_scrolled_height(BODY_H)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // `vertical_centered` centres the widget, and the widget is the
-                // whole block: its width is that of the longest line, because
-                // nothing in it is long enough to wrap at this width.
-                ui.vertical_centered(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(LICENSE_TEXT)
-                                .monospace()
-                                .size(11.5)
-                                .color(ui::color::TEXT_MUTED),
-                        )
-                        .selectable(true),
-                    );
-                });
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(license_text(i18n::locale()))
+                            .monospace()
+                            .size(11.5)
+                            .color(ui::color::TEXT_MUTED),
+                    )
+                    .selectable(true),
+                );
+            });
+    })
+}
+
+/// What a module said as it panicked.
+///
+/// The SDK catches the unwind and hands the message back as an error, which
+/// means the text is a panic payload with a file and a line in it — useful to
+/// whoever maintains the module, noise to whoever is using it. So it is here,
+/// behind one button, rather than on the screen.
+pub(crate) fn panic_dialog(ctx: &egui::Context, open: bool, reason: Option<&Inactive>) -> ui::Overlay {
+    let (title, help, text) = match reason {
+        Some(r) => (i18n::t("module.panic_title"), i18n::t(r.help_key()), r.detail()),
+        None => (String::new(), String::new(), ""),
+    };
+    let opts = ui::OverlayOpts {
+        width: 720.0,
+        max_height: 420.0,
+        title: Some(title),
+        close: true,
+        ..Default::default()
+    };
+    ui::overlay(ctx, egui::Id::new("limen_module_panic"), open, &opts, |ui| {
+        ui.label(&help);
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Selectable and monospaced: this text is meant to be copied
+                // into a bug report, not read for pleasure.
+                let mut body = text;
+                ui.add(
+                    egui::TextEdit::multiline(&mut body)
+                        .desired_width(f32::INFINITY)
+                        .code_editor(),
+                );
             });
     })
 }
