@@ -34,7 +34,60 @@ fn prefer_x11() {
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 fn prefer_x11() {}
 
+/// Be the elevated supervisor instead of opening a window, when asked.
+///
+/// The supervisor is a *binary run as root by path*, so which path Limen hands
+/// to `pkexec`/UAC decides what gets root. It hands over the running executable
+/// — the one binary an attacker cannot swap without having already won — rather
+/// than a sibling file that no digest, lockfile or trust approval covers, and
+/// that on a portable install sits on the USB stick writable by every machine it
+/// has ever touched. The cost of that choice is this function: the GUI binary
+/// must understand `supervise` too, because it is now sometimes the supervisor.
+///
+/// Parsed by hand, ahead of everything. There is no clap here, and this must run
+/// before the window, the translator, or anything that wants a display — an
+/// elevated helper has no session to open one in.
+///
+/// `Some(code)` means we were the supervisor and are done; `None` means carry on
+/// and be the app.
+fn supervise_instead() -> Option<i32> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some("supervise") {
+        return None;
+    }
+    let (mut socket, mut cwd, mut argv) = (String::new(), None, Vec::new());
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--connect" => socket = args.next().unwrap_or_default(),
+            "--cwd" => cwd = args.next(),
+            // Everything after `--` is the command, fixed here on the command
+            // line: it is what the authorization covered, and the socket is
+            // never allowed to introduce another.
+            "--" => {
+                argv.extend(args.by_ref());
+                break;
+            }
+            _ => {}
+        }
+    }
+    if socket.is_empty() || argv.is_empty() {
+        eprintln!("supervise: needs --connect <socket> and a command after --");
+        return Some(2);
+    }
+    Some(match limen_core::supervise(&socket, cwd.as_deref(), &argv) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("supervise: {e:#}");
+            1
+        }
+    })
+}
+
 fn main() -> eframe::Result<()> {
+    // Before the window, the translator, or anything needing a display.
+    if let Some(code) = supervise_instead() {
+        std::process::exit(code);
+    }
     prefer_x11();
     // The toolkit has strings of its own — month names, the words on pop-up
     // buttons — but no catalogs and no opinion about language. It asks through

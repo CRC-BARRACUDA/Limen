@@ -23,6 +23,7 @@ mod notify;
 mod sdk;
 mod spec;
 mod supervisor;
+mod supervise;
 mod module;
 mod native;
 pub mod runtimes;
@@ -41,6 +42,12 @@ pub use spec::{Launch, ModuleSpec};
 // as public as the functions are — otherwise callers (the supervisor test among
 // them) cannot name what they are handed.
 pub use supervisor::{sup_accept, sup_cleanup, supervised, SupLink, SupServer};
+
+/// The elevated supervisor's own entry point. Public because *every* Limen
+/// binary has to be able to be one: the supervisor is elevated by path, so the
+/// path used must be a binary already trusted to run — which means the running
+/// executable itself, whichever it is (see `supervisor_bin`).
+pub use supervise::run as supervise;
 pub use module::{stderr_logger, IncomingHandler, Logger, Module};
 pub use native::NativeModule;
 pub use runtimes::{Runtime, RuntimeStatus};

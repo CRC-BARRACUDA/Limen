@@ -25,6 +25,31 @@ fn still_running(pid: u32) -> bool {
     }
 }
 
+/// Fail the run — loudly — if we are still here in `secs`.
+///
+/// `sup_accept` blocks with no timeout, which is right in production (the
+/// authorization prompt is up for as long as the user takes) and wrong in a
+/// test: a binary that does not supervise never connects, so the test hangs
+/// rather than failing, and CI reports a timeout with nothing in it. Returns a
+/// guard that calls the whole thing off when the test gets there under its own
+/// power.
+fn deadline(secs: u64, what: &'static str) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let watch = done.clone();
+    std::thread::spawn(move || {
+        for _ in 0..secs * 10 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if watch.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+        eprintln!("\ntimed out after {secs}s: {what}");
+        std::process::exit(1);
+    });
+    done
+}
+
 /// Something that runs long enough to still be there when we look.
 fn slow_command() -> Vec<String> {
     if cfg!(windows) {
@@ -98,6 +123,72 @@ fn the_supervisor_reports_its_child_and_ends_it_when_the_link_closes() {
         !still_running(pid)
     });
     assert!(gone, "the command outlived the supervisor: pid {pid}");
+    sup_cleanup(&sock);
+}
+
+/// Every Limen binary can be the supervisor — including the GUI.
+///
+/// This is what makes elevating the *running executable* safe to do at all.
+/// The supervisor is handed to `pkexec`/UAC by path, so that path is what gets
+/// root; it used to be a sibling `limen-cli`, a file covered by no digest, no
+/// lockfile and no trust approval, sitting on the USB stick where anything the
+/// stick was ever plugged into could rewrite it. Elevating the running binary
+/// closes that, but only if the running binary answers `supervise` — and for the
+/// GUI that is a hand-rolled argument parse ahead of `main`, easy to break and
+/// invisible when broken: the failure mode is not an error but a **second Limen
+/// window, opened as root**.
+///
+/// So the GUI binary is started here exactly as the elevation helper would start
+/// it, and is required to behave as a supervisor rather than as an app.
+#[test]
+fn the_gui_binary_can_be_the_supervisor_too() {
+    use limen_proto::NoConsole;
+
+    // tests live in target/<profile>/deps/, the binaries one level up.
+    let exe = std::env::current_exe().expect("our own path");
+    let name = if cfg!(windows) { "Limen.exe" } else { "Limen" };
+    let gui = exe.parent().and_then(|d| d.parent()).map(|d| d.join(name));
+    let Some(gui) = gui.filter(|p| p.exists()) else {
+        eprintln!("skipped: no Limen binary beside the test — run `cargo build` first");
+        return;
+    };
+
+    let Some((argv, server, sock)) = supervised(9003, &slow_command(), None) else {
+        eprintln!("skipped: no supervisor binary — run `cargo build` first");
+        return;
+    };
+    // Same arguments the helper would use, but pointed at the GUI: it is the
+    // running executable whenever the elevation was asked for from the app.
+    let mut sup = std::process::Command::new(&gui)
+        .args(&argv[1..])
+        .no_console()
+        .spawn()
+        .expect("start the GUI as a supervisor");
+
+    // A GUI that ignores `supervise` opens a window instead and never connects,
+    // so the accept below would block for ever rather than fail.
+    let done = deadline(30, "the GUI never connected back — it is not supervising");
+    let link = sup_accept(server).expect("the GUI connects back as a supervisor");
+    let mut line = String::new();
+    BufReader::new(link.try_clone().expect("clone the link"))
+        .read_line(&mut line)
+        .expect("read the pid it reports");
+    let pid: u32 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("the GUI did not supervise; it said {line:?}"));
+    assert!(still_running(pid), "the GUI supervised nothing");
+
+    // And it is a supervisor all the way through, not just at the greeting.
+    drop(link);
+    let gone = (0..60).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        !still_running(pid)
+    });
+    assert!(gone, "the command outlived the link: pid {pid}");
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = sup.wait();
     sup_cleanup(&sock);
 }
 
