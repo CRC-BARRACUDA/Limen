@@ -9,7 +9,6 @@
 //!   limen run demo.native shout --params '{"name":"world"}'
 //!   limen demo
 
-mod supervise;
 
 use std::path::PathBuf;
 
@@ -102,7 +101,7 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Command::Supervise { connect, cwd, argv } => {
-            let code = supervise::run(connect, cwd.as_deref(), argv)?;
+            let code = limen_core::supervise(connect, cwd.as_deref(), argv)?;
             std::process::exit(code);
         }
         Command::Modules => {

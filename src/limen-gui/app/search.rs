@@ -27,6 +27,26 @@ pub struct Term {
 /// Terms are ANDed, so `tag:ua programs` means "tagged ua *and* named programs".
 /// An unrecognised prefix is not a field — `foo:bar` is searched literally as a
 /// name, so a colon in a name never silently matches nothing.
+/// The installed list with starred modules lifted to the top.
+///
+/// The sort is **stable**, and that is the whole requirement: everything inside
+/// each group keeps the order the engine loaded it in, so starring one module
+/// lifts that module and moves nothing else. An unstable sort would reshuffle the
+/// rest of the list as a side effect of a single click, which reads as a bug even
+/// though every module is still present.
+///
+/// A name in `favorites` that is not installed is simply absent from the result —
+/// the set is a record of the user's marks, not a claim about what exists, and a
+/// module that was removed and put back keeps its star.
+pub fn favorites_first<'a>(
+    modules: &'a [ModuleSpec],
+    favorites: &HashSet<String>,
+) -> Vec<&'a ModuleSpec> {
+    let mut ordered: Vec<&ModuleSpec> = modules.iter().collect();
+    ordered.sort_by_key(|m| !favorites.contains(&m.name));
+    ordered
+}
+
 pub fn parse_query(query: &str) -> Vec<Term> {
     query
         .split_whitespace()

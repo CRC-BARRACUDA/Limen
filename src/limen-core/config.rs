@@ -3,6 +3,7 @@
 //! Everything has a sensible default, so the file is optional. Only fields the
 //! user changes need to be present.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -43,6 +44,28 @@ pub struct Config {
     #[serde(default)]
     pub language: Option<String>,
 
+    /// Modules the user marked as favourites, by name.
+    ///
+    /// Kept as a list rather than a flag on the module because a module is a
+    /// directory on disk that installs, updates and is removed — it is not the
+    /// place for a preference *about* it. A name that no longer resolves to an
+    /// installed module is simply not shown; it is left in the file so that
+    /// removing a module and putting it back does not silently lose the mark.
+    #[serde(default)]
+    pub favorites: Vec<String>,
+
+    /// User-made categories: category name -> the modules in it.
+    ///
+    /// The grouping lives here rather than in each module's manifest because it
+    /// is the operator's, not the author's: two people running the same fleet
+    /// will group the same modules differently, and a category has to be able to
+    /// hold modules from repositories that have never heard of each other.
+    ///
+    /// A `BTreeMap` so the file has a stable order and stops churning between
+    /// saves, and so the menus list categories the same way every time.
+    #[serde(default)]
+    pub categories: BTreeMap<String, Vec<String>>,
+
     /// A GitHub token (personal access token) for the module registry, set by an
     /// administrator in Developer mode. When present, registry requests are
     /// authenticated — raising the rate limit from 60/hour (unauthenticated, per
@@ -61,6 +84,8 @@ impl Default for Config {
             animations: true,
             alerts: true,
             language: None,
+            favorites: Vec::new(),
+            categories: BTreeMap::new(),
             github_token: None,
         }
     }
