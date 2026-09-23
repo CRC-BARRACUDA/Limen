@@ -14,7 +14,14 @@ use crate::*;
 /// the last slot, so it reads as a cascade without ever outstaying it.
 pub fn row_reveal(ui: &mut egui::Ui, cols: &[String], nrows: usize, r: usize) -> f32 {
     const CAP: usize = 18;
-    let id = egui::Id::new(("tablereveal", cols.len(), cols.first().cloned(), nrows));
+    // Keyed by *where* this table is as well as what shape it is. Shape alone
+    // made two same-shaped tables in one view — a sysinfo page's "System" and
+    // "Operating system", both seven rows of two columns — share one id, and
+    // egui reports that as an ID clash across the screen. `auto_id_with` adds the
+    // widget's position in the sequence, which is stable frame to frame, so a
+    // table still keeps its clock across refreshes and still restarts when its
+    // shape changes.
+    let id = ui.auto_id_with(("tablereveal", cols.len(), cols.first().cloned(), nrows));
     let now = ui.input(|i| i.time);
     // When this table's shape was first seen...
     let shape = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || now));
@@ -69,7 +76,13 @@ pub fn render_table(
 
 /// A non-interactive table: a striped grid of labels inside a scroll area.
 pub fn render_plain_table(ui: &mut egui::Ui, columns: &[String], rows: &[Vec<String>], ncols: usize) {
-    let id = ui.make_persistent_id(("limen_table", ncols, rows.len()));
+    // Position as well as shape — see `row_reveal`. Two tables of the same size
+    // in one view are ordinary here (one per section), and sharing a ScrollArea
+    // or Grid id between them paints egui's clash warning over the page.
+    let id = ui.auto_id_with(("limen_table", ncols, rows.len()));
+    // So that a table which allocates nothing still advances the counter, and the
+    // next one cannot land on this id.
+    ui.skip_ahead_auto_ids(1);
     // Never wider than what it was given. Left to shrink-wrap its content, a
     // wide table stretches whatever holds it — and in a pop-up that means the
     // frame grows while the title bar stays at the declared width, leaving the
@@ -149,7 +162,8 @@ pub fn render_interactive_table(
     let row_h = font.size + pad_y * 2.0;
     let rounding = egui::Rounding::ZERO;
 
-    let id = ui.make_persistent_id(("limen_itable", ncols, rows.len()));
+    let id = ui.auto_id_with(("limen_itable", ncols, rows.len()));
+    ui.skip_ahead_auto_ids(1);
     egui::ScrollArea::horizontal().id_source(id).show(ui, |ui| {
         // Stretch to the viewport so a row's highlight spans the full width.
         let table_w = content_w.max(ui.available_width());
