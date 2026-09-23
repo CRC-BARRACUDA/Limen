@@ -7,6 +7,8 @@ use super::*;
 pub enum Tab {
     About,
     Modules,
+    /// The categories the user has made, and what is in them.
+    Categories,
     Module(String),
     Settings,
     Developer,
@@ -22,6 +24,7 @@ impl Tab {
         match self {
             Tab::About => i18n::t("tab.about"),
             Tab::Modules => i18n::t("tab.modules"),
+            Tab::Categories => i18n::t("tab.categories"),
             Tab::Module(n) => n.clone(),
             Tab::Settings => i18n::t("tab.settings"),
             Tab::Developer => i18n::t("tab.developer"),

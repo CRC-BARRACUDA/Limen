@@ -17,7 +17,10 @@ pub mod update;
 
 pub use config::Config;
 pub use engine::Engine;
-pub use limen_host::{runtimes::Runtime, Logger, ModuleSpec};
+// `Launch` travels as a public field of `ModuleSpec`, so it was already part of
+// this crate's surface — just unnameable, which left a `ModuleSpec` impossible
+// to construct from outside. Exported so it can be.
+pub use limen_host::{runtimes::Runtime, Launch, Logger, ModuleSpec};
 // Re-exported because *every* Limen binary must be able to be the elevated
 // supervisor: it is elevated by path, and the only path safe to hand to `pkexec`
 // is the running executable's own (see `limen_host::supervisor_bin`).

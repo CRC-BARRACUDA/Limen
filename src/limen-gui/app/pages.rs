@@ -5,6 +5,7 @@ use super::*;
 mod about;
 mod developer;
 mod module;
+mod categories;
 mod modules;
 mod settings;
 mod update;
@@ -12,6 +13,7 @@ mod update;
 pub(crate) use about::*;
 pub(crate) use developer::*;
 pub(crate) use module::*;
+pub(crate) use categories::*;
 pub(crate) use modules::*;
 pub(crate) use settings::*;
 pub(crate) use update::*;
@@ -20,6 +22,7 @@ pub(crate) use update::*;
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum ModuleFilter {
     All,
+    Favorites,
     Installed,
     Available,
 }
@@ -275,6 +278,64 @@ pub(crate) fn warn_badge(ui: &mut egui::Ui, text: &str) {
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).size(11.0).color(ui::color::ERROR));
         });
+}
+
+/// The favourite star: filled when set, outlined when not.
+///
+/// **Drawn, not written.** A glyph would have been three lines, but the UI font is
+/// JetBrains Mono, which has no star — so it would have fallen through to egui's
+/// bundled fallback and rendered in a different typeface at a different weight,
+/// the same way the Cyrillic text did before the font was pinned. Painting it
+/// costs the geometry below and owes nothing to what any font happens to carry.
+///
+/// A filled star is a triangle fan from its own centre, which is valid here
+/// because a star polygon is star-shaped about that centre — `convex_polygon`
+/// would close over the concave points and fill a pentagon instead.
+pub(crate) fn star(ui: &mut egui::Ui, on: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hot = resp.hovered();
+        let color = match (on, hot) {
+            (true, _) => ui::color::ACCENT_BRIGHT,
+            (false, true) => ui::color::ACCENT,
+            (false, false) => ui::color::TEXT_MUTED,
+        };
+        let c = rect.center();
+        let (r_out, r_in) = (rect.width() * 0.46, rect.width() * 0.46 * 0.42);
+        // Ten points, alternating outer and inner, starting at the top so the
+        // star sits upright.
+        let pts: Vec<egui::Pos2> = (0..10)
+            .map(|i| {
+                let a = -std::f32::consts::FRAC_PI_2
+                    + i as f32 * std::f32::consts::PI / 5.0;
+                let r = if i % 2 == 0 { r_out } else { r_in };
+                egui::pos2(c.x + r * a.cos(), c.y + r * a.sin())
+            })
+            .collect();
+        if on {
+            let mut mesh = egui::Mesh::default();
+            mesh.colored_vertex(c, color);
+            for p in &pts {
+                mesh.colored_vertex(*p, color);
+            }
+            for i in 0..10u32 {
+                mesh.add_triangle(0, 1 + i, 1 + (i + 1) % 10);
+            }
+            ui.painter().add(egui::Shape::mesh(mesh));
+        } else {
+            let mut outline = pts.clone();
+            outline.push(pts[0]); // close it
+            ui.painter()
+                .add(egui::Shape::line(outline, egui::Stroke::new(1.2_f32, color)));
+        }
+    }
+    let tip = if on {
+        "modules.favorite_remove"
+    } else {
+        "modules.favorite_add"
+    };
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(i18n::t(tip))
 }
 
 /// The About page. Returns `true` if the "License" button was clicked.

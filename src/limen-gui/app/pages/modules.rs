@@ -2,6 +2,18 @@
 
 use crate::app::*;
 
+/// What the Modules page needs to narrow itself to a category.
+///
+/// Read-only apart from the filter, because categories are *made* on the
+/// Categories page — this one only offers them as another way of narrowing the
+/// same list, beside the All / Installed / Available chips.
+pub(crate) struct Categories<'a> {
+    /// Every category and its members.
+    pub all: &'a BTreeMap<String, BTreeSet<String>>,
+    /// The category the list is narrowed to, if any.
+    pub filter: &'a mut Option<String>,
+}
+
 /// The Modules page — a Zed-Extensions-style list: installed modules plus the
 /// ones available in the GitHub org (installable in a click).
 #[allow(clippy::too_many_arguments)]
@@ -29,6 +41,12 @@ pub(crate) fn modules_page(
     shown_filter: &mut ModuleFilter,
     remote_arrivals: &HashMap<String, f64>,
     removing: &HashMap<String, f64>,
+    favorites: &HashSet<String>,
+    // The module whose star was clicked this frame, for the app to toggle and
+    // persist. Reported rather than mutated here for the same reason as every
+    // other action on this page: the page draws, the app decides.
+    toggle_favorite: &mut Option<String>,
+    cats: &mut Categories,
 ) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -55,12 +73,53 @@ pub(crate) fn modules_page(
     ui.horizontal(|ui| {
         for (value, key) in [
             (ModuleFilter::All, "modules.filter.all"),
+            (ModuleFilter::Favorites, "modules.filter.favorites"),
             (ModuleFilter::Installed, "modules.filter.installed"),
             (ModuleFilter::Available, "modules.filter.available"),
         ] {
             if ui::chip(ui, &i18n::t(key), *filter == value).clicked() {
                 *filter = value;
             }
+        }
+        // The categories dropdown sits with the filters because that is what it
+        // is: another way of narrowing the same list. Only shown once there is a
+        // category to pick — an empty dropdown teaches nobody anything.
+        //
+        // `ui::dropdown` rather than `egui::ComboBox`: the house widget is the
+        // same 28px tall as the chips beside it and is allocated the same way, so
+        // the row lines up. A ComboBox places its own frame from the cursor and
+        // sat five pixels low — and it animates like the rest of the app, which a
+        // ComboBox does not.
+        if !cats.all.is_empty() {
+            ui.add_space(8.0);
+            let any = i18n::t("modules.category.any");
+            // The labels the user picks from, and the category each one means.
+            // `None` is "all categories", which is why these are parallel rather
+            // than one map: the first entry names no category at all.
+            let mut labels = vec![any.clone()];
+            let mut names: Vec<Option<String>> = vec![None];
+            for (name, members) in cats.all {
+                // Installed members only — the same rule the list below uses, so
+                // the count cannot promise rows that never appear.
+                let shown = members
+                    .iter()
+                    .filter(|n| modules.iter().any(|m| &m.name == *n))
+                    .count();
+                labels.push(format!("{name}  ({shown})"));
+                names.push(Some(name.clone()));
+            }
+            let mut value = cats
+                .filter
+                .as_deref()
+                .and_then(|c| names.iter().position(|n| n.as_deref() == Some(c)))
+                .map_or_else(|| any.clone(), |i| labels[i].clone());
+            ui::dropdown(ui, "modcats", &mut value, &labels);
+            // A filter naming a category that has since been deleted finds no
+            // label, falls back to "all categories", and is cleared here.
+            *cats.filter = labels
+                .iter()
+                .position(|l| *l == value)
+                .and_then(|i| names[i].clone());
         }
         if remote_loading {
             ui.add_space(8.0);
@@ -103,8 +162,16 @@ pub(crate) fn modules_page(
         let mut shown = 0;
         let animate = ui::animations_enabled();
 
-        for m in modules.iter() {
+        for m in favorites_first(modules, favorites) {
             if *filter == ModuleFilter::Available || !module_matches(m, &terms) {
+                continue;
+            }
+            if *filter == ModuleFilter::Favorites && !favorites.contains(&m.name) {
+                continue;
+            }
+            if let Some(cat) = cats.filter.as_deref()
+                && !cats.all.get(cat).is_some_and(|ms| ms.contains(&m.name))
+            {
                 continue;
             }
             let rt = match removing.get(m.name.as_str()) {
@@ -129,6 +196,8 @@ pub(crate) fn modules_page(
                     update,
                     &mut tag_click,
                     &providers,
+                    favorites.contains(&m.name),
+                    toggle_favorite,
                 );
             });
             shown += 1;
@@ -142,7 +211,11 @@ pub(crate) fn modules_page(
         // as this did — meant a card fetched minutes ago had a long-past start
         // time and snapped in without animating whenever the tab was reopened.
         for r in remote {
+            // Nothing in the org list can be starred: a favourite is a module you
+            // reach for, and one that is not installed is not reachable yet.
             if *filter == ModuleFilter::Installed
+                || *filter == ModuleFilter::Favorites
+                || cats.filter.is_some()
                 || installed_names.contains(r.name.as_str())
                 || !remote_matches(r, &terms)
             {
@@ -170,9 +243,15 @@ pub(crate) fn modules_page(
         if shown == 0 && !remote_loading {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new(i18n::t("modules.none_match")).color(ui::color::TEXT_MUTED),
-                );
+                // An empty Favourites tab is not "nothing matched" — it is a
+                // feature nobody has used yet, and saying which explains where
+                // the stars are for.
+                let key = if *filter == ModuleFilter::Favorites && favorites.is_empty() {
+                    "modules.none_favorite"
+                } else {
+                    "modules.none_match"
+                };
+                ui.label(egui::RichText::new(i18n::t(key)).color(ui::color::TEXT_MUTED));
             });
         }
     });
@@ -202,6 +281,8 @@ pub(crate) fn module_card(
     update: &mut Option<String>,
     tag_click: &mut Option<String>,
     providers: &HashMap<&str, &ModuleSpec>,
+    is_favorite: bool,
+    toggle_favorite: &mut Option<String>,
 ) {
     // This card is mid-update; another install/update is running somewhere.
     let this_busy = installing.as_deref() == Some(m.name.as_str());
@@ -249,6 +330,13 @@ pub(crate) fn module_card(
                             }
                             if inactive.is_some() {
                                 warn_badge(ui, &i18n::t("module.inactive"));
+                            }
+                            // The star sits with the name rather than among the
+                            // action buttons: it says something about the module,
+                            // not something to do with it, and it must not end up
+                            // next to Remove.
+                            if star(ui, is_favorite).clicked() {
+                                *toggle_favorite = Some(m.name.clone());
                             }
                         });
                         if let Some(desc) = localized_desc(ui, m) {

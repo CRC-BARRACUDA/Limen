@@ -163,6 +163,15 @@ impl eframe::App for LimenApp {
                     {
                         open_tab = Some(Tab::Modules);
                     }
+                    if ui::chip(
+                        ui,
+                        &i18n::t("nav.categories"),
+                        active == Some(Tab::Categories),
+                    )
+                    .clicked()
+                    {
+                        open_tab = Some(Tab::Categories);
+                    }
                     // "Update available" pill, next to Modules.
                     if self.update.is_some() {
                         ui.add_space(6.0);
@@ -455,6 +464,13 @@ impl eframe::App for LimenApp {
         let inactive_modules = self.inactive_modules();
         let mut add_module: Option<String> = None;
         let mut update_module: Option<String> = None;
+        // The star clicked this frame; applied after the borrow of `self` the
+        // page drawing holds is released.
+        let mut toggle_favorite: Option<String> = None;
+        // The same, for the category menu on a card.
+        let mut toggle_category: Option<(String, String)> = None;
+        let mut create_category: Option<String> = None;
+        let mut delete_category: Option<String> = None;
         let mut do_update = false;
         let active_tab = self.active_tab();
         let update_info = self.update.clone();
@@ -471,6 +487,11 @@ impl eframe::App for LimenApp {
             self.about_revealed_at.get_or_insert(now_t);
         } else {
             self.about_revealed_at = None;
+        }
+        if active_tab == Some(Tab::Categories) {
+            self.categories_revealed_at.get_or_insert(now_t);
+        } else {
+            self.categories_revealed_at = None;
         }
         if active_tab == Some(Tab::Settings) {
             self.settings_revealed_at.get_or_insert(now_t);
@@ -527,6 +548,11 @@ impl eframe::App for LimenApp {
                 dev_limen_path,
                 dev_modules_path,
                 removing,
+                favorites,
+                categories,
+                categories_revealed_at,
+                category_filter,
+                new_category,
                 modules_revealed_at,
                 shown_filter,
                 remote_arrivals,
@@ -588,6 +614,26 @@ impl eframe::App for LimenApp {
                             shown_filter,
                             remote_arrivals,
                             removing,
+                            favorites,
+                            &mut toggle_favorite,
+                            &mut Categories {
+                                all: categories,
+                                filter: category_filter,
+                            },
+                        ),
+                        Some(Tab::Categories) => categories_page(
+                            ui,
+                            &mut CategoriesPage {
+                                all: categories,
+                                modules,
+                                new_name: new_category,
+                                create: &mut create_category,
+                                toggle: &mut toggle_category,
+                                delete: &mut delete_category,
+                                reveal_at: categories_revealed_at.unwrap_or(now_t),
+                                now: now_t,
+                                animate: ui::animations_enabled(),
+                            },
                         ),
                         Some(Tab::Module(name)) => module_view(
                             ui,
@@ -799,6 +845,22 @@ impl eframe::App for LimenApp {
             if !self.removing.is_empty() {
                 ctx.request_repaint();
             }
+        }
+        // A star was clicked: flip it and write settings. Done here, after the
+        // page has finished drawing, because the draw holds a borrow of `self`
+        // and this needs `&mut self` to persist.
+        if let Some(name) = toggle_favorite {
+            self.toggle_favorite(&name);
+        }
+        if let Some((module, category)) = toggle_category {
+            self.toggle_category(&module, &category);
+        }
+        if let Some(name) = create_category {
+            self.create_category(&name);
+            self.new_category.clear();
+        }
+        if let Some(name) = delete_category {
+            self.delete_category(&name);
         }
         if let Some(reference) = add_module {
             self.busy = true;

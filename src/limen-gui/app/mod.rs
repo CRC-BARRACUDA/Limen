@@ -11,7 +11,7 @@
 //!
 //! All engine work is on the [`Worker`] thread, so the UI never blocks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -64,6 +64,22 @@ pub struct LimenApp {
     /// Names of modules the user has granted their declared permissions
     /// (trusted at their current content digest).
     pub(crate) trusted: HashSet<String>,
+    /// Modules the user starred, loaded from settings and written straight back
+    /// on every change. A set, not a list: the only questions asked of it are
+    /// "is this one starred" and "sort these with the starred first".
+    pub(crate) favorites: HashSet<String>,
+    /// The user's categories: name -> the modules in it. Ordered, so the menus
+    /// and the dropdown list them the same way every time.
+    pub(crate) categories: BTreeMap<String, BTreeSet<String>>,
+    /// The category the Modules page is narrowed to, if any. Not persisted —
+    /// it is where you are looking, like the search box, not a preference.
+    pub(crate) category_filter: Option<String>,
+    /// What is typed in the "new category" box on a card's menu.
+    pub(crate) new_category: String,
+    /// When the Categories page was last shown, so its blocks can cascade in.
+    /// `None` while the tab is not on screen, which is what replays the entrance
+    /// on every return rather than only the first.
+    pub(crate) categories_revealed_at: Option<f64>,
     /// The consent dialog still on screen, which outlives `pending_action` by
     /// the length of its closing animation.
     pub(crate) consent_showing: Option<ui::Invoke>,
@@ -268,6 +284,20 @@ impl LimenApp {
             available_updates: HashMap::new(),
             failed: HashMap::new(),
             trusted: HashSet::new(),
+            favorites: limen_core::Config::load()
+                .map(|c| c.favorites.into_iter().collect())
+                .unwrap_or_default(),
+            categories: limen_core::Config::load()
+                .map(|c| {
+                    c.categories
+                        .into_iter()
+                        .map(|(k, v)| (k, v.into_iter().collect()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            category_filter: None,
+            new_category: String::new(),
+            categories_revealed_at: None,
             pending_action: None,
             pending_remove: None,
             confirm_subject: None,
@@ -507,6 +537,80 @@ impl LimenApp {
     }
 
     /// Persist the animations toggle to settings.json (without clobbering others).
+    /// Star or unstar a module, and write it to settings immediately.
+    ///
+    /// Persisted on the spot rather than on exit: the app can be closed by the
+    /// window button, by a crash, or by the updater swapping the binary out from
+    /// under it, and a preference that only survives a tidy exit is one the user
+    /// will eventually lose without ever knowing why.
+    ///
+    /// The stored list is rebuilt from the set, so its order is not meaningful —
+    /// sorted on write only so the file does not churn between saves.
+    pub(crate) fn toggle_favorite(&mut self, name: &str) {
+        if !self.favorites.remove(name) {
+            self.favorites.insert(name.to_string());
+        }
+        if let Ok(mut cfg) = limen_core::Config::load() {
+            let mut list: Vec<String> = self.favorites.iter().cloned().collect();
+            list.sort();
+            cfg.favorites = list;
+            let _ = cfg.save();
+        }
+    }
+
+    /// Write the categories back to settings.
+    ///
+    /// Called by every mutation below rather than on exit, for the same reason
+    /// the stars are: the app can be closed by the window button, by a crash, or
+    /// by the updater swapping the binary out, and a preference that only
+    /// survives a tidy exit is one the user eventually loses without knowing why.
+    fn save_categories(&self) {
+        if let Ok(mut cfg) = limen_core::Config::load() {
+            cfg.categories = self
+                .categories
+                .iter()
+                .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+                .collect();
+            let _ = cfg.save();
+        }
+    }
+
+    /// Put `module` in `category`, or take it out if it is already there.
+    /// Creates the category if it does not exist yet.
+    pub(crate) fn toggle_category(&mut self, module: &str, category: &str) {
+        let members = self.categories.entry(category.to_string()).or_default();
+        if !members.remove(module) {
+            members.insert(module.to_string());
+        }
+        self.save_categories();
+    }
+
+    /// Create an empty category.
+    ///
+    /// A name already in use is not an error and not a second category: the
+    /// existing one is left as it is, which is what somebody typing a name they
+    /// have used before means.
+    pub(crate) fn create_category(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.categories.entry(name.to_string()).or_default();
+        self.save_categories();
+    }
+
+    /// Delete a category. The modules in it are untouched — a category is a way
+    /// of looking at them, not something they belong to.
+    pub(crate) fn delete_category(&mut self, name: &str) {
+        self.categories.remove(name);
+        if self.category_filter.as_deref() == Some(name) {
+            // The page was showing this category; leave it showing everything
+            // rather than an empty list filtered by something gone.
+            self.category_filter = None;
+        }
+        self.save_categories();
+    }
+
     pub(crate) fn save_animations(&self) {
         if let Ok(mut cfg) = limen_core::Config::load() {
             cfg.animations = self.animations;
