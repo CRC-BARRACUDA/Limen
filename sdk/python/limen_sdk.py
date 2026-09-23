@@ -24,6 +24,7 @@ modules, and delivers events.
 The SDK is injected by the host (on PYTHONPATH); modules never vendor it.
 """
 import json
+import os
 import sys
 
 __all__ = [
@@ -364,8 +365,142 @@ class Host:
         r = self._m._request("host.save_file", {"name": str(suggested)})
         return r.get("path") if isinstance(r, dict) else None
 
+    def locale(self):
+        """The UI language the host is in — "en", "uk", …
+
+        Asked of the host rather than of the environment, because the language is
+        the application's setting and can change while the module is running: a
+        module that read it once at start would keep answering in the language
+        the app was opened in.
+        """
+        r = self._m._request("host.locale", None)
+        return r if isinstance(r, str) and r else "en"
+
     def log(self, message):
         self._m._request("host.log", str(message))
+
+
+# --------------------------------------------------------------------------- #
+# Catalog — per-language strings, the same contract as the Rust SDK's.
+# --------------------------------------------------------------------------- #
+
+class Catalog:
+    """A module's per-language string tables, loaded from TOML.
+
+    Usage mirrors `limen_sdk_rust::Catalog`: build it from `(code, path)` pairs
+    with the **first** as the fallback language, then `tr(lang, key)`.
+
+        CAT = Catalog.from_dir(os.path.dirname(__file__), ("en", "uk"))
+        lang = host.locale()
+        CAT.tr(lang, "ui.scan")
+
+    Keys are the TOML path flattened with dots, so `[ui] scan = "Scan"` is
+    `ui.scan`. A key with no translation falls back to the default language and
+    then to the key itself — which renders as `ui.scan` on screen, loudly enough
+    to be noticed and harmlessly enough not to crash.
+    """
+
+    def __init__(self, entries):
+        # entries: [(code, toml_source_text), ...], first is the fallback.
+        self._langs = {code: _flatten_toml(src) for code, src in entries}
+        self._default = entries[0][0] if entries else "en"
+
+    @classmethod
+    def from_dir(cls, directory, codes, subdir="locales"):
+        """Load `<directory>/<subdir>/<code>.toml` for each code.
+
+        A missing file is an empty table rather than an error: a half-translated
+        module should still run, in the half it has.
+        """
+        entries = []
+        for code in codes:
+            path = os.path.join(directory, subdir, code + ".toml")
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    entries.append((code, fh.read()))
+            except OSError:
+                entries.append((code, ""))
+        return cls(entries)
+
+    def tr(self, lang, key, **args):
+        """Translate `key` for `lang`, falling back to the default then the key.
+
+        `lang` may be a full locale ("uk_UA"); only the leading code is used.
+        Named `{placeholders}` are filled from `args`, and a string whose
+        placeholders do not match what was passed is returned unformatted rather
+        than raising — a translation is data, and bad data must not take the
+        module down.
+        """
+        short = (lang or "")[:2]
+        table = self._langs.get(short) or self._langs.get(lang) or {}
+        text = table.get(key)
+        if text is None:
+            text = self._langs.get(self._default, {}).get(key)
+        if text is None:
+            return key
+        if not args:
+            return text
+        try:
+            return text.format(**args)
+        except (KeyError, IndexError, ValueError):
+            return text
+
+
+def _flatten_toml(src):
+    """Flatten a TOML document to `a.b.c` -> value for every string leaf.
+
+    Parsed with `tomllib` where the interpreter has it (3.11+), and by a small
+    reader otherwise — the host bundles its own Python, but a module may be run
+    by whatever is on the machine, and a catalog is not worth a dependency.
+    """
+    if not src.strip():
+        return {}
+    try:
+        import tomllib
+        return _walk_toml(tomllib.loads(src))
+    except ImportError:
+        pass
+    except Exception:
+        return {}
+    return _mini_toml(src)
+
+
+def _walk_toml(value, prefix=""):
+    out = {}
+    if isinstance(value, dict):
+        for k, v in value.items():
+            key = k if not prefix else prefix + "." + k
+            out.update(_walk_toml(v, key))
+    elif isinstance(value, str):
+        out[prefix] = value
+    return out
+
+
+def _mini_toml(src):
+    """Enough TOML for a string table: `[section]` headers and `key = "value"`.
+
+    Only reached on a pre-3.11 interpreter. Anything it cannot read is skipped,
+    which costs that line rather than the catalog.
+    """
+    out, section = {}, ""
+    for raw in src.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        else:
+            continue  # not a string leaf
+        out[(section + "." + key) if section else key] = (
+            value.replace("\\n", "\n").replace('\\"', '"'))
+    return out
 
 
 # --------------------------------------------------------------------------- #
