@@ -17,6 +17,7 @@ fn installed(names: &[&str]) -> Vec<ModuleSpec> {
             authors: vec![],
             tags: vec![],
             repo: None,
+            os: vec![],
             capabilities: vec![],
             requires: Default::default(),
             optional: Default::default(),

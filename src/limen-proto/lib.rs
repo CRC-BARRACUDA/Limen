@@ -22,6 +22,7 @@ pub mod rpc;
 pub use abi::ABI_VERSION;
 pub use proc::NoConsole;
 pub use manifest::{
-    Abi, DepSpec, DetailedDep, Language, Manifest, ModuleMeta, Permissions, Provides, Requires,
+    os_matches, Abi, DepSpec, DetailedDep, Language, Manifest, ModuleMeta, Permissions, Provides,
+    Requires,
 };
 pub use rpc::{Message, Request, Response, RpcError};

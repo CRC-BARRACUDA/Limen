@@ -17,6 +17,7 @@ fn spec(launch: Launch) -> ModuleSpec {
         authors: vec![],
         tags: vec![],
         repo: None,
+        os: vec![],
         capabilities: vec![],
         requires: BTreeMap::new(),
         optional: BTreeMap::new(),
