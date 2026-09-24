@@ -270,3 +270,49 @@ fn a_module_that_panicked_in_its_tab_is_inactive_in_the_manager_too() {
     assert!(matches!(all.get("loki"), Some(Inactive::Panicked(_))));
     assert!(!all.contains_key("banlist"));
 }
+
+
+/// The nav's four pages are places in the app; the rest are sessions.
+///
+/// A tab is something with state that closing throws away — a module you are
+/// using, a detail view you opened, an update stepping through. About, Modules,
+/// Categories and Docs have none of that: they filled the strip with rows that
+/// could not meaningfully be closed, and pushed the real sessions off the end of
+/// it.
+#[test]
+fn the_nav_pages_are_not_sessions() {
+    for tab in [
+        Tab::About,
+        Tab::Modules,
+        Tab::Categories,
+        Tab::Docs,
+        Tab::Settings,
+        Tab::Developer,
+    ] {
+        assert!(tab.is_chrome(), "{tab:?} belongs to the nav, not the tab strip");
+    }
+    // Update stays a session: it is a run of work with a place it has got to.
+    for tab in [Tab::Module("loki".into()), Tab::Detail { id: 1 }, Tab::Update] {
+        assert!(!tab.is_chrome(), "{tab:?} is a session and keeps its tab");
+    }
+}
+
+/// Every tab still knows its own name — including the ones that no longer open
+/// as tabs, which are still titled for the nav and for the window.
+#[test]
+fn every_tab_is_named() {
+    for tab in [
+        Tab::About,
+        Tab::Modules,
+        Tab::Categories,
+        Tab::Docs,
+        Tab::Settings,
+        Tab::Developer,
+        Tab::Update,
+        Tab::Detail { id: 7 },
+    ] {
+        let title = tab.title();
+        assert!(!title.is_empty(), "{tab:?} has no title");
+        assert!(!title.starts_with("tab."), "{tab:?} shows its key: {title}");
+    }
+}

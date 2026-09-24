@@ -308,7 +308,7 @@ impl eframe::App for LimenApp {
                             ui.spacing_mut().item_spacing.x = 0.0;
                             let font_id = egui::TextStyle::Button.resolve(ui.style());
                             for (i, tab) in self.tabs.iter().enumerate() {
-                                let selected = i == self.active;
+                                let selected = !self.showing_chrome && i == self.active;
                                 let text = match tab {
                                     Tab::Detail { id } => self
                                         .detail_tabs

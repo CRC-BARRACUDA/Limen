@@ -128,9 +128,15 @@ pub struct LimenApp {
     /// Monotonic id for the next detail tab.
     pub(crate) next_detail_id: u64,
 
-    /// Open tabs (in order) and the active index.
+    /// Open tabs (in order) and the active index. Sessions only — the nav's
+    /// own pages are not among them; see [`Tab::is_chrome`].
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    /// Which of Limen's own pages the nav last selected. Always a chrome page,
+    /// so returning from a session lands where you were rather than nowhere.
+    pub(crate) chrome: Tab,
+    /// Whether that page is what is on screen. False means a tab is.
+    pub(crate) showing_chrome: bool,
 
     pub(crate) view: Option<ui::View>,
     pub(crate) view_error: Option<String>,
@@ -322,8 +328,10 @@ impl LimenApp {
             confirm_subject: None,
             detail_tabs: HashMap::new(),
             next_detail_id: 0,
-            tabs: vec![Tab::About, Tab::Modules],
+            tabs: Vec::new(),
             active: 0,
+            chrome: Tab::About,
+            showing_chrome: true,
             view: None,
             view_error: None,
             inactive: None,
@@ -394,9 +402,45 @@ impl LimenApp {
         }
     }
 
-    /// The active tab (cloned).
+    /// What the content area is showing: one of Limen's own pages, or the
+    /// active tab. Named for the tab because that is what it was for most of
+    /// the app's life, and everything that draws from it asks the same question.
     pub(crate) fn active_tab(&self) -> Option<Tab> {
+        if self.showing_chrome {
+            return Some(self.chrome.clone());
+        }
         self.tabs.get(self.active).cloned()
+    }
+
+    /// Show one of Limen's own pages. Opens no tab: the nav is a place to go,
+    /// not a session to keep.
+    pub(crate) fn show_chrome(&mut self, tab: Tab) {
+        // Put the module page away *before* the switch, while `active_tab` still
+        // names the tab it belongs to — afterwards it names a chrome page, and
+        // the page would be dropped instead of stored.
+        self.stash_page();
+        self.chrome = tab;
+        self.showing_chrome = true;
+        self.restore_page("");
+    }
+
+    /// Bring the tab at `index` back to the screen.
+    pub(crate) fn show_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() || (!self.showing_chrome && index == self.active) {
+            return;
+        }
+        self.stash_page();
+        self.showing_chrome = false;
+        self.active = index;
+        match self.active_tab() {
+            Some(Tab::Module(name)) => {
+                self.restore_page(&name);
+                self.resume_page();
+            }
+            // Not a module tab: leave the fields empty rather than showing the
+            // last module's view behind a Settings page.
+            _ => self.restore_page(""),
+        }
     }
 
     /// Lift the page currently in the fields out of them.
@@ -450,28 +494,22 @@ impl LimenApp {
     /// The one door every tab change goes through, so a module tab's state is
     /// always put away before another takes the fields.
     pub(crate) fn activate(&mut self, index: usize) {
-        if index >= self.tabs.len() || index == self.active {
-            return;
-        }
-        self.stash_page();
-        self.active = index;
-        match self.active_tab() {
-            Some(Tab::Module(name)) => {
-                self.restore_page(&name);
-                self.resume_page();
-            }
-            // Not a module tab: leave the fields empty rather than showing the
-            // last module's view behind an About page.
-            _ => self.restore_page(""),
-        }
+        self.show_tab(index);
     }
 
     /// Open `tab` (focus it if already open, else append), and activate it.
     pub(crate) fn open_tab(&mut self, tab: Tab) {
+        // One of Limen's own pages is shown, never opened: it has no session to
+        // keep and nothing to close.
+        if tab.is_chrome() {
+            self.show_chrome(tab);
+            return;
+        }
         match self.tabs.iter().position(|t| *t == tab) {
-            Some(i) => self.activate(i),
+            Some(i) => self.show_tab(i),
             None => {
                 self.stash_page();
+                self.showing_chrome = false;
                 self.tabs.push(tab);
                 self.active = self.tabs.len() - 1;
                 match self.active_tab() {
@@ -513,6 +551,11 @@ impl LimenApp {
             _ => {}
         }
         self.tabs.remove(index);
+        // The last session closed: back to whichever of Limen's own pages the
+        // nav last had, rather than an empty screen with nothing to click.
+        if self.tabs.is_empty() {
+            self.showing_chrome = true;
+        }
         let was = self.active;
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
