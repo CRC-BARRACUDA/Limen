@@ -39,6 +39,9 @@ mod tabs;
 pub use brand::*;
 pub(crate) use dialogs::*;
 pub(crate) use pages::*;
+// The handbook's content and its search are public so the tests can read them;
+// the page that draws them stays crate-internal.
+pub use pages::{docs_page, matching, DocsPage, Topic, TOPICS};
 pub use search::*;
 pub use tabs::*;
 
@@ -76,6 +79,18 @@ pub struct LimenApp {
     pub(crate) category_filter: Option<String>,
     /// What is typed in the "new category" box on a card's menu.
     pub(crate) new_category: String,
+    /// Which article the Docs page is showing, as an index into its topic list.
+    /// Kept on the app so leaving the tab and coming back returns to the page
+    /// you were reading.
+    pub(crate) docs_topic: usize,
+    /// What is typed in the Docs search box. Not persisted: it is where you are
+    /// looking, like the module search, not a preference.
+    pub(crate) docs_search: String,
+    /// Whether the Docs contents column is out. Kept on the app so it stays as
+    /// you left it while you move between tabs.
+    pub(crate) docs_contents_open: bool,
+    /// When the Docs page was last shown, so its blocks can cascade in.
+    pub(crate) docs_revealed_at: Option<f64>,
     /// When the Categories page was last shown, so its blocks can cascade in.
     /// `None` while the tab is not on screen, which is what replays the entrance
     /// on every return rather than only the first.
@@ -298,6 +313,10 @@ impl LimenApp {
             category_filter: None,
             new_category: String::new(),
             categories_revealed_at: None,
+            docs_topic: 0,
+            docs_search: String::new(),
+            docs_contents_open: true,
+            docs_revealed_at: None,
             pending_action: None,
             pending_remove: None,
             confirm_subject: None,

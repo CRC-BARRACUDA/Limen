@@ -172,6 +172,9 @@ impl eframe::App for LimenApp {
                     {
                         open_tab = Some(Tab::Categories);
                     }
+                    if ui::chip(ui, &i18n::t("nav.docs"), active == Some(Tab::Docs)).clicked() {
+                        open_tab = Some(Tab::Docs);
+                    }
                     // "Update available" pill, next to Modules.
                     if self.update.is_some() {
                         ui.add_space(6.0);
@@ -493,6 +496,11 @@ impl eframe::App for LimenApp {
         } else {
             self.categories_revealed_at = None;
         }
+        if active_tab == Some(Tab::Docs) {
+            self.docs_revealed_at.get_or_insert(now_t);
+        } else {
+            self.docs_revealed_at = None;
+        }
         if active_tab == Some(Tab::Settings) {
             self.settings_revealed_at.get_or_insert(now_t);
         } else {
@@ -551,6 +559,10 @@ impl eframe::App for LimenApp {
                 favorites,
                 categories,
                 categories_revealed_at,
+                docs_topic,
+                docs_search,
+                docs_contents_open,
+                docs_revealed_at,
                 category_filter,
                 new_category,
                 modules_revealed_at,
@@ -631,6 +643,17 @@ impl eframe::App for LimenApp {
                                 toggle: &mut toggle_category,
                                 delete: &mut delete_category,
                                 reveal_at: categories_revealed_at.unwrap_or(now_t),
+                                now: now_t,
+                                animate: ui::animations_enabled(),
+                            },
+                        ),
+                        Some(Tab::Docs) => docs_page(
+                            ui,
+                            &mut DocsPage {
+                                selected: docs_topic,
+                                search: docs_search,
+                                contents_open: docs_contents_open,
+                                reveal_at: docs_revealed_at.unwrap_or(now_t),
                                 now: now_t,
                                 animate: ui::animations_enabled(),
                             },

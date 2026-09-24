@@ -9,6 +9,8 @@ pub enum Tab {
     Modules,
     /// The categories the user has made, and what is in them.
     Categories,
+    /// The handbook: how to use Limen, carried inside the binary.
+    Docs,
     Module(String),
     Settings,
     Developer,
@@ -25,6 +27,7 @@ impl Tab {
             Tab::About => i18n::t("tab.about"),
             Tab::Modules => i18n::t("tab.modules"),
             Tab::Categories => i18n::t("tab.categories"),
+            Tab::Docs => i18n::t("tab.docs"),
             Tab::Module(n) => n.clone(),
             Tab::Settings => i18n::t("tab.settings"),
             Tab::Developer => i18n::t("tab.developer"),
