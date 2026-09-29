@@ -426,34 +426,29 @@ fn toggle_rect(contents_open: bool) -> egui::Rect {
     found
 }
 
-/// The hide button sits at the top of the contents column — at its right edge
-/// while the column is out, and where the column was once it is away.
+/// The hide button sits at the top of the contents column, at its left edge,
+/// and stays there whether the column is out or away.
 ///
-/// Both positions are the point. A button that lives beside the page title is
-/// not beside the thing it hides; one that disappears with the column leaves no
-/// way to bring it back.
+/// Right-aligned inside the column it slid across the page as the panel swept
+/// shut — a button running away from the pointer aiming at it. At the left edge
+/// it is the list's header, and the only thing that moves is the list.
 #[test]
-fn the_hide_button_rides_with_the_column() {
+fn the_hide_button_stays_put() {
     let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
 
     let out = toggle_rect(true);
     let away = toggle_rect(false);
     assert!(out.is_positive(), "the button is not drawn with the contents out");
     assert!(away.is_positive(), "the button vanished with the contents");
-
-    // Out: at the column's right edge, which is ~230px in.
     assert!(
-        out.max.x > 180.0 && out.max.x < 280.0,
-        "the button is at x={} — not at the column's edge",
-        out.max.x
-    );
-    // Away: back at the left, where the column was.
-    assert!(
-        away.min.x < 60.0,
-        "with the contents away the button is at x={}",
+        (out.min.x - away.min.x).abs() < 1.0,
+        "the button moved from x={} to x={} when the column closed",
+        out.min.x,
         away.min.x
     );
-    // And it is above the list either way, not floating in the middle of it.
+    assert!(out.min.x < 60.0, "it is not at the column's left edge: {}", out.min.x);
+
+    // Above the list either way, not floating in the middle of it.
     let first_entry = drawn_shapes(Lang::En, 0, true)
         .into_iter()
         .find(|(_, s)| s == TOPICS[0].title())
@@ -465,4 +460,28 @@ fn the_hide_button_rides_with_the_column() {
         first_entry.0.min.y
     );
     i18n::set_locale(Lang::En);
+}
+
+/// The text wraps at the width the panel is *going* to leave, so closing the
+/// panel slides the article across rather than re-flowing it on every frame.
+#[test]
+fn the_article_does_not_re_wrap_while_the_panel_sweeps() {
+    // Wide enough that prose is the binding constraint either way: the column
+    // comes and goes and the lines do not change length at all.
+    assert_eq!(text_width(1600.0, true), text_width(1600.0, false));
+
+    // Narrow enough that the panel's width decides it on both sides: closing
+    // the panel gives the text exactly what the panel gave up.
+    let (open, closed) = (text_width(700.0, true), text_width(700.0, false));
+    assert!(closed > open, "closing the panel must widen the text");
+    assert_eq!(closed - open, 230.0 - 26.0, "it widens by the panel, exactly");
+
+    // In between, prose width caps what the panel hands over — the text stops
+    // getting longer rather than running the width of a maximised window.
+    let (open, closed) = (text_width(900.0, true), text_width(900.0, false));
+    assert!(closed > open && closed <= 720.0, "{open} → {closed}");
+
+    // And on a window too small for either, the text still has a width to wrap
+    // at rather than collapsing to nothing.
+    assert!(text_width(120.0, true) >= 240.0);
 }

@@ -41,7 +41,7 @@ pub(crate) use dialogs::*;
 pub(crate) use pages::*;
 // The handbook's content and its search are public so the tests can read them;
 // the page that draws them stays crate-internal.
-pub use pages::{docs_page, matching, DocsPage, Topic, TOPICS};
+pub use pages::{docs_page, matching, text_width, DocsPage, Topic, TOPICS};
 pub use search::*;
 pub use tabs::*;
 

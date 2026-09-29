@@ -587,7 +587,11 @@ pub fn render_widget(
             *entry = on.to_string();
         }
         Widget::Step { label, state } => {
-            ui.horizontal(|ui| {
+            // `horizontal_top`, and a label told to wrap: inside a plain
+            // `horizontal` the available width is unbounded, so a long step —
+            // a host that failed with a reason, a note about what could not be
+            // read — ran off the right edge with no way to read the rest of it.
+            ui.horizontal_top(|ui| {
                 step_icon(ui, label, state);
                 ui.add_space(8.0);
                 let s = match state.as_str() {
@@ -595,7 +599,7 @@ pub fn render_widget(
                     "done" => LabelStyle::Normal,
                     _ => LabelStyle::Weak,
                 };
-                ui.label(styled(label, s));
+                ui.add(egui::Label::new(styled(label, s)).wrap());
             });
         }
         Widget::Button {
@@ -685,23 +689,31 @@ pub fn render_widget(
                     });
                     return;
                 }
-                // Path and text fields ask for all the width there is, so the
-                // first one in a row takes it and the rest are left as stubs —
-                // three thresholds side by side rendered as one wide box and two
-                // small ones. Share the row between them instead.
+                // Path and text fields ask for all the width there is, so one
+                // in a row takes the lot: three thresholds side by side came out
+                // as one wide box and two stubs, and — worse — anything *after*
+                // a field was pushed off the right edge of the window, where it
+                // could not be reached at all. A search box followed by a button
+                // is a button nobody can press.
+                //
+                // So a row with a field in it is shared out: every child gets an
+                // equal slice, the fields are held to theirs, and the rest take
+                // the width they need. A row with no field keeps its natural
+                // layout, which is what a row of buttons wants.
                 let greedy = children
                     .iter()
                     .filter(|c| matches!(c, Widget::Text { .. } | Widget::File { .. }))
                     .count();
-                if greedy < 2 {
+                if greedy == 0 || children.len() < 2 {
                     render_widgets(ui, children, inputs, busy, clicked);
                     return;
                 }
                 let gap = ui.spacing().item_spacing.x;
-                // What the fields have left once the labels and buttons beside
-                // them have taken their share.
+                // Divided by every child, not by the fields alone: the buttons
+                // and labels beside them need room too, and their widths are
+                // not known until they are drawn.
                 let fixed: f32 = gap * (children.len().saturating_sub(1)) as f32;
-                let share = ((ui.available_width() - fixed) / greedy as f32).max(72.0);
+                let share = ((ui.available_width() - fixed) / children.len() as f32).max(72.0);
                 for c in children {
                     if matches!(c, Widget::Text { .. } | Widget::File { .. }) {
                         // A field's label sits *beside* its box here, so it is

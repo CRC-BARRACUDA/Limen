@@ -81,6 +81,17 @@ pub const TOPICS: &[Topic] = &[
     },
 ];
 
+/// The width the article's text wraps at, on a page `total` wide.
+///
+/// Taken from where the contents panel is **going** — `contents_open` is the
+/// target, not the sweep. Measured from the panel's animated width instead,
+/// every frame re-wraps every paragraph, and the text jitters in place rather
+/// than travelling with the panel.
+pub fn text_width(total: f32, contents_open: bool) -> f32 {
+    let panel = if contents_open { LIST_WIDTH } else { TOGGLE };
+    (total - panel - GAP * 2.0).clamp(240.0, PROSE_WIDTH)
+}
+
 /// Which topics a query leaves, in the order they are listed.
 ///
 /// The search is over the whole article, not its title: somebody looking for
@@ -112,6 +123,12 @@ const LIST_WIDTH: f32 = 230.0;
 
 /// The toggle's box, and so the narrowest the contents strip ever gets.
 const TOGGLE: f32 = 26.0;
+
+/// Where prose stops being comfortable to read across.
+const PROSE_WIDTH: f32 = 720.0;
+
+/// The gap on either side of the divider between the two columns.
+const GAP: f32 = 16.0;
 
 /// The button that puts the contents away and brings them back.
 ///
@@ -200,6 +217,7 @@ pub fn docs_page(ui: &mut egui::Ui, page: &mut DocsPage) {
     }
 
     let height = ui.available_height();
+    let total_w = ui.available_width();
     ui.horizontal_top(|ui| {
         // Contents, as wide as the sweep has got. The width is what animates —
         // the article beside it is laid out from what is left, so it widens as
@@ -214,11 +232,11 @@ pub fn docs_page(ui: &mut egui::Ui, page: &mut DocsPage) {
             egui::vec2(strip_w, height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                // Right-aligned in the column while it is out, and carried left
-                // with it as it closes — so the button travels with the thing it
-                // is hiding rather than jumping across the page.
+                // At the column's left edge, above the list — which is the one
+                // place it can be without moving as the column sweeps. Put at
+                // the right edge it slid across the page with the panel, which
+                // is a button running away from the pointer aiming at it.
                 ui.horizontal(|ui| {
-                    ui.add_space((strip_w - TOGGLE).max(0.0));
                     if contents_toggle(ui, open)
                         .on_hover_text(i18n::t(if **contents_open {
                             "docs.hide_contents"
@@ -254,9 +272,18 @@ pub fn docs_page(ui: &mut egui::Ui, page: &mut DocsPage) {
                             ui.set_min_width(LIST_WIDTH);
                             for (k, &i) in shown.iter().enumerate() {
                                 reveal_item(ui, k + 2, reveal_at, now, animate, |ui| {
-                                    if ui::chip(ui, TOPICS[i].title(), **selected == i).clicked() {
-                                        **selected = i;
-                                    }
+                                    // In a horizontal strip of its own: a chip
+                                    // allocates "at least" its label, and in a
+                                    // top-down layout that stretches it to the
+                                    // column's full width — a band of hover fill
+                                    // reaching far past the words in it.
+                                    ui.horizontal(|ui| {
+                                        if ui::chip(ui, TOPICS[i].title(), **selected == i)
+                                            .clicked()
+                                        {
+                                            **selected = i;
+                                        }
+                                    });
                                 });
                                 ui.add_space(4.0);
                             }
@@ -267,7 +294,7 @@ pub fn docs_page(ui: &mut egui::Ui, page: &mut DocsPage) {
         if toggled {
             **contents_open = !**contents_open;
         }
-        ui.add_space(16.0);
+        ui.add_space(GAP);
         // A hairline between the strip and the article, so the two columns read
         // as one page rather than as two unrelated lists. It fades with the
         // column: a divider with nothing on one side of it divides nothing.
@@ -277,13 +304,15 @@ pub fn docs_page(ui: &mut egui::Ui, page: &mut DocsPage) {
             ui.max_rect().top()..=ui.max_rect().bottom(),
             egui::Stroke::new(1.0_f32, ui::with_alpha(ui::color::ACCENT, 0.25 * open)),
         );
-        ui.add_space(16.0);
+        ui.add_space(GAP);
 
         // The article. Given its own top-down ui first: a ScrollArea inherits
         // whatever layout its parent has, and this parent is `horizontal_top` —
         // so without this every paragraph is laid out as the next *column* and
         // the page comes out as strips of vertical text.
         let width = ui.available_width();
+        // The width the text will wrap at once the sweep has finished.
+        let settled = text_width(total_w, **contents_open);
         ui.allocate_ui_with_layout(
             egui::vec2(width, height),
             egui::Layout::top_down(egui::Align::Min),
@@ -296,7 +325,7 @@ pub fn docs_page(ui: &mut egui::Ui, page: &mut DocsPage) {
                         // the text column stops where prose stops being
                         // comfortable — and keeps that width rather than
                         // shrinking to the longest paragraph.
-                        let text_w = width.min(720.0);
+                        let text_w = settled;
                         ui.set_min_width(text_w);
                         ui.set_max_width(text_w);
                         reveal_item(ui, 2, reveal_at, now, animate, |ui| {
