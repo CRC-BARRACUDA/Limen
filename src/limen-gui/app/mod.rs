@@ -1227,33 +1227,42 @@ impl LimenApp {
             self.pending_confirm = Some(invoke);
             return;
         }
-        // Base params come from the active view's inputs (a module tab's search
-        // box etc.); a detail tab has no shared inputs. Row/menu args (the row
-        // `id`, `via`, …) are merged on top.
-        let mut params: serde_json::Map<String, serde_json::Value> = match self.active_tab() {
+        // Base params come from what is on screen: the active tab's own view,
+        // then every pop-up standing over it. Row/menu args (the row `id`,
+        // `via`, …) are merged on top.
+        let mut params: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        match self.active_tab() {
             Some(Tab::Module(_)) => {
-                // The screen behind, then each pop-up over it: a settings pop-up
-                // has to send what was typed into it, and where both define a
-                // field the one in front is the one the user just edited.
-                let mut m = serde_json::Map::new();
-                for v in self.view.iter().chain(self.modal_stack.iter()) {
-                    if let serde_json::Value::Object(o) = ui::collect_params(v, &self.inputs) {
-                        m.extend(o);
-                    }
+                if let serde_json::Value::Object(o) =
+                    ui::collect_params_opt(self.view.as_ref(), &self.inputs)
+                {
+                    params.extend(o);
                 }
-                m
             }
             // A detail tab has its own view + inputs (e.g. a config form).
-            Some(Tab::Detail { id }) => match self
-                .detail_tabs
-                .get(&id)
-                .and_then(|t| t.view.as_ref().map(|v| ui::collect_params(v, &t.inputs)))
-            {
-                Some(serde_json::Value::Object(m)) => m,
-                _ => serde_json::Map::new(),
-            },
-            _ => serde_json::Map::new(),
-        };
+            Some(Tab::Detail { id }) => {
+                if let Some(tab) = self.detail_tabs.get(&id)
+                    && let serde_json::Value::Object(o) =
+                        ui::collect_params_opt(tab.view.as_ref(), &tab.inputs)
+                {
+                    params.extend(o);
+                }
+            }
+            _ => {}
+        }
+        // Then the pop-ups, whatever kind of tab they are standing over. A
+        // pop-up is drawn on its own layer rather than inside a tab, and it was
+        // collected only for a module tab — so a dialog raised over a detail
+        // tab sent none of what the user had just chosen in it, and the module
+        // saw a call with every field missing.
+        //
+        // Last, and in stacking order: where a pop-up and the screen behind it
+        // define the same field, the one in front is the one just edited.
+        for v in self.modal_stack.iter() {
+            if let serde_json::Value::Object(o) = ui::collect_params(v, &self.inputs) {
+                params.extend(o);
+            }
+        }
         for (k, v) in &invoke.args {
             params.insert(k.clone(), v.clone());
         }

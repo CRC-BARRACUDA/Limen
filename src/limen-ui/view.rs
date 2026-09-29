@@ -894,6 +894,15 @@ pub fn styled(text: &str, style: LabelStyle) -> egui::RichText {
 // doesn't recognise degrades to readable text.
 // --------------------------------------------------------------------------- //
 
+/// [`collect_params`] for a view that may not be there yet — a tab still
+/// loading has inputs but no screen to read them from.
+pub fn collect_params_opt(view: Option<&View>, inputs: &HashMap<String, String>) -> Value {
+    view.map_or_else(
+        || Value::Object(Default::default()),
+        |v| collect_params(v, inputs),
+    )
+}
+
 /// Gather the current values of every input widget into a params object,
 /// keyed by widget `id`.
 pub fn collect_params(view: &View, inputs: &HashMap<String, String>) -> Value {

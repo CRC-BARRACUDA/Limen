@@ -316,3 +316,78 @@ fn every_tab_is_named() {
         assert!(!title.starts_with("tab."), "{tab:?} shows its key: {title}");
     }
 }
+
+/// What a click sends: the screen it was made on, and every pop-up over it.
+///
+/// A pop-up is drawn on its own layer rather than inside a tab, and its inputs
+/// used to be collected only when a *module* tab was active. A dialog raised
+/// over a detail tab — the report preview over a module's "Make Report" tab —
+/// sent none of what the user had just chosen in it, so the module saw a call
+/// with every field missing: Save did nothing, and the dropdown appeared to
+/// reset because the answer was the same screen again.
+#[test]
+fn a_pop_up_sends_what_was_chosen_in_it() {
+    use limen_gui::ui;
+
+    let behind: ui::View = serde_json::from_str(
+        r#"{"title":"Make Report","widgets":[
+             {"kind":"select","id":"scope","options":["All","Enabled"],"default":"All"}]}"#,
+    )
+    .unwrap();
+    let popup: ui::View = serde_json::from_str(
+        r#"{"title":"Report","modal":"report.preview","widgets":[
+             {"kind":"select","id":"format","options":["PDF","HTML"],"default":"PDF"},
+             {"kind":"select","id":"theme","options":["White","Black"],"default":"White"}]}"#,
+    )
+    .unwrap();
+
+    // What the app holds after both were drawn: a widget's `default` seeds its
+    // entry on the first draw, and the user then picked Black in the pop-up.
+    let mut inputs = HashMap::new();
+    inputs.insert("scope".to_string(), "All".to_string());
+    inputs.insert("format".to_string(), "PDF".to_string());
+    inputs.insert("theme".to_string(), "Black".to_string());
+
+    let mut params = serde_json::Map::new();
+    if let serde_json::Value::Object(o) = ui::collect_params(&behind, &inputs) {
+        params.extend(o);
+    }
+    if let serde_json::Value::Object(o) = ui::collect_params(&popup, &inputs) {
+        params.extend(o);
+    }
+
+    // The pop-up's fields are there, the chosen one with what was chosen…
+    assert_eq!(params.get("theme").and_then(|v| v.as_str()), Some("Black"));
+    // …one left as it was offered carries that…
+    assert_eq!(params.get("format").and_then(|v| v.as_str()), Some("PDF"));
+    // …and the screen underneath still contributes its own.
+    assert_eq!(params.get("scope").and_then(|v| v.as_str()), Some("All"));
+}
+
+/// The rule that was wrong, kept as the thing not to go back to: reading only
+/// the tab's own view leaves out everything the pop-up over it was for.
+#[test]
+fn reading_only_the_tab_misses_the_pop_up() {
+    use limen_gui::ui;
+    let behind: ui::View = serde_json::from_str(
+        r#"{"title":"Make Report","widgets":[
+             {"kind":"select","id":"scope","options":["All"],"default":"All"}]}"#,
+    )
+    .unwrap();
+    let mut inputs = HashMap::new();
+    inputs.insert("scope".to_string(), "All".to_string());
+    inputs.insert("theme".to_string(), "Black".to_string());
+
+    let only_the_tab = ui::collect_params(&behind, &inputs);
+    assert!(only_the_tab.get("theme").is_none(), "{only_the_tab}");
+    assert_eq!(only_the_tab.get("scope").and_then(|v| v.as_str()), Some("All"));
+}
+
+/// A tab that has not answered yet contributes nothing rather than panicking.
+#[test]
+fn a_tab_with_no_screen_yet_has_no_inputs() {
+    use limen_gui::ui;
+    let inputs = HashMap::new();
+    let empty = ui::collect_params_opt(None, &inputs);
+    assert_eq!(empty, serde_json::json!({}));
+}
