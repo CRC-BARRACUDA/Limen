@@ -523,6 +523,14 @@ impl LimenApp {
         }
     }
 
+    /// Drop a detail tab and the tab holding it, wherever it sits.
+    pub(crate) fn close_detail(&mut self, id: u64) {
+        self.detail_tabs.remove(&id);
+        if let Some(at) = self.tabs.iter().position(|t| *t == Tab::Detail { id }) {
+            self.close_tab(at);
+        }
+    }
+
     /// Close the tab at `index`.
     pub(crate) fn close_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
@@ -1002,7 +1010,21 @@ impl LimenApp {
                                     // The pop-up layer is drawn over whichever
                                     // tab is showing, so it belongs there.
                                     if view.modal.is_some() {
+                                        // A tab opened *for this call* has
+                                        // nothing else to show, and a pop-up is
+                                        // not shown in a tab — so the tab it
+                                        // was given is an empty one that
+                                        // outlives the pop-up, drawing
+                                        // "Loading…" for as long as it is left
+                                        // open. It goes. A pop-up answering
+                                        // into a tab that already had a screen
+                                        // (a row's action inside a detail view)
+                                        // leaves that screen alone.
+                                        let empty = tab.view.is_none();
                                         self.accept_view(view);
+                                        if empty {
+                                            self.close_detail(id);
+                                        }
                                     } else {
                                         if !view.title.is_empty() {
                                             tab.title = view.title.clone();
