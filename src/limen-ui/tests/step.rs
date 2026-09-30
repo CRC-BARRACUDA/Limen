@@ -174,3 +174,52 @@ fn a_row_without_a_field_keeps_its_natural_layout() {
     // where the first ended, not a quarter of the window away.
     assert!(two.0.min.x - one.0.max.x < 80.0, "{:?} {:?}", one.0, two.0);
 }
+
+/// A strip of many buttons wraps rather than running off the right edge.
+///
+/// The autoruns module offers a button per category — eleven of them — and the
+/// page scrolls only downwards, so whatever overran the window could not be
+/// reached at all. Worse, it widened the page for everything below it, putting
+/// a table's last columns out of reach too. That is sharpest at a UI scale
+/// above 100%, where there are fewer points to fit the same buttons into.
+#[test]
+fn a_long_strip_of_buttons_wraps_instead_of_running_off() {
+    let button = |text: &str| {
+        serde_json::json!({ "kind": "button", "text": text,
+                            "action": { "capability": "c", "method": "m" } })
+    };
+    let labels = [
+        "EVERYTHING", "LOGON", "EXPLORER", "INTERNET EXPLORER", "SCHEDULED",
+        "SERVICES AND DRIVERS", "BOOT AND KNOWN DLLS", "LSA PROVIDERS",
+        "NETWORK PROVIDERS", "PRINT MONITORS", "OFFICE ADD-INS AND CODECS",
+    ];
+    let view = serde_json::json!({
+        "title": "t",
+        "widgets": [{
+            "kind": "row",
+            "children": labels.iter().map(|l| button(l)).collect::<Vec<_>>(),
+        }],
+    });
+
+    // A window narrow enough that eleven buttons cannot share one line —
+    // roughly what 125% scale leaves of an ordinary window.
+    let drawn = drawn_rects(&view, 1000.0);
+    for label in labels {
+        let b = drawn
+            .iter()
+            .find(|(_, s)| s == label)
+            .unwrap_or_else(|| panic!("{label} was not drawn"));
+        assert!(
+            b.0.max.x <= 1000.0,
+            "{label} runs to x={} past the 1000px window",
+            b.0.max.x
+        );
+    }
+    // Which can only be true if they went onto more than one line.
+    let tops: std::collections::BTreeSet<i64> = drawn
+        .iter()
+        .filter(|(_, s)| labels.contains(&s.as_str()))
+        .map(|(r, _)| r.min.y as i64)
+        .collect();
+    assert!(tops.len() > 1, "they all stayed on one line: {tops:?}");
+}
