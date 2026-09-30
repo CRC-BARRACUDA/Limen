@@ -9,8 +9,6 @@ pub enum Tab {
     Modules,
     /// The categories the user has made, and what is in them.
     Categories,
-    /// The handbook: how to use Limen, carried inside the binary.
-    Docs,
     Module(String),
     Settings,
     Developer,
@@ -24,8 +22,8 @@ pub enum Tab {
 impl Tab {
     /// Whether this is one of Limen's own pages rather than a session.
     ///
-    /// About, Modules, Categories, Docs, Settings and Developer are places in
-    /// the app, not work in progress. A tab is a *session*: a module you are
+    /// About, Modules, Categories, Settings and Developer are places in the
+    /// app, not work in progress. A tab is a *session*: a module you are
     /// using, a detail view you opened, an update stepping through — something
     /// with state that closing throws away. Giving Limen's own pages tabs
     /// filled the strip with rows that could not be meaningfully closed and
@@ -36,12 +34,7 @@ impl Tab {
     pub fn is_chrome(&self) -> bool {
         matches!(
             self,
-            Tab::About
-                | Tab::Modules
-                | Tab::Categories
-                | Tab::Docs
-                | Tab::Settings
-                | Tab::Developer
+            Tab::About | Tab::Modules | Tab::Categories | Tab::Settings | Tab::Developer
         )
     }
 
@@ -50,7 +43,6 @@ impl Tab {
             Tab::About => i18n::t("tab.about"),
             Tab::Modules => i18n::t("tab.modules"),
             Tab::Categories => i18n::t("tab.categories"),
-            Tab::Docs => i18n::t("tab.docs"),
             Tab::Module(n) => n.clone(),
             Tab::Settings => i18n::t("tab.settings"),
             Tab::Developer => i18n::t("tab.developer"),

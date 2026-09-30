@@ -285,7 +285,6 @@ fn the_nav_pages_are_not_sessions() {
         Tab::About,
         Tab::Modules,
         Tab::Categories,
-        Tab::Docs,
         Tab::Settings,
         Tab::Developer,
     ] {
@@ -305,7 +304,6 @@ fn every_tab_is_named() {
         Tab::About,
         Tab::Modules,
         Tab::Categories,
-        Tab::Docs,
         Tab::Settings,
         Tab::Developer,
         Tab::Update,
