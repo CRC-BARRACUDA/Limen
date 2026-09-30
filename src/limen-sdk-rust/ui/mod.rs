@@ -212,6 +212,42 @@ pub fn diagram(
 }
 
 
+/// The shares of one whole: `(label, value)` slices of a ring.
+///
+/// The companion of [`chart`] and [`diagram`], and the narrowest of the three.
+/// A chart compares magnitudes — which is biggest, by how much. A diagram says
+/// what is joined to what. A donut answers only how much of the whole each part
+/// is, which is what a reader asks of a severity breakdown or a disk, and the
+/// one question bars answer badly.
+///
+/// Use it for a handful of parts, not eight, and not for parts of nearly equal
+/// size: two slices a degree apart cannot be told from each other by eye, where
+/// two bars can.
+///
+/// A slice's `kind` gives it a colour that means the same thing it does
+/// everywhere else in Limen — `critical`, `high`, `medium`, `low`, `ok`,
+/// `info` — and an empty one is given a colour by its position. Add
+/// [`Widget::centre`] to put something other than the total in the hole.
+pub fn donut(title: impl Into<String>, data: Vec<(String, f64)>) -> Widget {
+    donut_of(
+        title,
+        data.into_iter()
+            .map(|(label, value)| (label, value, String::new()))
+            .collect(),
+    )
+}
+
+/// As [`donut`], with each slice saying what it is: `(label, value, kind)`.
+pub fn donut_of(title: impl Into<String>, data: Vec<(String, f64, String)>) -> Widget {
+    let slices: Vec<Value> = data
+        .into_iter()
+        .map(|(label, value, kind)| json!({ "label": label, "value": value, "kind": kind }))
+        .collect();
+    Widget::of_kind("donut")
+        .set("title", json!(title.into()))
+        .set("data", Value::Array(slices))
+}
+
 /// A horizontal bar chart: `(label, value)` bars under an optional title.
 pub fn chart(title: impl Into<String>, data: Vec<(String, f64)>) -> Widget {
     let bars: Vec<Value> = data

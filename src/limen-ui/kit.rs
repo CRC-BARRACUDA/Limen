@@ -159,6 +159,18 @@ pub fn demo_view() -> Value {
                 ],
             ),
             separator(),
+            label("donut — the shares of one whole; hover a slice").strong(),
+            donut_of(
+                "donut",
+                vec![
+                    ("critical".into(), 3.0, "critical".into()),
+                    ("high".into(), 11.0, "high".into()),
+                    ("medium".into(), 27.0, "medium".into()),
+                    ("low".into(), 8.0, "low".into()),
+                ],
+            )
+            .centre("49 findings"),
+            separator(),
             label("diagram — what is connected to what; hover a circle, drag to move, double-click to put it back").strong(),
             diagram(
                 "diagram",

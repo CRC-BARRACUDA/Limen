@@ -19,6 +19,7 @@
 //! is where the styles are standardized.
 
 pub mod diagram;
+pub mod donut;
 pub mod cursor;
 
 use std::sync::{OnceLock, RwLock};
@@ -106,3 +107,4 @@ pub use typing::*;
 pub use view::*;
 pub use widgets::*;
 pub use diagram::{render_diagram, render_diagram_in, DiagramEdge, DiagramFact, DiagramNode};
+pub use donut::{render_donut, DonutSlice};

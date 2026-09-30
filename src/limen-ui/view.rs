@@ -392,6 +392,17 @@ pub enum Widget {
         #[serde(default)]
         data: Vec<ChartBar>,
     },
+    /// The shares of one whole — where a chart compares magnitudes and a
+    /// diagram answers what is joined to what.
+    Donut {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        data: Vec<crate::donut::DonutSlice>,
+        /// What goes in the hole; empty for the total the slices add up to.
+        #[serde(default)]
+        centre: String,
+    },
     /// Boxes and the lines between them: what is connected to what, where a
     /// chart would answer how much of each.
     Diagram {
@@ -842,6 +853,11 @@ pub fn render_widget(
             clicked,
         ),
         Widget::Chart { title, data } => render_chart(ui, title, data),
+        Widget::Donut {
+            title,
+            data,
+            centre,
+        } => crate::donut::render_donut(ui, title, data, centre),
         Widget::Diagram {
             title,
             nodes,

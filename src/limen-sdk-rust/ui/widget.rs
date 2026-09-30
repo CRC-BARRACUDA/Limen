@@ -107,6 +107,12 @@ impl Widget {
     /// under it would otherwise be left empty. Honoured by [`diagram`].
     ///
     /// [`diagram`]: crate::ui::diagram
+    /// What goes in the middle of a [`donut`](crate::ui::donut) — a figure the
+    /// slices are shares of, where the total is not the point.
+    pub fn centre(self, text: impl Into<String>) -> Self {
+        self.set("centre", json!(text.into()))
+    }
+
     pub fn fills(self) -> Self {
         self.set("fill", json!(true))
     }
