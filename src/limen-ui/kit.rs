@@ -138,6 +138,10 @@ pub fn demo_view() -> Value {
                 vec![menu_item("Only this row has this", "ui.kit", "row")],
                 vec![],
             ])
+            // Severity, in the row's own ink. The first column says the same
+            // thing in words, which is the point: the colour finds the row, the
+            // column explains it.
+            .row_levels(vec!["error".into(), "warning".into(), String::new()])
             .on_activate_here("ui.kit", "activate"),
             separator(),
             label("toast — a passing notice, top-right; click one to dismiss it early")

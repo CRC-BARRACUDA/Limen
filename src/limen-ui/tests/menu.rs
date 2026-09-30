@@ -48,7 +48,7 @@ impl Table {
                 let rows: Vec<Vec<String>> =
                     (0..8).map(|i| vec![format!("row {i}")]).collect();
                 let ids: Vec<String> = (0..8).map(|i| i.to_string()).collect();
-                render_table(ui, &cols, &rows, &ids, menu, &[], None, picked);
+                render_table(ui, &cols, &rows, &ids, menu, &[], None, &[], picked);
             });
         });
     }

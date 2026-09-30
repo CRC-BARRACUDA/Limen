@@ -237,6 +237,17 @@ pub enum Widget {
         /// Mask the input (single-line only), for secrets.
         #[serde(default)]
         password: bool,
+        /// Invoked as the field is typed in, so a form can act on what is in it
+        /// rather than waiting for a button to be pressed. Without it a module
+        /// learns a field's contents only when something else is clicked —
+        /// which is no use to a control whose own state depends on the field,
+        /// such as an "add another" that should do nothing while the last one
+        /// is empty.
+        ///
+        /// Fires on every keystroke, so a module that takes it on should answer
+        /// cheaply: redraw its form, and nothing more.
+        #[serde(default)]
+        on_change: Option<AutoAction>,
     },
     /// A date, typed or picked off a calendar. Its value reaches the module in
     /// one canonical form whichever way it was given.
@@ -384,6 +395,18 @@ pub enum Widget {
         /// What double-clicking a row does.
         #[serde(default)]
         on_activate: Option<RowAction>,
+        /// Per-row emphasis (parallel to `rows`): `""` for an ordinary row,
+        /// or `ok` / `warning` / `error` — the same words a notice takes, so a
+        /// module says severity one way throughout.
+        ///
+        /// A marked row's text is tinted rather than its background filled: the
+        /// rows already zebra-stripe and highlight on hover, and a third
+        /// background would fight both. Colour alone is not the whole message,
+        /// so a table that marks rows should also carry a column saying why —
+        /// tinting is how a reader finds the row, not how they learn what is
+        /// wrong with it.
+        #[serde(default)]
+        row_levels: Vec<String>,
     },
     /// A horizontal bar chart (a value per labelled bar).
     Chart {
@@ -594,11 +617,13 @@ pub fn render_widget(
             multiline,
             default,
             password,
+            on_change,
         } => {
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
             let value = inputs.entry(id.clone()).or_insert_with(|| default.clone());
+            let before = value.clone();
             if *multiline {
                 ui.add(
                     egui::TextEdit::multiline(value)
@@ -610,6 +635,28 @@ pub fn render_widget(
                 // Single-line fields — including password/secret ones — get the
                 // animated focus border.
                 text_field(ui, value, placeholder.as_str(), f32::INFINITY, *password);
+            }
+            // A field that tells the module as it is typed, so a form can act
+            // on what is in it rather than waiting for a button — a button
+            // whose own state depends on the field cannot wait for itself.
+            //
+            // Every keystroke, so a module that takes this on should answer
+            // cheaply: redraw its form, and nothing more.
+            if let (Some(a), true) = (on_change, *value != before) {
+                let mut args = a.args.clone();
+                // The new text goes with the call, so the module does not have
+                // to guess which of its fields was typed in.
+                args.insert(id.clone(), Value::String(value.clone()));
+                *clicked = Some(Invoke {
+                    action: Action {
+                        capability: a.capability.clone(),
+                        method: a.method.clone(),
+                    },
+                    args,
+                    open_in_tab: false,
+                    dismiss: false,
+                    confirm: None,
+                });
             }
         }
         Widget::Select {
@@ -715,38 +762,49 @@ pub fn render_widget(
             icon,
         } => {
             let running = busy == Some(action);
-            ui.horizontal(|ui| {
-                // Module buttons use the shared animated widgets, so a module's UI
-                // animates just like the host's chrome.
-                let resp = ui
-                    .add_enabled_ui(*enabled, |ui| {
-                        if !icon.is_empty() {
-                            // The label becomes the tooltip: an icon with no
-                            // name is a guess, and this one deletes things.
-                            return icon_button(ui, icon, matches!(style, ButtonStyle::Danger))
-                                .on_hover_text(text);
-                        }
-                        match style {
-                            ButtonStyle::Primary => primary_button(ui, text, egui::Vec2::ZERO),
-                            ButtonStyle::Danger => danger_button(ui, text, egui::Vec2::ZERO),
-                            ButtonStyle::Default => outline_button(ui, text, egui::Vec2::ZERO),
-                        }
-                    })
-                    .inner;
-                if resp.clicked() {
-                    *clicked = Some(Invoke {
-                        action: action.clone(),
-                        args: args.clone(),
-                        open_in_tab: *open_in_tab,
-                        dismiss: *dismiss,
-                        confirm: confirm.clone(),
-                    });
-                }
-                if running {
+            // Module buttons use the shared animated widgets, so a module's UI
+            // animates just like the host's chrome.
+            let draw = |ui: &mut egui::Ui| {
+                ui.add_enabled_ui(*enabled, |ui| {
+                    if !icon.is_empty() {
+                        // The label becomes the tooltip: an icon with no name
+                        // is a guess, and this one deletes things.
+                        return icon_button(ui, icon, matches!(style, ButtonStyle::Danger))
+                            .on_hover_text(text);
+                    }
+                    match style {
+                        ButtonStyle::Primary => primary_button(ui, text, egui::Vec2::ZERO),
+                        ButtonStyle::Danger => danger_button(ui, text, egui::Vec2::ZERO),
+                        ButtonStyle::Default => outline_button(ui, text, egui::Vec2::ZERO),
+                    }
+                })
+                .inner
+            };
+            // Only a *running* button needs a strip of its own, to hold the
+            // spinner beside it. Giving every button one defeated wrapping in
+            // the row above: a nested horizontal layout does not wrap, so a
+            // strip of them ran off the edge however much the parent wanted to
+            // fold it onto a second line.
+            let resp = if running {
+                ui.horizontal(|ui| {
+                    let resp = draw(ui);
                     ui.add_space(6.0);
                     ui.spinner(); // animates while this action is in flight
-                }
-            });
+                    resp
+                })
+                .inner
+            } else {
+                draw(ui)
+            };
+            if resp.clicked() {
+                *clicked = Some(Invoke {
+                    action: action.clone(),
+                    args: args.clone(),
+                    open_in_tab: *open_in_tab,
+                    dismiss: *dismiss,
+                    confirm: confirm.clone(),
+                });
+            }
         }
         Widget::Separator => {
             ui.separator();
@@ -774,6 +832,56 @@ pub fn render_widget(
             render_widgets(ui, children, inputs, busy, clicked);
         }
         Widget::Row { children } => {
+            // A row of many things — a strip of category buttons, a long list of
+            // actions — is wider than the window before anybody notices, and the
+            // page scrolls only downwards: whatever overran the right edge could
+            // not be reached at all, and it widened the page for everything
+            // below it, pushing a table's last columns out of reach too. Rows
+            // wrap onto a second line instead.
+            //
+            // Only a row that is all buttons. A field in a wrapped row takes
+            // the width it is offered and pushes what follows off the end, and
+            // a spacer means the author is placing things against the right
+            // edge themselves — neither survives being wrapped, and a strip of
+            // buttons is the case that actually overruns.
+            let all_buttons = children.len() > 1
+                && children
+                    .iter()
+                    .all(|c| matches!(c, Widget::Button { .. } | Widget::Label { .. }));
+            if all_buttons {
+                // Broken into lines here rather than by asking egui to wrap.
+                // Each button draws inside a scope of its own, and a scope asks
+                // for the whole of the line that is left — so egui never sees a
+                // widget that does not fit and never wraps, however the layout
+                // is configured. Measuring the buttons and deciding where the
+                // lines end is the one way that actually holds.
+                let room = ui.available_width();
+                let gap = ui.spacing().item_spacing.x;
+                let mut line: Vec<&Widget> = Vec::new();
+                let mut used = 0.0;
+                for c in children {
+                    let w = button_width(ui, c);
+                    if !line.is_empty() && used + gap + w > room {
+                        ui.horizontal(|ui| {
+                        for c in &line {
+                            render_widget(ui, c, inputs, busy, clicked);
+                        }
+                    });
+                        line.clear();
+                        used = 0.0;
+                    }
+                    used += if line.is_empty() { w } else { gap + w };
+                    line.push(c);
+                }
+                if !line.is_empty() {
+                    ui.horizontal(|ui| {
+                        for c in &line {
+                            render_widget(ui, c, inputs, busy, clicked);
+                        }
+                    });
+                }
+                return;
+            }
             // Top-align so a row of mixed-height widgets (e.g. buttons) lines up
             // by their tops instead of being vertically centered.
             ui.horizontal_top(|ui| {
@@ -842,6 +950,7 @@ pub fn render_widget(
             menu,
             row_menus,
             on_activate,
+            row_levels,
         } => render_table(
             ui,
             columns,
@@ -850,6 +959,7 @@ pub fn render_widget(
             menu,
             row_menus,
             on_activate.as_ref(),
+            row_levels,
             clicked,
         ),
         Widget::Chart { title, data } => render_chart(ui, title, data),
@@ -1082,4 +1192,29 @@ pub fn collect_ids(
             _ => {}
         }
     }
+}
+
+/// How wide a button will draw, for deciding where a row of them breaks.
+///
+/// The same measurement the button itself makes: its text uppercased in the
+/// button font, plus the padding `filled_button` and `outline_button` add. An
+/// icon button is square-ish and fixed, so it is given its height.
+fn button_width(ui: &egui::Ui, w: &Widget) -> f32 {
+    let Widget::Button { text, icon, .. } = w else {
+        // Anything else in a button strip — a label between groups — measured
+        // as its own text, which is close enough to break a line on.
+        if let Widget::Label { text, .. } = w {
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            return ui.fonts(|f| {
+                f.layout_no_wrap(text.clone(), font, color::TEXT).size().x
+            });
+        }
+        return 0.0;
+    };
+    if !icon.is_empty() {
+        return 34.0;
+    }
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let galley = ui.fonts(|f| f.layout_no_wrap(text.to_uppercase(), font, color::ON_ACCENT));
+    galley.size().x + 40.0
 }
