@@ -158,6 +158,34 @@ pub fn demo_view() -> Value {
                     ("low".into(), 8.0),
                 ],
             ),
+            separator(),
+            label("diagram — what is connected to what; hover a circle, drag to move, double-click to put it back").strong(),
+            diagram(
+                "diagram",
+                vec![
+                    node("gw", "gateway")
+                        .kind("router")
+                        .detail("10.0.0.1")
+                        .info("address", "10.0.0.1")
+                        .info("hardware", "AA:BB:CC:DD:EE:01")
+                        .info("kind", "router"),
+                    node("srv", "files")
+                        .kind("server")
+                        .detail("10.0.0.20")
+                        .info("address", "10.0.0.20")
+                        .info("hardware", "AA:BB:CC:DD:EE:14"),
+                    node("sw", "switch-1").kind("switch").detail("10.0.0.2"),
+                    node("pc", "workstation").kind("pc").detail("10.0.0.31"),
+                    node("vm", "build-vm").kind("pc").detail("10.0.0.32"),
+                ],
+                vec![
+                    ("srv".into(), "gw".into(), false),
+                    ("sw".into(), "gw".into(), false),
+                    ("pc".into(), "gw".into(), false),
+                    // Dashed: a link inferred rather than observed.
+                    ("vm".into(), "srv".into(), true),
+                ],
+            ),
         ],
     )
 }

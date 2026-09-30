@@ -392,6 +392,25 @@ pub enum Widget {
         #[serde(default)]
         data: Vec<ChartBar>,
     },
+    /// Boxes and the lines between them: what is connected to what, where a
+    /// chart would answer how much of each.
+    Diagram {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        nodes: Vec<crate::diagram::DiagramNode>,
+        #[serde(default)]
+        edges: Vec<crate::diagram::DiagramEdge>,
+        /// Take every bit of height left over, with whatever follows pinned to
+        /// the bottom of the screen. A map is the thing being read, so on a
+        /// screen that is mostly map it should be given the screen.
+        #[serde(default)]
+        fill: bool,
+        /// What a double click on a circle asks for, carrying that node's id —
+        /// the same bargain a table's rows make.
+        #[serde(default)]
+        on_activate: Option<RowAction>,
+    },
 }
 
 /// Render a view; returns the action of a clicked button, if any. `busy` is the
@@ -435,7 +454,26 @@ pub fn render_view(
     // Publish this entrance so widgets nested deeper — tables, which clock
     // themselves — can join it instead of snapping in.
     ui.data_mut(|d| d.insert_temp(view_reveal_id(), reveal_at));
+    // One widget may ask for all the height that is left. What comes after it
+    // then goes at the bottom of the screen rather than directly underneath,
+    // which is where a row of buttons belongs when the thing above it is the
+    // whole point of the screen.
+    let fills = view.widgets.iter().position(fills_the_screen);
+
     for (i, w) in view.widgets.iter().enumerate() {
+        if Some(i) == fills {
+            let t = reveal_t(ui, i, reveal_at, now, 0.02, 0.13);
+            render_filling(
+                ui,
+                w,
+                &view.widgets[i + 1..],
+                inputs,
+                busy,
+                &mut clicked,
+                (i, reveal_at, now, t),
+            );
+            break;
+        }
         // Chrome is not part of the entrance: it was already there.
         if matches!(w, Widget::Chrome { .. }) {
             render_widget(ui, w, inputs, busy, &mut clicked);
@@ -461,6 +499,58 @@ pub fn render_view(
             });
     }
     clicked
+}
+
+/// Whether this widget wants the height that is left.
+fn fills_the_screen(w: &Widget) -> bool {
+    matches!(w, Widget::Diagram { fill: true, .. })
+}
+
+/// Draw the widget that fills, and pin what follows to the bottom.
+///
+/// How much room the one that fills may have is decided by how tall the tail
+/// is, and how tall the tail is is only known once it has been drawn. It is
+/// drawn against the height it had last frame, which is right every frame after
+/// the first and settles in one when it changes.
+#[allow(clippy::too_many_arguments)]
+fn render_filling(
+    ui: &mut egui::Ui,
+    filling: &Widget,
+    tail: &[Widget],
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+    clicked: &mut Option<Invoke>,
+    (index, reveal_at, now, t): (usize, f64, f64, f32),
+) {
+    let rest = ui.available_rect_before_wrap();
+    let id = ui.id().with("limen_fill_tail");
+    let was: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
+    // Never so much that the thing the screen is about is squeezed out.
+    let tail_top = (rest.max.y - was).max(rest.min.y + 120.0);
+
+    let room = egui::Rect::from_min_max(rest.min, egui::pos2(rest.max.x, tail_top));
+    let mut middle = ui.child_ui(room, egui::Layout::top_down(egui::Align::Min), None);
+    middle.set_opacity(t);
+    render_widget(&mut middle, filling, inputs, busy, clicked);
+
+    let below = egui::Rect::from_min_max(egui::pos2(rest.min.x, tail_top), rest.max);
+    let mut bottom = ui.child_ui(below, egui::Layout::top_down(egui::Align::Min), None);
+    for (k, w) in tail.iter().enumerate() {
+        let t = reveal_t(&bottom, index + 1 + k, reveal_at, now, 0.02, 0.13);
+        bottom.scope(|ui| {
+            ui.set_opacity(t);
+            render_widget(ui, w, inputs, busy, clicked);
+        });
+    }
+
+    let used = bottom.min_rect().height();
+    if (used - was).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, used));
+        // Draw again now that the height is known, rather than leaving the tail
+        // a frame out of place.
+        ui.ctx().request_repaint();
+    }
+    ui.advance_cursor_after_rect(rest);
 }
 
 pub fn render_widgets(
@@ -752,6 +842,21 @@ pub fn render_widget(
             clicked,
         ),
         Widget::Chart { title, data } => render_chart(ui, title, data),
+        Widget::Diagram {
+            title,
+            nodes,
+            edges,
+            fill,
+            on_activate,
+        } => crate::diagram::render_diagram_in(
+            ui,
+            title,
+            nodes,
+            edges,
+            *fill,
+            on_activate.as_ref(),
+            clicked,
+        ),
     }
 }
 

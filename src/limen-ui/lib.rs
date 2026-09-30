@@ -18,6 +18,7 @@
 //! The same primitives are showcased in the debug-only `demo-ui` gallery, which
 //! is where the styles are standardized.
 
+pub mod diagram;
 pub mod cursor;
 
 use std::sync::{OnceLock, RwLock};
@@ -104,4 +105,4 @@ pub use theme::*;
 pub use typing::*;
 pub use view::*;
 pub use widgets::*;
-
+pub use diagram::{render_diagram, render_diagram_in, DiagramEdge, DiagramFact, DiagramNode};

@@ -122,6 +122,95 @@ pub fn table(columns: Vec<String>, rows: Vec<Vec<String>>) -> Widget {
         .set("columns", json!(columns))
         .set("rows", json!(rows))
 }
+/// One node of a [`diagram`]: a circle, its label, and what to say about it
+/// when the pointer is on it.
+///
+/// `kind` decides the circle's colour: `router`, `server`, `switch`, `self`, or
+/// anything else for the neutral one.
+#[derive(Clone, Debug)]
+pub struct DiagramNode {
+    id: String,
+    label: String,
+    kind: String,
+    detail: String,
+    info: Vec<(String, String)>,
+}
+
+/// A node, named by an `id` that edges refer to and drawn with `label` under it.
+pub fn node(id: impl Into<String>, label: impl Into<String>) -> DiagramNode {
+    DiagramNode {
+        id: id.into(),
+        label: label.into(),
+        kind: String::new(),
+        detail: String::new(),
+        info: Vec::new(),
+    }
+}
+
+impl DiagramNode {
+    /// What it is, which is what colour it is drawn in.
+    pub fn kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = kind.into();
+        self
+    }
+
+    /// A second, quieter line under the label — an address, a version, a count.
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+
+    /// One more named value for the hover card, which the app draws itself.
+    ///
+    /// This is where everything that does not fit beside a circle goes: the
+    /// hardware address, what answered, when it was last seen. Added in the
+    /// order it should be read.
+    pub fn info(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.info.push((name.into(), value.into()));
+        self
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "id": self.id,
+            "label": self.label,
+            "kind": self.kind,
+            "detail": self.detail,
+            "info": self.info.iter()
+                .map(|(n, v)| json!({ "name": n, "value": v }))
+                .collect::<Vec<Value>>(),
+        })
+    }
+}
+
+/// Circles and the lines between them.
+///
+/// The companion of [`chart`]: a chart says how much of each, a diagram says
+/// what is connected to what — hosts around a gateway, a module's dependencies,
+/// a process tree. The host lays it out, draws it, and answers the pointer, so a
+/// module hands over what it knows and nothing about where it goes on the page.
+///
+/// Nodes are built with [`node`]. An edge is `(from, to, dashed)`, naming node
+/// ids; `dashed` is for a link that was inferred rather than observed.
+///
+/// Add [`Widget::fills`] when the diagram *is* the screen: it then takes all the
+/// height left over and whatever follows it goes to the bottom of the window.
+pub fn diagram(
+    title: impl Into<String>,
+    nodes: Vec<DiagramNode>,
+    edges: Vec<(String, String, bool)>,
+) -> Widget {
+    let nodes: Vec<Value> = nodes.iter().map(DiagramNode::to_value).collect();
+    let edges: Vec<Value> = edges
+        .into_iter()
+        .map(|(from, to, dashed)| json!({ "from": from, "to": to, "dashed": dashed }))
+        .collect();
+    Widget::of_kind("diagram")
+        .set("title", json!(title.into()))
+        .set("nodes", Value::Array(nodes))
+        .set("edges", Value::Array(edges))
+}
+
 
 /// A horizontal bar chart: `(label, value)` bars under an optional title.
 pub fn chart(title: impl Into<String>, data: Vec<(String, f64)>) -> Widget {
