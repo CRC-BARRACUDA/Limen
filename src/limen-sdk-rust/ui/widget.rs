@@ -190,12 +190,26 @@ impl Widget {
             .collect();
         self.set("row_menus", Value::Array(arr))
     }
+    /// Per-row emphasis (parallel to `rows`): `""` for an ordinary row, or
+    /// `"ok"` / `"warning"` / `"error"` — the same words [`notice`] takes, so a
+    /// module spells severity one way throughout.
+    ///
+    /// The marked row's text is tinted. Colour is how a reader *finds* the row,
+    /// not how they learn what is wrong with it — somebody reading in
+    /// greyscale, or not distinguishing red, gets nothing from it — so a table
+    /// that marks rows should carry a column that says why as well.
+    ///
+    /// [`notice`]: crate::ui::notice
+    pub fn row_levels(self, levels: Vec<String>) -> Self {
+        self.set("row_levels", json!(levels))
+    }
     /// Invoke `capability`.`method` when a row is double-clicked, opening the
     /// returned view in a new tab.
-    /// Call `capability`/`method` as soon as a [`select`] changes, so the module
-    /// can answer with a different screen rather than only recording the answer.
+    /// Call `capability`/`method` as soon as a [`select`] changes or a [`text`]
+    /// field is typed in, so the module can answer with a different screen
+    /// rather than only recording the answer.
     ///
-    /// The chosen value arrives in the params under the select's own id, along
+    /// The new value arrives in the params under the widget's own id, along
     /// with anything passed to [`Widget::args`].
     pub fn on_change(self, capability: impl Into<String>, method: impl Into<String>) -> Self {
         let args = self.0.get("args").cloned().unwrap_or_else(|| json!({}));

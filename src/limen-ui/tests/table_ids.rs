@@ -50,10 +50,10 @@ fn draw(n: usize, interactive: bool) -> Vec<String> {
                             let ids: Vec<String> =
                                 (0..rows.len()).map(|r| format!("{s}:{r}")).collect();
                             ui::render_table(
-                                ui, &columns, &rows, &ids, &[], &[], None, &mut clicked,
+                                ui, &columns, &rows, &ids, &[], &[], None, &[], &mut clicked,
                             );
                         } else {
-                            ui::render_plain_table(ui, &columns, &rows, 2);
+                            ui::render_plain_table(ui, &columns, &rows, &[], 2);
                         }
                     }
                 });

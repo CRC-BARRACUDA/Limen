@@ -384,6 +384,18 @@ pub enum Widget {
         /// What double-clicking a row does.
         #[serde(default)]
         on_activate: Option<RowAction>,
+        /// Per-row emphasis (parallel to `rows`): `""` for an ordinary row,
+        /// or `ok` / `warning` / `error` — the same words a notice takes, so a
+        /// module says severity one way throughout.
+        ///
+        /// A marked row's text is tinted rather than its background filled: the
+        /// rows already zebra-stripe and highlight on hover, and a third
+        /// background would fight both. Colour alone is not the whole message,
+        /// so a table that marks rows should also carry a column saying why —
+        /// tinting is how a reader finds the row, not how they learn what is
+        /// wrong with it.
+        #[serde(default)]
+        row_levels: Vec<String>,
     },
     /// A horizontal bar chart (a value per labelled bar).
     Chart {
@@ -842,6 +854,7 @@ pub fn render_widget(
             menu,
             row_menus,
             on_activate,
+            row_levels,
         } => render_table(
             ui,
             columns,
@@ -850,6 +863,7 @@ pub fn render_widget(
             menu,
             row_menus,
             on_activate.as_ref(),
+            row_levels,
             clicked,
         ),
         Widget::Chart { title, data } => render_chart(ui, title, data),
