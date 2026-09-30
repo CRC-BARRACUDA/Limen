@@ -392,6 +392,36 @@ pub enum Widget {
         #[serde(default)]
         data: Vec<ChartBar>,
     },
+    /// The shares of one whole — where a chart compares magnitudes and a
+    /// diagram answers what is joined to what.
+    Donut {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        data: Vec<crate::donut::DonutSlice>,
+        /// What goes in the hole; empty for the total the slices add up to.
+        #[serde(default)]
+        centre: String,
+    },
+    /// Boxes and the lines between them: what is connected to what, where a
+    /// chart would answer how much of each.
+    Diagram {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        nodes: Vec<crate::diagram::DiagramNode>,
+        #[serde(default)]
+        edges: Vec<crate::diagram::DiagramEdge>,
+        /// Take every bit of height left over, with whatever follows pinned to
+        /// the bottom of the screen. A map is the thing being read, so on a
+        /// screen that is mostly map it should be given the screen.
+        #[serde(default)]
+        fill: bool,
+        /// What a double click on a circle asks for, carrying that node's id —
+        /// the same bargain a table's rows make.
+        #[serde(default)]
+        on_activate: Option<RowAction>,
+    },
 }
 
 /// Render a view; returns the action of a clicked button, if any. `busy` is the
@@ -435,7 +465,26 @@ pub fn render_view(
     // Publish this entrance so widgets nested deeper — tables, which clock
     // themselves — can join it instead of snapping in.
     ui.data_mut(|d| d.insert_temp(view_reveal_id(), reveal_at));
+    // One widget may ask for all the height that is left. What comes after it
+    // then goes at the bottom of the screen rather than directly underneath,
+    // which is where a row of buttons belongs when the thing above it is the
+    // whole point of the screen.
+    let fills = view.widgets.iter().position(fills_the_screen);
+
     for (i, w) in view.widgets.iter().enumerate() {
+        if Some(i) == fills {
+            let t = reveal_t(ui, i, reveal_at, now, 0.02, 0.13);
+            render_filling(
+                ui,
+                w,
+                &view.widgets[i + 1..],
+                inputs,
+                busy,
+                &mut clicked,
+                (i, reveal_at, now, t),
+            );
+            break;
+        }
         // Chrome is not part of the entrance: it was already there.
         if matches!(w, Widget::Chrome { .. }) {
             render_widget(ui, w, inputs, busy, &mut clicked);
@@ -461,6 +510,58 @@ pub fn render_view(
             });
     }
     clicked
+}
+
+/// Whether this widget wants the height that is left.
+fn fills_the_screen(w: &Widget) -> bool {
+    matches!(w, Widget::Diagram { fill: true, .. })
+}
+
+/// Draw the widget that fills, and pin what follows to the bottom.
+///
+/// How much room the one that fills may have is decided by how tall the tail
+/// is, and how tall the tail is is only known once it has been drawn. It is
+/// drawn against the height it had last frame, which is right every frame after
+/// the first and settles in one when it changes.
+#[allow(clippy::too_many_arguments)]
+fn render_filling(
+    ui: &mut egui::Ui,
+    filling: &Widget,
+    tail: &[Widget],
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+    clicked: &mut Option<Invoke>,
+    (index, reveal_at, now, t): (usize, f64, f64, f32),
+) {
+    let rest = ui.available_rect_before_wrap();
+    let id = ui.id().with("limen_fill_tail");
+    let was: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
+    // Never so much that the thing the screen is about is squeezed out.
+    let tail_top = (rest.max.y - was).max(rest.min.y + 120.0);
+
+    let room = egui::Rect::from_min_max(rest.min, egui::pos2(rest.max.x, tail_top));
+    let mut middle = ui.child_ui(room, egui::Layout::top_down(egui::Align::Min), None);
+    middle.set_opacity(t);
+    render_widget(&mut middle, filling, inputs, busy, clicked);
+
+    let below = egui::Rect::from_min_max(egui::pos2(rest.min.x, tail_top), rest.max);
+    let mut bottom = ui.child_ui(below, egui::Layout::top_down(egui::Align::Min), None);
+    for (k, w) in tail.iter().enumerate() {
+        let t = reveal_t(&bottom, index + 1 + k, reveal_at, now, 0.02, 0.13);
+        bottom.scope(|ui| {
+            ui.set_opacity(t);
+            render_widget(ui, w, inputs, busy, clicked);
+        });
+    }
+
+    let used = bottom.min_rect().height();
+    if (used - was).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, used));
+        // Draw again now that the height is known, rather than leaving the tail
+        // a frame out of place.
+        ui.ctx().request_repaint();
+    }
+    ui.advance_cursor_after_rect(rest);
 }
 
 pub fn render_widgets(
@@ -587,7 +688,11 @@ pub fn render_widget(
             *entry = on.to_string();
         }
         Widget::Step { label, state } => {
-            ui.horizontal(|ui| {
+            // `horizontal_top`, and a label told to wrap: inside a plain
+            // `horizontal` the available width is unbounded, so a long step —
+            // a host that failed with a reason, a note about what could not be
+            // read — ran off the right edge with no way to read the rest of it.
+            ui.horizontal_top(|ui| {
                 step_icon(ui, label, state);
                 ui.add_space(8.0);
                 let s = match state.as_str() {
@@ -595,7 +700,7 @@ pub fn render_widget(
                     "done" => LabelStyle::Normal,
                     _ => LabelStyle::Weak,
                 };
-                ui.label(styled(label, s));
+                ui.add(egui::Label::new(styled(label, s)).wrap());
             });
         }
         Widget::Button {
@@ -685,23 +790,31 @@ pub fn render_widget(
                     });
                     return;
                 }
-                // Path and text fields ask for all the width there is, so the
-                // first one in a row takes it and the rest are left as stubs —
-                // three thresholds side by side rendered as one wide box and two
-                // small ones. Share the row between them instead.
+                // Path and text fields ask for all the width there is, so one
+                // in a row takes the lot: three thresholds side by side came out
+                // as one wide box and two stubs, and — worse — anything *after*
+                // a field was pushed off the right edge of the window, where it
+                // could not be reached at all. A search box followed by a button
+                // is a button nobody can press.
+                //
+                // So a row with a field in it is shared out: every child gets an
+                // equal slice, the fields are held to theirs, and the rest take
+                // the width they need. A row with no field keeps its natural
+                // layout, which is what a row of buttons wants.
                 let greedy = children
                     .iter()
                     .filter(|c| matches!(c, Widget::Text { .. } | Widget::File { .. }))
                     .count();
-                if greedy < 2 {
+                if greedy == 0 || children.len() < 2 {
                     render_widgets(ui, children, inputs, busy, clicked);
                     return;
                 }
                 let gap = ui.spacing().item_spacing.x;
-                // What the fields have left once the labels and buttons beside
-                // them have taken their share.
+                // Divided by every child, not by the fields alone: the buttons
+                // and labels beside them need room too, and their widths are
+                // not known until they are drawn.
                 let fixed: f32 = gap * (children.len().saturating_sub(1)) as f32;
-                let share = ((ui.available_width() - fixed) / greedy as f32).max(72.0);
+                let share = ((ui.available_width() - fixed) / children.len() as f32).max(72.0);
                 for c in children {
                     if matches!(c, Widget::Text { .. } | Widget::File { .. }) {
                         // A field's label sits *beside* its box here, so it is
@@ -740,6 +853,26 @@ pub fn render_widget(
             clicked,
         ),
         Widget::Chart { title, data } => render_chart(ui, title, data),
+        Widget::Donut {
+            title,
+            data,
+            centre,
+        } => crate::donut::render_donut(ui, title, data, centre),
+        Widget::Diagram {
+            title,
+            nodes,
+            edges,
+            fill,
+            on_activate,
+        } => crate::diagram::render_diagram_in(
+            ui,
+            title,
+            nodes,
+            edges,
+            *fill,
+            on_activate.as_ref(),
+            clicked,
+        ),
     }
 }
 
@@ -881,6 +1014,15 @@ pub fn styled(text: &str, style: LabelStyle) -> egui::RichText {
 // bold, inline code, bullet lists, links). Not full CommonMark; anything it
 // doesn't recognise degrades to readable text.
 // --------------------------------------------------------------------------- //
+
+/// [`collect_params`] for a view that may not be there yet — a tab still
+/// loading has inputs but no screen to read them from.
+pub fn collect_params_opt(view: Option<&View>, inputs: &HashMap<String, String>) -> Value {
+    view.map_or_else(
+        || Value::Object(Default::default()),
+        |v| collect_params(v, inputs),
+    )
+}
 
 /// Gather the current values of every input widget into a params object,
 /// keyed by widget `id`.

@@ -118,6 +118,41 @@ class Chart(Widget):
     """A horizontal bar chart: `data` is a list of (label, value) pairs."""
     def __init__(self, title: Any, data: List[tuple[Any, float]]) -> None: ...
 
+class Donut(Widget):
+    """The shares of one whole: (label, value) pairs or (label, value, kind)
+    triples; `centre` fills the hole, or the total if left out."""
+    def __init__(
+        self,
+        title: Any,
+        data: List[tuple[Any, float] | tuple[Any, float, str]],
+        centre: str = ...,
+    ) -> None: ...
+
+class DiagramNode:
+    """One circle on a `Diagram`; `info` is shown on its hover card."""
+    def __init__(
+        self,
+        id: Any,
+        label: Any,
+        kind: str = ...,
+        detail: str = ...,
+        info: List[tuple[str, str]] | None = ...,
+    ) -> None: ...
+    def to_spec(self) -> Dict[str, Any]: ...
+
+class Diagram(Widget):
+    """Circles and the lines between them. `edges` name node ids, optionally
+    with a third `dashed` flag; `fill` gives the map the height that is left and
+    `on_activate` opens a double-clicked circle in a tab."""
+    def __init__(
+        self,
+        title: Any,
+        nodes: List[DiagramNode],
+        edges: List[tuple[str, str] | tuple[str, str, bool]],
+        fill: bool = ...,
+        on_activate: tuple[str, str] | None = ...,
+    ) -> None: ...
+
 class Window:
     """Top-level view: a title and a list of widgets — return from a module's `ui`
     method (or via `@m.ui`)."""

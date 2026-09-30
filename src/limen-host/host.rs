@@ -58,6 +58,14 @@ impl Host {
                     continue;
                 }
             };
+            // A module that named the platforms it runs on, on one it did not
+            // name: dropped here, before it is anything. Not recorded as a
+            // failure — it has not failed, it is simply not for this machine —
+            // and a card in the module manager for something that can never run
+            // is noise the user has no way to act on.
+            if !spec.runs_here() {
+                continue;
+            }
             // The same module can appear in several search dirs (e.g. the portable
             // base and a local ./modules). Keep the first; skip re-discoveries so
             // it isn't mistaken for a duplicate-capability conflict.

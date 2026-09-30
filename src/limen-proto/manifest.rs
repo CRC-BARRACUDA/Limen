@@ -13,6 +13,7 @@
 //! language = "python"     # python | lua | js | native
 //! entry = "main.py"
 //! abi = "rpc"             # rpc (default, over stdio) | native (in-process C-ABI)
+//! os = ["windows"]        # optional; omitted = every platform
 //!
 //! [provides]
 //! capabilities = ["usb.enumerate"]
@@ -84,6 +85,52 @@ pub struct ModuleMeta {
     /// "view on GitHub" action in the module list.
     #[serde(default)]
     pub repo: Option<String>,
+    /// The platforms this module runs on, spelled as [`std::env::consts::OS`]
+    /// does: `"windows"`, `"linux"`, `"macos"`. Empty — the default, and what a
+    /// module that says nothing gets — means every platform.
+    ///
+    /// Declaring this is not a hint, it is a filter: the host drops a module
+    /// that does not name the platform it finds itself on, so it never reaches
+    /// the module manager, the tabs, or the dependency graph. A module whose
+    /// subject exists on one OS only is the case for it — one that reads the
+    /// Windows licensing store answers with an empty list elsewhere, which a
+    /// user reads as "nothing is licensed" rather than "wrong machine".
+    #[serde(default)]
+    pub os: Vec<String>,
+}
+
+impl ModuleMeta {
+    /// Whether this module runs on `os` — a [`std::env::consts::OS`] value.
+    /// A module that named no platforms runs everywhere.
+    pub fn runs_on(&self, os: &str) -> bool {
+        self.os.is_empty() || self.os.iter().any(|d| os_matches(d, os))
+    }
+
+    /// Whether it runs on the platform this binary was built for.
+    pub fn runs_here(&self) -> bool {
+        self.runs_on(std::env::consts::OS)
+    }
+}
+
+/// Whether a manifest's declared platform names the running one. Public
+/// because two crates decide this — the manifest schema here, and the host's
+/// spec — and a rule spelled twice is a rule that drifts.
+pub fn os_matches(declared: &str, os: &str) -> bool {
+    normalise_os(declared) == os
+}
+
+/// The spellings a manifest author actually writes, mapped onto the ones
+/// [`std::env::consts::OS`] uses. Matching the constant exactly would be the
+/// simpler rule, but it fails silently — `os = ["Windows"]` would drop the
+/// module on every platform including Windows, and nothing would say why.
+/// macOS is where the variety is real: Rust's name, Apple's, and the kernel's
+/// all name one platform.
+fn normalise_os(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "macos" | "mac" | "osx" | "darwin" => "macos".to_string(),
+        "win" | "win32" | "windows" => "windows".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// The `[provides]` table.

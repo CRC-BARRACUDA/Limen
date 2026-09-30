@@ -71,6 +71,81 @@ function Separator() {
 function Row(children) {
   return { toSpec: () => ({ kind: "row", children: children.map((c) => c.toSpec()) }) };
 }
+// ---- the picture widgets ---------------------------------------------- //
+// Three questions, three shapes: a chart compares magnitudes, a donut gives the
+// shares of one whole, a diagram says what is joined to what. The host draws
+// all three, so a module hands over what it knows and nothing about where it
+// goes on the page.
+
+// A horizontal bar chart: `data` is [[label, value], ...], bars scaled to the
+// largest value.
+function Chart(title, data) {
+  return { toSpec: () => ({
+    kind: "chart", title: String(title),
+    data: data.map(([label, value]) => ({ label: String(label), value: Number(value) })),
+  }) };
+}
+
+// The shares of one whole: `data` is [[label, value], ...] or
+// [[label, value, kind], ...], where `kind` gives a slice a colour that means
+// the same thing everywhere else in Limen — "critical", "high", "medium",
+// "low", "ok", "info". `opts.centre` fills the hole; left out, it is the total.
+//
+// For a handful of parts, not eight, and not for parts of nearly equal size:
+// two slices a degree apart cannot be told apart by eye, where two bars can.
+function Donut(title, data, opts = {}) {
+  return { toSpec: () => {
+    const spec = {
+      kind: "donut", title: String(title),
+      data: data.map(([label, value, kind]) => ({
+        label: String(label), value: Number(value), kind: String(kind || ""),
+      })),
+    };
+    if (opts.centre) spec.centre = String(opts.centre);
+    return spec;
+  } };
+}
+
+// One circle on a Diagram. `id` is what edges name it by, `label` is drawn under
+// it, `detail` is the quieter second line, and `kind` decides its colour —
+// "router", "server", "switch", "self", or anything else for the neutral one.
+// `info` is [[name, value], ...] shown on the card when the pointer is on the
+// circle: everything that does not fit beside a dot goes there.
+function DiagramNode(id, label, opts = {}) {
+  return {
+    id: String(id), label: String(label),
+    kind: String(opts.kind || ""), detail: String(opts.detail || ""),
+    info: (opts.info || []).map(([name, value]) => ({
+      name: String(name), value: String(value),
+    })),
+  };
+}
+
+// Circles and the lines between them. `edges` is [[from, to], ...] or
+// [[from, to, dashed], ...] naming node ids, where `dashed` marks a link that
+// was inferred rather than observed.
+//
+// `opts.fill` gives the map all the height left over, with whatever follows it
+// pinned to the bottom of the window. `opts.onActivate` — [capability, method]
+// — opens a double-clicked circle in a tab of its own, with its id sent as
+// `id`, exactly as a table's rows do.
+function Diagram(title, nodes, edges, opts = {}) {
+  return { toSpec: () => {
+    const spec = {
+      kind: "diagram", title: String(title), nodes,
+      edges: edges.map(([from, to, dashed]) => ({
+        from: String(from), to: String(to), dashed: !!dashed,
+      })),
+    };
+    if (opts.fill) spec.fill = true;
+    if (opts.onActivate) {
+      const [capability, method] = opts.onActivate;
+      spec.on_activate = { action: { capability, method }, open_in_tab: true };
+    }
+    return spec;
+  } };
+}
+
 function Window(title, widgets) {
   return { toSpec: () => ({ title, widgets: widgets.map((w) => w.toSpec()) }) };
 }
@@ -264,4 +339,4 @@ class Module {
   }
 }
 
-module.exports = { Module, Host, Window, Label, Text, File, Select, Button, Row, Separator };
+module.exports = { Module, Host, Window, Label, Text, File, Select, Button, Row, Separator, Chart, Donut, Diagram, DiagramNode };

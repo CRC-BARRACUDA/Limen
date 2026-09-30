@@ -43,6 +43,9 @@ pub struct ModuleSpec {
     pub tags: Vec<String>,
     /// GitHub repo (`owner/repo` or full URL), if the module has one.
     pub repo: Option<String>,
+    /// Platforms the module declared it runs on (empty = all). Carried so the
+    /// decision is inspectable rather than made and forgotten at discovery.
+    pub os: Vec<String>,
     pub capabilities: Vec<String>,
     /// capability -> semver requirement (hard dependencies).
     pub requires: BTreeMap<String, String>,
@@ -76,6 +79,7 @@ impl ModuleSpec {
             authors: manifest.module.authors,
             tags: manifest.module.tags,
             repo: manifest.module.repo,
+            os: manifest.module.os,
             capabilities: manifest.provides.capabilities,
             requires: manifest.requires.capabilities,
             optional: manifest.optional.capabilities,
@@ -90,6 +94,17 @@ impl ModuleSpec {
     /// modules can't hot-swap their code, so updating one needs an app restart.
     pub fn is_native_lib(&self) -> bool {
         matches!(self.launch, Launch::Native(_))
+    }
+
+    /// Whether this module runs on the platform Limen is running on. A module
+    /// that named no platforms runs everywhere; one that named some and not
+    /// this one is dropped at discovery, never listed and never started.
+    pub fn runs_here(&self) -> bool {
+        self.os.is_empty()
+            || self
+                .os
+                .iter()
+                .any(|d| limen_proto::os_matches(d, std::env::consts::OS))
     }
 }
 

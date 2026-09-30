@@ -269,6 +269,107 @@ class Chart(Widget):
         }
 
 
+class Donut(Widget):
+    """The shares of one whole: `data` is a list of (label, value) pairs, or of
+    (label, value, kind) triples where `kind` gives the slice a colour that
+    means the same thing everywhere else in Limen — "critical", "high",
+    "medium", "low", "ok", "info".
+
+    `centre` is what goes in the hole; left out, it is the total the slices add
+    up to. Use it for a handful of parts, not eight, and not for parts of nearly
+    equal size: two slices a degree apart cannot be told apart by eye, where two
+    bars can.
+    """
+
+    def __init__(self, title, data, centre=""):
+        self.title, self.data, self.centre = title, data, centre
+
+    def to_spec(self):
+        slices = []
+        for part in self.data:
+            label, value = part[0], part[1]
+            kind = part[2] if len(part) > 2 else ""
+            slices.append(
+                {"label": str(label), "value": float(value), "kind": str(kind)}
+            )
+        spec = {"kind": "donut", "title": str(self.title), "data": slices}
+        if self.centre:
+            spec["centre"] = str(self.centre)
+        return spec
+
+
+class DiagramNode:
+    """One circle on a `Diagram`.
+
+    `id` is what edges name it by; `label` is drawn under it, `detail` is the
+    quieter second line, and `kind` decides its colour — "router", "server",
+    "switch", "self", or anything else for the neutral one. `info` is a list of
+    (name, value) pairs shown on the card when the pointer is on the circle:
+    everything that does not fit beside a dot goes there.
+    """
+
+    def __init__(self, id, label, kind="", detail="", info=None):
+        self.id, self.label = id, label
+        self.kind, self.detail = kind, detail
+        self.info = info or []
+
+    def to_spec(self):
+        return {
+            "id": str(self.id),
+            "label": str(self.label),
+            "kind": str(self.kind),
+            "detail": str(self.detail),
+            "info": [{"name": str(n), "value": str(v)} for (n, v) in self.info],
+        }
+
+
+class Diagram(Widget):
+    """Circles and the lines between them: what is connected to what.
+
+    `nodes` is a list of `DiagramNode`; `edges` is a list of (from, to) pairs or
+    (from, to, dashed) triples naming node ids, where `dashed` marks a link that
+    was inferred rather than observed. The host lays it out, draws it and answers
+    the pointer, so a module hands over what it knows and nothing about where it
+    goes on the page.
+
+    With `fill`, the map takes all the height left over and whatever follows it
+    is pinned to the bottom of the window. With `on_activate` — a
+    `(capability, method)` tuple — double-clicking a circle opens that node in a
+    tab of its own, with its id sent as `id`, exactly as a table's rows do.
+    """
+
+    def __init__(self, title, nodes, edges, fill=False, on_activate=None):
+        self.title, self.nodes, self.edges = title, nodes, edges
+        self.fill = fill
+        self.on_activate = on_activate
+
+    def to_spec(self):
+        edges = []
+        for e in self.edges:
+            edges.append(
+                {
+                    "from": str(e[0]),
+                    "to": str(e[1]),
+                    "dashed": bool(e[2]) if len(e) > 2 else False,
+                }
+            )
+        spec = {
+            "kind": "diagram",
+            "title": str(self.title),
+            "nodes": [n.to_spec() for n in self.nodes],
+            "edges": edges,
+        }
+        if self.fill:
+            spec["fill"] = True
+        if self.on_activate is not None:
+            cap, method = self.on_activate
+            spec["on_activate"] = {
+                "action": {"capability": cap, "method": method},
+                "open_in_tab": True,
+            }
+        return spec
+
+
 class Window:
     """Top-level view: a title and a list of widgets."""
 

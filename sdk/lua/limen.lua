@@ -217,6 +217,96 @@ function M.Row(children)
     return { kind = "row", children = specs }
   end)
 end
+-- ---- the picture widgets -------------------------------------------------- --
+-- Three questions, three shapes: a chart compares magnitudes, a donut gives the
+-- shares of one whole, a diagram says what is joined to what. The host draws all
+-- three, so a module hands over what it knows and nothing about where it goes on
+-- the page.
+
+-- A horizontal bar chart: `data` is { { label, value }, ... }, bars scaled to
+-- the largest value.
+function M.Chart(title, data)
+  return widget(function()
+    local slices = {}
+    for _, d in ipairs(data) do
+      slices[#slices + 1] = { label = tostring(d[1]), value = d[2] + 0.0 }
+    end
+    return { kind = "chart", title = tostring(title), data = slices }
+  end)
+end
+
+-- The shares of one whole: `data` is { { label, value }, ... } or
+-- { { label, value, kind }, ... }, where `kind` gives a slice a colour that
+-- means the same thing everywhere else in Limen -- "critical", "high",
+-- "medium", "low", "ok", "info". `opts.centre` fills the hole; left out, it is
+-- the total.
+--
+-- For a handful of parts, not eight, and not for parts of nearly equal size:
+-- two slices a degree apart cannot be told apart by eye, where two bars can.
+function M.Donut(title, data, opts)
+  opts = opts or {}
+  return widget(function()
+    local slices = {}
+    for _, d in ipairs(data) do
+      slices[#slices + 1] = {
+        label = tostring(d[1]), value = d[2] + 0.0, kind = tostring(d[3] or ""),
+      }
+    end
+    local spec = { kind = "donut", title = tostring(title), data = slices }
+    if opts.centre then spec.centre = tostring(opts.centre) end
+    return spec
+  end)
+end
+
+-- One circle on a diagram. `id` is what edges name it by, `label` is drawn under
+-- it, `opts.detail` is the quieter second line, and `opts.kind` decides its
+-- colour -- "router", "server", "switch", "self", or anything else for the
+-- neutral one. `opts.info` is { { name, value }, ... } shown on the card when
+-- the pointer is on the circle: everything that does not fit beside a dot.
+function M.DiagramNode(id, label, opts)
+  opts = opts or {}
+  local info = {}
+  for _, f in ipairs(opts.info or {}) do
+    info[#info + 1] = { name = tostring(f[1]), value = tostring(f[2]) }
+  end
+  return {
+    id = tostring(id), label = tostring(label),
+    kind = tostring(opts.kind or ""), detail = tostring(opts.detail or ""),
+    info = info,
+  }
+end
+
+-- Circles and the lines between them. `edges` is { { from, to }, ... } or
+-- { { from, to, dashed }, ... } naming node ids, where `dashed` marks a link
+-- that was inferred rather than observed.
+--
+-- `opts.fill` gives the map all the height left over, with whatever follows it
+-- pinned to the bottom of the window. `opts.on_activate` -- { capability,
+-- method } -- opens a double-clicked circle in a tab of its own, with its id
+-- sent as `id`, exactly as a table's rows do.
+function M.Diagram(title, nodes, edges, opts)
+  opts = opts or {}
+  return widget(function()
+    local lines = {}
+    for _, e in ipairs(edges) do
+      lines[#lines + 1] = {
+        from = tostring(e[1]), to = tostring(e[2]), dashed = e[3] == true,
+      }
+    end
+    local spec = {
+      kind = "diagram", title = tostring(title), nodes = nodes, edges = lines,
+    }
+    if opts.fill then spec.fill = true end
+    if opts.on_activate then
+      spec.on_activate = {
+        action = { capability = opts.on_activate[1], method = opts.on_activate[2] },
+        open_in_tab = true,
+      }
+    end
+    return spec
+  end)
+end
+
 function M.Window(title, widgets)
   return {
     to_spec = function()
