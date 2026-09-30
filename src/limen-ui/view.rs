@@ -237,6 +237,17 @@ pub enum Widget {
         /// Mask the input (single-line only), for secrets.
         #[serde(default)]
         password: bool,
+        /// Invoked as the field is typed in, so a form can act on what is in it
+        /// rather than waiting for a button to be pressed. Without it a module
+        /// learns a field's contents only when something else is clicked —
+        /// which is no use to a control whose own state depends on the field,
+        /// such as an "add another" that should do nothing while the last one
+        /// is empty.
+        ///
+        /// Fires on every keystroke, so a module that takes it on should answer
+        /// cheaply: redraw its form, and nothing more.
+        #[serde(default)]
+        on_change: Option<AutoAction>,
     },
     /// A date, typed or picked off a calendar. Its value reaches the module in
     /// one canonical form whichever way it was given.
@@ -606,11 +617,13 @@ pub fn render_widget(
             multiline,
             default,
             password,
+            on_change,
         } => {
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
             let value = inputs.entry(id.clone()).or_insert_with(|| default.clone());
+            let before = value.clone();
             if *multiline {
                 ui.add(
                     egui::TextEdit::multiline(value)
@@ -622,6 +635,28 @@ pub fn render_widget(
                 // Single-line fields — including password/secret ones — get the
                 // animated focus border.
                 text_field(ui, value, placeholder.as_str(), f32::INFINITY, *password);
+            }
+            // A field that tells the module as it is typed, so a form can act
+            // on what is in it rather than waiting for a button — a button
+            // whose own state depends on the field cannot wait for itself.
+            //
+            // Every keystroke, so a module that takes this on should answer
+            // cheaply: redraw its form, and nothing more.
+            if let (Some(a), true) = (on_change, *value != before) {
+                let mut args = a.args.clone();
+                // The new text goes with the call, so the module does not have
+                // to guess which of its fields was typed in.
+                args.insert(id.clone(), Value::String(value.clone()));
+                *clicked = Some(Invoke {
+                    action: Action {
+                        capability: a.capability.clone(),
+                        method: a.method.clone(),
+                    },
+                    args,
+                    open_in_tab: false,
+                    dismiss: false,
+                    confirm: None,
+                });
             }
         }
         Widget::Select {

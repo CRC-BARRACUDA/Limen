@@ -211,6 +211,13 @@ impl Widget {
     ///
     /// The new value arrives in the params under the widget's own id, along
     /// with anything passed to [`Widget::args`].
+    ///
+    /// A text field fires on **every keystroke**, so answer cheaply — redraw
+    /// the form and nothing more. It is for a control whose state depends on
+    /// what is in a field, such as an "add another" that should do nothing
+    /// while the last one is empty: without it the module does not learn a
+    /// field's contents until some other button is pressed, and a button that
+    /// disables itself on an empty field could never be pressed to undo that.
     pub fn on_change(self, capability: impl Into<String>, method: impl Into<String>) -> Self {
         let args = self.0.get("args").cloned().unwrap_or_else(|| json!({}));
         self.set(
