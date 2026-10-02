@@ -55,13 +55,21 @@ pub fn hscroll_key(columns: &[String]) -> egui::Id {
 /// scroll to the last column of, which is worse than one that scrolls alone.
 fn shared_hscroll(ui: &egui::Ui, hkey: egui::Id, id: egui::Id) -> (f32, bool) {
     let shared: f32 = ui.data(|d| d.get_temp(hkey)).unwrap_or(0.0);
+    // A table whose own rows already fit has nowhere to go. Handed somebody
+    // else's offset it was shoved sideways anyway — out of its own box, over
+    // whatever was beside it — and put back on the frame after, which read as
+    // the short table twitching while the long one was being scrolled.
+    //
+    // What it could do last frame, rather than what it can do now: the answer
+    // is only known after the area has been drawn.
+    let could: bool = ui.data(|d| d.get_temp(id.with("hscroll_can"))).unwrap_or(true);
     // Where this table was left last frame. Absent on the first frame, when
     // there is nothing to catch up with. What is remembered is the shared value
     // this table last *tried*, not where it ended up: a table too narrow to
     // reach that place clamps to its own end, and comparing against the clamped
     // result would have it try — and fail — again on every frame.
     let tried: Option<f32> = ui.data(|d| d.get_temp(id.with("hscroll_tried")));
-    let force = tried.is_some_and(|t| (shared - t).abs() > 0.5);
+    let force = could && tried.is_some_and(|t| (shared - t).abs() > 0.5);
     (shared, force)
 }
 
@@ -91,6 +99,9 @@ pub fn keep_hscroll(
     let moved = !forced && was.is_some_and(|w| (now - w).abs() > 0.5);
     ui.data_mut(|d| {
         d.insert_temp(id.with("hscroll_at"), now);
+        // Whether there was anywhere to scroll to — read next frame, before
+        // this table is moved to somebody else's place. See `shared_hscroll`.
+        d.insert_temp(id.with("hscroll_can"), can_scroll);
         // What it last tried to reach — so a table that cannot get there does
         // not spend every frame trying again.
         d.insert_temp(id.with("hscroll_tried"), if moved { now } else { shared });
