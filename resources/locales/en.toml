@@ -161,6 +161,10 @@ quit_title = "Quit Limen?"
 quit_yes = "Quit"
 remove_title = "Remove module?"
 remove_yes = "Remove"
+# What a module's own question offers when it did not name the button itself:
+# a word that says go ahead and nothing about what is being done, because the
+# host does not know.
+go = "Continue"
 cancel = "Cancel"
 
 [cal]

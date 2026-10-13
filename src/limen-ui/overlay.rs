@@ -81,7 +81,13 @@ pub fn overlay(
     // inert while the pop-up stands. Bounded rather than full-screen: everything
     // outside it, the title bar and the tab strip included, stays live.
     let screen = ctx.screen_rect();
-    let bounds = opts.bounds.unwrap_or(screen);
+    // Inside the window, whatever was asked for. A caller hands over the area a
+    // pop-up belongs to — the tab's content, so the title bar and the tab strip
+    // stay live — and a panel's content rect grows past the window when the page
+    // in it is wider than the window. Centred on that, a pop-up walks off the
+    // right-hand side: it is centred on the page rather than on what can be
+    // seen of it.
+    let bounds = opts.bounds.unwrap_or(screen).intersect(screen);
     egui::Area::new(id.with("veil"))
         .order(egui::Order::Middle)
         .fixed_pos(bounds.min)

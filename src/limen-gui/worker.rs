@@ -81,7 +81,17 @@ pub enum RunTag {
     Ui {
         module: String,
     },
-    Action,
+    /// A button, a menu entry, or a step of an `auto` chain — carrying the
+    /// module tab it was issued from, when it was issued from one.
+    ///
+    /// Without that, an answer had nowhere of its own to land and was given to
+    /// whatever tab happened to be on screen when it arrived: a search still
+    /// polling in one tab painted its own screen over the module the user had
+    /// switched to, and went on painting it, because the view it delivered
+    /// carried the next step of the same loop.
+    Action {
+        module: Option<String>,
+    },
     /// A row action whose result view opens in a detail tab (`id`).
     Detail {
         id: u64,

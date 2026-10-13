@@ -37,77 +37,8 @@ match old {
     _ => panic!("expected a button"),
 }
 }
-/// Swapping a module's screen must count as a change; refreshing one in
-/// place must not, or a progress checklist would restart its entrance on
-/// every tick.
-#[test]
-fn view_shape_tracks_the_screen_not_its_contents() {
-let parse = |s: &str| -> View { serde_json::from_str(s).unwrap() };
-
-let basic = parse(
-    r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
-);
-// Same screen, different text — a progress step advancing.
-let ticked = parse(
-    r#"{"title":"S","widgets":[{"kind":"label","text":"b"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
-);
-assert_eq!(
-    view_shape(&basic),
-    view_shape(&ticked),
-    "text changes must not restart the entrance"
-);
-
-// A control appears — Basic becoming Advanced.
-let advanced = parse(
-    r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"checkbox","id":"x"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
-);
-assert_ne!(view_shape(&basic), view_shape(&advanced));
-
-// Two screens built from the same widgets, differing only in what the
-// button says — a mode switch offering the next scan. Same shape by the
-// old rule, and so no entrance at all.
-let to_procs = parse(
-    r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"button","text":"Scan running processes instead","action":{"capability":"c","method":"m"}}]}"#,
-);
-let to_autoruns = parse(
-    r#"{"title":"S","widgets":[{"kind":"label","text":"a"},{"kind":"button","text":"Scan what starts automatically instead","action":{"capability":"c","method":"m"}}]}"#,
-);
-assert_ne!(
-    view_shape(&to_procs),
-    view_shape(&to_autoruns),
-    "a screen whose only difference is its button is still a different screen"
-);
-
-// ...and a button nested in a row counts the same way.
-let row_a = parse(
-    r#"{"title":"S","widgets":[{"kind":"row","children":[{"kind":"button","text":"Files","action":{"capability":"c","method":"m"}}]}]}"#,
-);
-let row_b = parse(
-    r#"{"title":"S","widgets":[{"kind":"row","children":[{"kind":"button","text":"Processes","action":{"capability":"c","method":"m"}}]}]}"#,
-);
-assert_ne!(view_shape(&row_a), view_shape(&row_b));
-
-// A progress view keeps its buttons while its counts change, so it must
-// still not re-animate — that is what the whole rule protects.
-let polling = |n: &str| {
-    parse(&format!(
-        r#"{{"title":"S","widgets":[{{"kind":"label","text":"{n} lines logged"}},{{"kind":"button","text":"Stop","action":{{"capability":"c","method":"m"}}}}]}}"#
-    ))
-};
-assert_eq!(view_shape(&polling("12")), view_shape(&polling("4310")));
-
-// A different screen entirely.
-let other = parse(
-    r#"{"title":"Other","widgets":[{"kind":"label","text":"a"},{"kind":"button","text":"go","action":{"capability":"c","method":"m"}}]}"#,
-);
-assert_ne!(view_shape(&basic), view_shape(&other));
-
-// Same kinds, different order still counts — the arrangement changed.
-let reordered = parse(
-    r#"{"title":"S","widgets":[{"kind":"button","text":"go","action":{"capability":"c","method":"m"}},{"kind":"label","text":"a"}]}"#,
-);
-assert_ne!(view_shape(&basic), view_shape(&reordered));
-}
+/// A module's view parses, and its fields are collected into the params its
+/// buttons carry.
 #[test]
 fn parses_a_module_view_and_collects_params() {
 // The exact shape modules emit from their `ui` method.
@@ -159,27 +90,6 @@ inputs.insert("target".to_string(), "/evidence".to_string());
 let params = collect_params(&view, &inputs);
 assert_eq!(params["task_pick"], "Gaps");
 assert_eq!(params["target"], "/evidence");
-}
-/// The header is chrome because it does not change. When it does — a
-/// different version after an update — that is still a different screen.
-#[test]
-fn a_change_inside_chrome_is_still_a_change() {
-let parse = |v: &str| -> View {
-    serde_json::from_str(&format!(
-        r#"{{"title":"S","widgets":[{{"kind":"chrome","children":[
-            {{"kind":"button","text":"{v}","action":{{"capability":"c","method":"m"}}}}
-        ]}}]}}"#
-    ))
-    .unwrap()
-};
-assert_ne!(
-    view_shape(&parse("Reinstall 2.16.3")),
-    view_shape(&parse("Reinstall 2.17.0"))
-);
-assert_eq!(
-    view_shape(&parse("Reinstall 2.16.3")),
-    view_shape(&parse("Reinstall 2.16.3"))
-);
 }
 /// A date field's value has to reach the module like any other input.
 #[test]

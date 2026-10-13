@@ -273,6 +273,21 @@ impl Host {
             .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
     }
 
+    /// Ask the user for a **folder**, and hand back what they chose.
+    ///
+    /// The counterpart of [`Host::pick_file`]. A module that works on
+    /// directories — a search given places to look, a scan given a tree —
+    /// would otherwise have to ask for a file and take its parent, which means
+    /// telling somebody to pick something they do not mean.
+    ///
+    /// `None` when the dialog was cancelled, which is an answer rather than a
+    /// failure: it means "not that one, then".
+    pub fn pick_dir(&self) -> Option<String> {
+        self.raw("host.pick_dir", Value::Null)
+            .ok()
+            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+    }
+
     /// Show a native "save as" dialog on the host, opening on `suggested` as the
     /// file name; returns the chosen path, or `None` if the user cancelled.
     ///

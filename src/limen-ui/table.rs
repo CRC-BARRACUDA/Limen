@@ -36,6 +36,23 @@ pub fn row_reveal(ui: &mut egui::Ui, cols: &[String], nrows: usize, r: usize) ->
 }
 
 
+/// How far row `r` is into the table's own staggered entrance, counted from
+/// `shown`.
+///
+/// The interactive table keeps that clock itself (see [`rows`]) so that an
+/// edited table does not replay: it restarts the entrance when it is replaced
+/// wholesale and leaves it alone when one row has come or gone.
+fn cascade(ui: &mut egui::Ui, shown: f64, r: usize) -> f32 {
+    const CAP: usize = 18;
+    let now = ui.input(|i| i.time);
+    // The later of the table's clock and the view's, so switching back to a tab
+    // that was already open still plays an entrance.
+    let view = ui
+        .data(|d| d.get_temp::<f64>(view_reveal_id()))
+        .unwrap_or(0.0);
+    reveal_t(ui, r.min(CAP), shown.max(view), now, 0.010, 0.14)
+}
+
 /// Where a set of tables sharing one column layout keeps its horizontal scroll.
 ///
 /// Every table is its own `ScrollArea`, so a screen split into one table per
@@ -185,7 +202,7 @@ pub fn render_plain_table(
     // Position as well as shape — see `row_reveal`. Two tables of the same size
     // in one view are ordinary here (one per section), and sharing a ScrollArea
     // or Grid id between them paints egui's clash warning over the page.
-    let id = ui.auto_id_with(("limen_table", ncols, rows.len()));
+    let id = ui.auto_id_with(("limen_table", ncols));
     // So that a table which allocates nothing still advances the counter, and the
     // next one cannot land on this id.
     ui.skip_ahead_auto_ids(1);
@@ -305,7 +322,11 @@ pub fn render_interactive_table(
     let row_h = font.size + pad_y * 2.0;
     let rounding = egui::Rounding::ZERO;
 
-    let id = ui.auto_id_with(("limen_itable", ncols, rows.len()));
+    // Not keyed by the number of rows. A table that gains one row is the same
+    // table: keyed by its shape it became a new widget instead, which threw
+    // away its scroll position, its open menu and the memory of what it drew
+    // last frame — the whole of what makes an edit readable as an edit.
+    let id = ui.auto_id_with(("limen_itable", ncols));
     ui.skip_ahead_auto_ids(1);
     // Shared with every other table on the screen that has these columns, so
     // they scroll as one. Applied from last frame's value and written back
@@ -313,6 +334,9 @@ pub fn render_interactive_table(
     // produces, and the alternative is each table keeping its own place.
     let hkey = hscroll_key(columns);
     let (shared_x, force) = shared_hscroll(ui, hkey, id);
+    // What has changed since last frame, worked out once for the whole table —
+    // and the memory for next frame written while it is here. See [`rows`].
+    let lane = rows::lane(ui, id, rows, row_ids);
     // Both axes: sideways for columns that do not fit, and downwards once
     // there are more rows than `VISIBLE_ROWS`. `auto_shrink` on y so a short
     // table still shrink-wraps its rows and shows no scrollbar.
@@ -325,6 +349,13 @@ pub fn render_interactive_table(
     let out = area.show(ui, |ui| {
         // Stretch to the viewport so a row's highlight spans the full width.
         let table_w = content_w.max(ui.available_width());
+        // The gap between rows is taken over from the layout and animated with
+        // the row that follows it — a row still at nothing would otherwise have
+        // pushed the rest down by a whole gap before it had grown a pixel. Taken
+        // over before the header is placed, because a layout adds its spacing to
+        // the cursor as it places each item, not as it places the next.
+        let gap = ui.spacing().item_spacing.y;
+        ui.spacing_mut().item_spacing.y = 0.0;
 
         // Header.
         let (hrect, _) = ui.allocate_exact_size(egui::vec2(table_w, row_h), egui::Sense::hover());
@@ -345,48 +376,89 @@ pub fn render_interactive_table(
             egui::Stroke::new(1.0_f32, color::BORDER),
         );
 
-        // Rows.
-        for (r, row) in rows.iter().enumerate() {
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(table_w, row_h), egui::Sense::click());
+        // Rows. Each is drawn at the height its own motion says, so a row
+        // arriving pushes what is below it down by exactly as much as it has
+        // grown — the rows after it move because of it, not alongside it.
+        //
+        // The gap between rows is taken over from the layout and animated with
+        // the row, or a row still at nothing would already have pushed the rest
+        // down by a whole gap before it had grown a pixel. Put above the band
+        // rather than below it, which is where a layout's own spacing falls:
+        // after the header, between the rows, and not after the last one.
+        for item in &lane.rows {
+            let grow = item.grow.clamp(0.0, 1.0);
+            let cells: &[String] = match (&item.ghost, item.at) {
+                (Some(ghost), _) => ghost,
+                (None, Some(r)) => &rows[r],
+                (None, None) => continue,
+            };
+            // A live row senses clicks from the moment it exists; a row on its
+            // way out must not, or the last thing somebody removed can be
+            // right-clicked while it fades.
+            let sense = match item.at {
+                Some(_) => egui::Sense::click(),
+                None => egui::Sense::hover(),
+            };
+            let (slot, _) = ui.allocate_exact_size(
+                egui::vec2(table_w, (row_h + gap) * grow),
+                egui::Sense::hover(),
+            );
+            let rect = egui::Rect::from_min_size(
+                slot.min + egui::vec2(0.0, gap * grow),
+                egui::vec2(table_w, row_h * grow),
+            );
+            // The band, not its slot: the gap above a row belongs to nobody, and
+            // a row that lights up when the pointer is in the space above it
+            // reads as the wrong row lighting up.
+            let resp = ui.interact(rect, id.with(("row", item.at, item.leaving)), sense);
             let it = interact(ui, &resp);
-            // Fade this row in on its slot of the table's entrance. Set on the
-            // Ui so the painted chrome (zebra, hover, separators) and the cell
-            // text below both pick it up.
-            let row_t = row_reveal(ui, columns, rows.len(), r);
+            // Settled rows fade in on the table's own entrance; a row in motion
+            // carries its own.
+            let row_t = if item.settled() {
+                cascade(ui, lane.shown, item.at.unwrap_or(0))
+            } else {
+                grow
+            };
             ui.set_opacity(row_t);
+            // Nothing is drawn outside the band, which is shorter than a row
+            // until it has finished arriving.
+            let paint = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+            // The sideways half of the motion: in from the left as it arrives,
+            // out to the right as it goes. The band itself stays put — it is
+            // the contents that travel, so the stripes do not shear.
+            let slide = if item.leaving {
+                (1.0 - grow) * 22.0
+            } else {
+                -(1.0 - grow) * 14.0
+            };
 
             // Zebra base, then a hover highlight faded in by the eased factor,
             // with a small accent bar on the leading edge and a press tint.
-            if r % 2 == 1 {
-                ui.painter()
-                    .rect_filled(rect, rounding, with_alpha(color::BG_WIDGET, 0.30));
+            // Striped by where the row belongs rather than where it is being
+            // drawn, so a gap closing does not flip every stripe below it.
+            let stripe = item.at.unwrap_or(0);
+            if stripe % 2 == 1 {
+                paint.rect_filled(rect, rounding, with_alpha(color::BG_WIDGET, 0.30));
             }
             // A marked row is washed in its colour, over the zebra and under
             // the hover highlight — so it still lights up when the pointer is
             // on it, and still reads as marked when it is not.
-            if let Some(tone) = row_tone(row_levels.get(r)) {
-                ui.painter()
-                    .rect_filled(rect, rounding, with_alpha(tone, ROW_WASH));
+            if let Some(tone) = item.at.and_then(|r| row_tone(row_levels.get(r))) {
+                paint.rect_filled(rect, rounding, with_alpha(tone, ROW_WASH));
             }
             if it.hover > 0.0 {
                 let tint = lerp_color(color::BG_HOVER, color::ACCENT, it.press * 0.18);
-                ui.painter()
-                    .rect_filled(rect, rounding, with_alpha(tint, it.hover));
+                paint.rect_filled(rect, rounding, with_alpha(tint, it.hover));
                 let bar = egui::Rect::from_min_size(rect.min, egui::vec2(2.5, rect.height()));
-                ui.painter().rect_filled(
-                    bar,
-                    egui::Rounding::ZERO,
-                    with_alpha(color::ACCENT, it.hover),
-                );
+                paint.rect_filled(bar, egui::Rounding::ZERO, with_alpha(color::ACCENT, it.hover));
             }
 
             // The text stays the ordinary colour: the row is picked out by its
             // background, which costs the words none of their contrast.
             let ink = color::TEXT;
-            let mut x = rect.left() + pad_x;
-            for (c, cell) in row.iter().enumerate() {
-                ui.painter().text(
+            let mut x = rect.left() + pad_x + slide;
+            for (c, cell) in cells.iter().enumerate() {
+                paint.text(
                     egui::pos2(x, rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     cell,
@@ -396,6 +468,7 @@ pub fn render_interactive_table(
                 x += widths.get(c).copied().unwrap_or(0.0) + col_gap;
             }
 
+            let Some(r) = item.at else { continue };
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }

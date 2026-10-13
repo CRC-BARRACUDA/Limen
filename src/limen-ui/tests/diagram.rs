@@ -19,6 +19,8 @@ fn edge(from: &str, to: &str) -> DiagramEdge {
         from: from.into(),
         to: to.into(),
         dashed: false,
+        info: Vec::new(),
+        label: String::new(),
     }
 }
 
@@ -91,7 +93,7 @@ fn the_facts_of_a_node_survive_the_wire() {
             .detail("10.0.0.1")
             .info("address", "10.0.0.1")
             .info("hardware", "AA:BB:CC:DD:EE:01")],
-        vec![],
+        Vec::<limen_sdk_rust::ui::DiagramLink>::new(),
     );
     let json = sent.into_value();
     let view: limen_ui::View =
@@ -751,4 +753,199 @@ impl Harness {
         // that draws what it did.
         self.circles(vec![])
     }
+}
+
+/// A line is a thing in its own right: point at it and it says what the
+/// connection is.
+///
+/// The facts used to be written along the line, at each end. On a map where
+/// every line meets at one hub that is two labels per line all crowding the
+/// same middle — so the line holds them and hands them over when asked, the
+/// way a circle does.
+#[test]
+fn a_line_says_what_it_is_when_the_pointer_is_on_it() {
+    use eframe::egui;
+
+    let nodes = vec![node("pc", "self"), node("gw", "router")];
+    let edges = vec![DiagramEdge {
+        from: "pc".into(),
+        to: "gw".into(),
+        dashed: false,
+        label: String::new(),
+        info: vec![
+            DiagramFact { name: "This end".into(), value: "192.168.0.43(F3:6D:12:CE:91:E7)".into() },
+            DiagramFact { name: "That end".into(), value: "192.168.0.1(AF:44:A9:B1:59:AE)".into() },
+        ],
+    }];
+
+    let drawn = |at: Option<egui::Pos2>| -> Vec<String> {
+        let ctx = egui::Context::default();
+        ui::apply_theme(&ctx);
+        let mut text = Vec::new();
+        // Three frames with the pointer where it is: the first tells egui
+        // where the pointer is, the second notices the widget under it, and
+        // the card goes up on the third. A tooltip is always a frame behind
+        // the hover that asked for it.
+        for t in [1.0_f64, 2.0, 3.0] {
+            let out = ctx.run(
+                egui::RawInput {
+                    time: Some(t),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 700.0),
+                    )),
+                    events: at
+                        .map(|p| vec![egui::Event::PointerMoved(p)])
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui::render_diagram(ui, "", &nodes, &edges);
+                    });
+                },
+            );
+            text.clear();
+            fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+                match s {
+                    egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for c in &out.shapes {
+                walk(&c.shape, &mut text);
+            }
+        }
+        text
+    };
+
+    // Nothing written along the line when nobody is pointing at it: the map is
+    // circles and wires.
+    let quiet = drawn(None);
+    assert!(
+        !quiet.iter().any(|t| t.contains("192.168.0.43")),
+        "the map is writing addresses on itself: {quiet:?}"
+    );
+
+    // The pointer on the wire, found by drawing it once and reading the
+    // segment back rather than by guessing at a number — and a little to the
+    // side of it, because nobody lands on a one-pixel line exactly and the
+    // reach is the thing being tested.
+    let wire = drawn_line();
+    let beside = wire.0.lerp(wire.1, 0.5) + egui::vec2(3.0, 0.0);
+    let on_wire = drawn(Some(beside));
+    let said = on_wire.join(" | ");
+    assert!(said.contains("This end"), "the card did not open: {said}");
+    assert!(said.contains("192.168.0.43(F3:6D:12:CE:91:E7)"), "{said}");
+    assert!(said.contains("192.168.0.1(AF:44:A9:B1:59:AE)"), "{said}");
+    // Named by what it joins, since the module did not name it.
+    assert!(said.contains("pc ↔ gw"), "{said}");
+}
+
+/// Where the one line of that map is actually drawn.
+fn drawn_line() -> (eframe::egui::Pos2, eframe::egui::Pos2) {
+    use eframe::egui;
+    let nodes = vec![node("pc", "self"), node("gw", "router")];
+    let edges = vec![edge("pc", "gw")];
+    let ctx = egui::Context::default();
+    ui::apply_theme(&ctx);
+    let out = ctx.run(
+        egui::RawInput {
+            time: Some(2.0),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui::render_diagram(ui, "", &nodes, &edges);
+            });
+        },
+    );
+    fn walk(s: &egui::Shape, out: &mut Option<(egui::Pos2, egui::Pos2)>) {
+        match s {
+            egui::Shape::LineSegment { points, .. } if out.is_none() => {
+                *out = Some((points[0], points[1]))
+            }
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let mut found = None;
+    for c in &out.shapes {
+        walk(&c.shape, &mut found);
+    }
+    found.expect("the map drew no line")
+}
+
+/// A circle wins over the line under it: it is the smaller target and the one
+/// somebody is aiming at.
+#[test]
+fn a_circle_answers_before_the_line_behind_it() {
+    use eframe::egui;
+
+    let nodes = vec![node("pc", "self"), node("gw", "router")];
+    let edges = vec![DiagramEdge {
+        from: "pc".into(),
+        to: "gw".into(),
+        dashed: false,
+        label: "the wire".into(),
+        info: vec![DiagramFact { name: "This end".into(), value: "on the wire".into() }],
+    }];
+
+    // A point that is on the line *and* on a circle: just past where the line
+    // was trimmed to the circle's edge. Both would answer, so which one does
+    // is the whole question.
+    let wire = drawn_line();
+    let along = (wire.1 - wire.0).normalized();
+    let both = wire.0 + along * 2.0;
+
+    let ctx = egui::Context::default();
+    ui::apply_theme(&ctx);
+    let mut text = Vec::new();
+    let mut circles: Vec<egui::Pos2> = Vec::new();
+    for t in [1.0_f64, 2.0, 3.0] {
+        let at = both;
+        let out = ctx.run(
+            egui::RawInput {
+                time: Some(t),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 700.0),
+                )),
+                events: vec![egui::Event::PointerMoved(at)],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui::render_diagram(ui, "", &nodes, &edges);
+                });
+            },
+        );
+        text.clear();
+        circles.clear();
+        fn walk(s: &egui::Shape, out: &mut Vec<String>, circles: &mut Vec<eframe::egui::Pos2>) {
+            match s {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::Shape::Circle(c) => circles.push(c.center),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out, circles)),
+                _ => {}
+            }
+        }
+        for c in &out.shapes {
+            walk(&c.shape, &mut text, &mut circles);
+        }
+    }
+    let said = text.join(" | ");
+    // The circle is close enough that the line also reaches the pointer; the
+    // circle is the smaller target and the one somebody is aiming at.
+    assert!(
+        circles.iter().any(|c| c.distance(both) <= 17.0),
+        "the test is not pointing at a circle at all: {circles:?} {both:?}"
+    );
+    assert!(!said.contains("the wire"), "the line answered for the circle: {said}");
+    assert!(said.contains("pc"), "nothing answered at all: {said}");
 }

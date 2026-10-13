@@ -99,6 +99,58 @@ pub fn answer_goes_to(active: Option<&Tab>, open_in_tab: bool) -> Answer {
     }
 }
 
+/// What the two buttons of a module's confirmation say.
+///
+/// A module may name them; when it does not, the host supplies a word that
+/// says only "go ahead" and one that backs out. The default used to be
+/// *Remove* — the word the module manager's own dialog uses, borrowed because
+/// that dialog came first — so a module asking "knock on every address?"
+/// offered a button marked Remove, answering a question nobody had asked.
+pub fn confirm_words(yes: &str, no: &str) -> (String, String) {
+    (
+        if yes.is_empty() {
+            i18n::t("confirm.go")
+        } else {
+            yes.to_string()
+        },
+        if no.is_empty() {
+            i18n::t("confirm.cancel")
+        } else {
+            no.to_string()
+        },
+    )
+}
+
+/// Where an action's answer belongs when it comes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Landing {
+    /// The tab that asked is the tab on screen: show it.
+    OnScreen,
+    /// The user has moved on. The answer belongs to the tab that asked for it,
+    /// put away under that module's name.
+    Stored(String),
+}
+
+/// Decide between those, for an answer to a call made from `asked_from` while
+/// `active` is the tab now on screen.
+///
+/// An action used to have nowhere of its own to land, so its answer was given
+/// to whatever tab was in front of the user when it arrived. A search still
+/// polling in one tab painted its own screen over the module the user had
+/// switched to — and went on painting it, because the view it delivered
+/// carried the next step of the same loop.
+///
+/// A call made from somewhere that is not a module tab — Developer, an
+/// update — has no tab to be put away in, and is shown as it always was.
+pub fn answer_lands(asked_from: Option<&str>, active: Option<&Tab>) -> Landing {
+    match asked_from {
+        Some(name) if active != Some(&Tab::Module(name.to_string())) => {
+            Landing::Stored(name.to_string())
+        }
+        _ => Landing::OnScreen,
+    }
+}
+
 pub fn swap_page(
     current: ModulePage,
     stored: &mut HashMap<String, ModulePage>,

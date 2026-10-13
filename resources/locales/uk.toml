@@ -156,6 +156,7 @@ quit_title = "Вийти з Limen?"
 quit_yes = "Вийти"
 remove_title = "Видалити модуль?"
 remove_yes = "Видалити"
+go = "Продовжити"
 cancel = "Скасувати"
 
 [cal]

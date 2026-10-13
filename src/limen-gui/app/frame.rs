@@ -24,6 +24,14 @@ impl eframe::App for LimenApp {
         let now_t = ctx.input(|i| i.time);
         self.drain_events(now_t);
         self.drain_file_picks();
+        // A polling chain that asked for a pause between its steps: take the
+        // next step when it is due, and ask to be drawn again when it is.
+        // Without the pause the chain asks as fast as the module can answer,
+        // and the application spends its frames parsing screens instead of
+        // drawing them or noticing a click.
+        if let Some(left) = self.due_now() {
+            ctx.request_repaint_after(left);
+        }
         // Keep the screen→UI mapping current, so a file drag (during which the
         // window system stops reporting the pointer) can still be located.
         ui::cursor::calibrate(ctx);
@@ -1004,47 +1012,47 @@ impl eframe::App for LimenApp {
 
         // A module action's own confirmation, drawn with the host's dialog so it
         // matches the one the module manager uses to remove a module.
+        //
+        // Driven every frame rather than only while one is being asked — the
+        // same reason the pop-up layer below is. The dialog fades in from how
+        // shut it was last frame, and a dialog whose first frame already says
+        // "open" has no shut frame to come from: it arrives at full strength,
+        // having asked for none of the repaints that would have carried it in.
         {
             let open = self.pending_confirm.is_some();
             if open {
                 self.confirm_showing = self.pending_confirm.clone();
             }
-            if let Some(inv) = self.confirm_showing.clone() {
-                let c = inv.confirm.clone().unwrap_or_default();
-                let subject = (!c.subject.is_empty()).then_some(c.subject.as_str());
-                let yes = if c.confirm_label.is_empty() {
-                    i18n::t("confirm.remove_yes")
-                } else {
-                    c.confirm_label.clone()
-                };
-                let no = if c.cancel_label.is_empty() {
-                    i18n::t("confirm.cancel")
-                } else {
-                    c.cancel_label.clone()
-                };
-                match ui::confirm_dialog(
-                    ctx,
-                    "module",
-                    open,
-                    &c.title,
-                    subject,
-                    &yes,
-                    &no,
-                    self.content_rect,
-                ) {
-                    Some(true) => {
-                        self.pending_confirm = None;
-                        // Run it now that it has been answered; the question is
-                        // dropped so it is not asked a second time.
-                        let mut go = inv;
+            let inv = self.confirm_showing.clone();
+            let c = inv
+                .as_ref()
+                .and_then(|i| i.confirm.clone())
+                .unwrap_or_default();
+            let subject = (!c.subject.is_empty()).then_some(c.subject.as_str());
+            let (yes, no) = confirm_words(&c.confirm_label, &c.cancel_label);
+            match ui::confirm_dialog(
+                ctx,
+                "module",
+                open,
+                &c.title,
+                subject,
+                &yes,
+                &no,
+                self.content_rect,
+            ) {
+                Some(true) => {
+                    self.pending_confirm = None;
+                    // Run it now that it has been answered; the question is
+                    // dropped so it is not asked a second time.
+                    if let Some(mut go) = inv {
                         go.confirm = None;
                         self.dispatch(go);
                     }
-                    Some(false) => self.pending_confirm = None,
-                    None => {
-                        if !open {
-                            self.confirm_showing = None;
-                        }
+                }
+                Some(false) => self.pending_confirm = None,
+                None => {
+                    if !open {
+                        self.confirm_showing = None;
                     }
                 }
             }
