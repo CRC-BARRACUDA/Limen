@@ -94,6 +94,14 @@ pub struct LimenApp {
     /// name. The active tab's own state lives in the fields above; this is where
     /// the others wait.
     pub(crate) module_pages: HashMap<String, ModulePage>,
+    /// The next step of a polling chain, and when it is due.
+    ///
+    /// A chain that asks again the moment it is answered asks as fast as the
+    /// module can answer — and the application then spends every frame
+    /// building and parsing a screen instead of drawing one or noticing a
+    /// click. A module that knows its job is long says how often it wants to
+    /// be asked; see [`ui::AutoAction::every_ms`].
+    pub(crate) due_auto: Option<(ui::Invoke, std::time::Instant)>,
     /// A module action waiting on the question its button carried, and the one
     /// still fading out — the same pair as the consent dialog, for the same
     /// reason: an answered question has to keep drawing while it leaves.
@@ -324,6 +332,7 @@ impl LimenApp {
             quit_confirmed: false,
             content_rect: None,
             module_pages: HashMap::new(),
+            due_auto: None,
             pending_confirm: None,
             confirm_showing: None,
             modal_stack: Vec::new(),
@@ -564,6 +573,33 @@ impl LimenApp {
         }
     }
 
+    /// Take the next step of a chain — now, or after the pause it asked for.
+    pub(crate) fn chain(&mut self, auto: ui::AutoAction) {
+        let wait = auto.every_ms;
+        let invoke = auto.into_invoke();
+        if wait == 0 {
+            self.dispatch(invoke);
+            return;
+        }
+        self.due_auto = Some((
+            invoke,
+            std::time::Instant::now() + std::time::Duration::from_millis(wait),
+        ));
+    }
+
+    /// Whatever the chain is waiting to do, once it is time. Returns how long
+    /// is left to wait, so the frame can ask to be drawn again then.
+    pub(crate) fn due_now(&mut self) -> Option<std::time::Duration> {
+        let (_, when) = self.due_auto.as_ref()?;
+        let left = when.saturating_duration_since(std::time::Instant::now());
+        if !left.is_zero() {
+            return Some(left);
+        }
+        let (invoke, _) = self.due_auto.take()?;
+        self.dispatch(invoke);
+        None
+    }
+
     /// Pick up a chain the tab was in the middle of.
     ///
     /// A view that carries an `auto` was polling something — a scan, an install.
@@ -575,7 +611,7 @@ impl LimenApp {
             if !resumes(&a) {
                 return;
             }
-            self.dispatch(a.into_invoke());
+            self.chain(a);
         }
     }
 
@@ -920,7 +956,7 @@ impl LimenApp {
                                         self.accept_view(view);
                                         // Chain the next step, if the view asked for one.
                                         if let Some(a) = auto {
-                                            self.dispatch(a.into_invoke());
+                                            self.chain(a);
                                         }
                                     }
                                     Err(e) => {
@@ -938,7 +974,25 @@ impl LimenApp {
                             }
                         }
                     }
-                    RunTag::Action => {
+                    RunTag::Action { module } => {
+                        // The tab that asked is no longer the tab on screen.
+                        // Its answer belongs to it: stored, and not chained —
+                        // a loop picks itself up when its tab is next shown
+                        // (see `resume_page`), exactly as a `Ui` answer does.
+                        if let Landing::Stored(name) =
+                            answer_lands(module.as_deref(), self.active_tab().as_ref())
+                        {
+                            let page = self.module_pages.entry(name).or_default();
+                            page.busy = false;
+                            if let Ok(v) = result
+                                && v.get("widgets").is_some()
+                                && let Ok(view) = serde_json::from_value::<ui::View>(v)
+                            {
+                                page.view = Some(view);
+                                page.view_error = None;
+                            }
+                            return;
+                        }
                         self.busy = false;
                         self.busy_action = None;
                         match result {
@@ -953,7 +1007,7 @@ impl LimenApp {
                                         self.output.clear();
                                         // Chain the next step, if the view asked for one.
                                         if let Some(a) = auto {
-                                            self.dispatch(a.into_invoke());
+                                            self.chain(a);
                                         }
                                     }
                                     Err(e) => self.output = format!("invalid view: {e}"),
@@ -1295,7 +1349,14 @@ impl LimenApp {
         self.output.clear(); // the button spinner shows progress, not the Result pane
         self.status = format!("{capability}.{method}");
         self.worker.send(Command::Run {
-            tag: RunTag::Action,
+            // Which tab asked, so the answer can be put away rather than shown
+            // if the user has moved on by the time it comes back.
+            tag: RunTag::Action {
+                module: match self.active_tab() {
+                    Some(Tab::Module(name)) => Some(name),
+                    _ => None,
+                },
+            },
             capability,
             method,
             params,

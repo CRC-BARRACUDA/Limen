@@ -62,6 +62,67 @@ pub(crate) fn pick_file_native() -> Option<String> {
     None
 }
 
+/// Show a native "choose a folder" dialog and return it as `{ "path": "..." }`,
+/// or `Null` if the user cancelled.
+///
+/// The counterpart of [`host_pick_file`]. A module that works on directories —
+/// a search given places to look, a scan given a tree — would otherwise have to
+/// ask for a *file* and take its parent, which means telling somebody to pick
+/// something they do not mean.
+pub(crate) fn host_pick_dir() -> Value {
+    match pick_dir_native() {
+        Some(path) if !path.is_empty() => json!({ "path": path }),
+        _ => Value::Null,
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn pick_dir_native() -> Option<String> {
+    let out = std::process::Command::new("zenity")
+        .args(["--file-selection", "--directory", "--title=Choose a folder"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // non-zero on cancel
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn pick_dir_native() -> Option<String> {
+    let out = std::process::Command::new("osascript")
+        .args(["-e", "POSIX path of (choose folder with prompt \"Choose a folder\")"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // user cancelled
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn pick_dir_native() -> Option<String> {
+    use limen_proto::NoConsole;
+    // STA is required for the WinForms dialog; write only the path to stdout.
+    let ps = "Add-Type -AssemblyName System.Windows.Forms; \
+              $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+              if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }";
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", ps])
+        .no_console()
+        .output()
+        .ok()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub(crate) fn pick_dir_native() -> Option<String> {
+    None
+}
+
 /// Show a native "save as" dialog and return the chosen path as
 /// `{ "path": "..." }`, or `Null` if the user cancelled.
 ///

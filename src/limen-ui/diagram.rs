@@ -52,6 +52,18 @@ pub struct DiagramEdge {
     /// observed.
     #[serde(default)]
     pub dashed: bool,
+    /// What this line is, shown while the pointer is on it.
+    ///
+    /// A connection carries facts that belong to neither end on its own: the
+    /// address each end answers to *here*, the card it was seen over, when it
+    /// last answered. Written along the line they crowded the map — two of
+    /// them per line, on a map where lines meet at a hub — so the line holds
+    /// them and hands them over when it is asked.
+    #[serde(default)]
+    pub info: Vec<DiagramFact>,
+    /// A name for the connection itself, shown at the top of its card.
+    #[serde(default)]
+    pub label: String,
 }
 
 /// The room a node takes up: the circle is small, but its label is not, and it
@@ -176,6 +188,20 @@ pub fn bounds(places: &[Placed]) -> (f32, f32, f32, f32) {
         return (0.0, 0.0, 0.0, 0.0);
     }
     (x0, y0, x1, y1)
+}
+
+/// How far a point is from a line between two others, and nothing about where
+/// along it — which is all a pointer needs to know to be *on* the line.
+pub fn distance_to_line(from: egui::Pos2, to: egui::Pos2, at: egui::Pos2) -> f32 {
+    let line = to - from;
+    let len = line.length();
+    if len < 0.5 {
+        return from.distance(at);
+    }
+    // Where along the line the nearest point is, held to the line's own ends
+    // so that the space *past* a short line is not counted as being on it.
+    let t = ((at - from).dot(line) / (len * len)).clamp(0.0, 1.0);
+    (from + line * t).distance(at)
 }
 
 /// The colour a kind is drawn in.
@@ -340,8 +366,53 @@ pub fn render_diagram_in(
     // Clipped: a map panned past its edge stops at it, rather than painting over
     // whatever the module put above and below.
     let painter = ui.painter().with_clip_rect(rect);
+    // Where the pointer is, taken from the context rather than from this
+    // widget's own hover.
+    //
+    // Because the card is drawn *at* the pointer: the moment it opens, the
+    // layer it is on is what the pointer is over, and this widget stops being
+    // hovered. Asked `response.hovered()`, the map then closed the card, which
+    // made it hovered again — a flicker that showed nothing at all on a map
+    // large enough for the card to land on it, which is every map a module
+    // asks to fill the screen.
+    //
+    // Anything else of the app's own over the map — a dialog, a menu — does
+    // take the pointer, and then the map says nothing. And not while dragging:
+    // the card belongs to what the pointer is on, and during a drag the
+    // pointer is holding the whole map rather than pointing at anything in it.
+    let pointer = (!response.dragged())
+        .then(|| ctx.input(|i| i.pointer.hover_pos()))
+        .flatten()
+        .filter(|p| rect.contains(*p))
+        .filter(|p| {
+            ctx.layer_id_at(*p)
+                .is_none_or(|top| top == layer || top.order == egui::Order::Tooltip)
+        });
+    let hovered = pointer.and_then(|pos| hit(&places, scale, origin, pos));
+    // And which line, when it is on no circle. A circle wins: it is the
+    // smaller target and the one somebody is aiming at.
+    let on_line = pointer.filter(|_| hovered.is_none()).and_then(|pos| {
+        edges
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let (Some(a), Some(b)) = (
+                    nodes.iter().position(|n| n.id == e.from),
+                    nodes.iter().position(|n| n.id == e.to),
+                ) else {
+                    return None;
+                };
+                let (from, to) = trim(at(places[a]), at(places[b]), NODE_R * scale);
+                Some((i, distance_to_line(from, to, pos)))
+            })
+            // A line is one pixel wide and nobody can point at one pixel.
+            .filter(|(_, d)| *d <= LINE_REACH * scale.max(0.6))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    });
+
     // Lines first, so a box is never drawn under one of them.
-    for e in edges {
+    for (i, e) in edges.iter().enumerate() {
         let (Some(a), Some(b)) = (
             nodes.iter().position(|n| n.id == e.from),
             nodes.iter().position(|n| n.id == e.to),
@@ -351,7 +422,14 @@ pub fn render_diagram_in(
         // Trimmed to the circles' edges: a line that runs under a dot and out
         // the other side reads as two lines crossing.
         let (from, to) = trim(at(places[a]), at(places[b]), NODE_R * scale);
-        let stroke = egui::Stroke::new(1.0_f32, with_alpha(color::TEXT_MUTED, 0.55));
+        // The line under the pointer is picked out, so that the card plainly
+        // belongs to *this* connection and not to the one crossing it.
+        let on = on_line == Some(i);
+        let stroke = if on {
+            egui::Stroke::new(2.0_f32, color::ACCENT_BRIGHT)
+        } else {
+            egui::Stroke::new(1.0_f32, with_alpha(color::TEXT_MUTED, 0.55))
+        };
         if e.dashed {
             painter.add(egui::Shape::dashed_line(
                 &[from, to],
@@ -366,13 +444,6 @@ pub fn render_diagram_in(
 
     let font = egui::FontId::monospace((11.0 * scale).max(7.0));
     let small = egui::FontId::monospace((9.0 * scale).max(6.0));
-    // Not while dragging: the card belongs to the circle under the pointer, and
-    // during a drag the pointer is holding the whole map rather than pointing at
-    // anything in it.
-    let hovered = (!response.dragged())
-        .then(|| response.hover_pos())
-        .flatten()
-        .and_then(|pos| hit(&places, scale, origin, pos));
     for (i, node) in nodes.iter().enumerate() {
         let centre = at(places[i]);
         let colour = kind_colour(&node.kind);
@@ -424,53 +495,93 @@ pub fn render_diagram_in(
     // and nothing about where it goes.
     if let Some(i) = hovered {
         let node = &nodes[i];
-        egui::show_tooltip_at_pointer(&ctx, layer, egui::Id::new("diagram.host"), |ui| {
-            ui.set_max_width(340.0);
-            ui.label(
-                egui::RichText::new(&node.label)
-                    .strong()
-                    .color(color::TEXT),
-            );
-            if !node.kind.is_empty() {
-                ui.label(
-                    egui::RichText::new(&node.kind)
-                        .small()
-                        .color(kind_colour(&node.kind)),
-                );
-            }
-            // `detail` is already under the circle; the card repeats it only
-            // when there is nothing else to say.
-            let facts: Vec<(&str, &str)> = if node.info.is_empty() {
-                node.detail
-                    .is_empty()
-                    .then(Vec::new)
-                    .unwrap_or_else(|| vec![("", node.detail.as_str())])
-            } else {
-                node.info
-                    .iter()
-                    .map(|f| (f.name.as_str(), f.value.as_str()))
-                    .collect()
-            };
-            if facts.is_empty() {
-                return;
-            }
-            ui.add_space(4.0);
-            egui::Grid::new("diagram.host.facts")
-                .num_columns(2)
-                .spacing(egui::vec2(12.0, 3.0))
-                .show(ui, |ui| {
-                    for (name, value) in facts {
-                        ui.label(egui::RichText::new(name).small().color(color::TEXT_MUTED));
-                        ui.label(
-                            egui::RichText::new(value)
-                                .monospace()
-                                .color(color::TEXT),
-                        );
-                        ui.end_row();
-                    }
-                });
-        });
+        // `detail` is already under the circle; the card repeats it only when
+        // there is nothing else to say.
+        let facts: Vec<(&str, &str)> = if node.info.is_empty() {
+            node.detail
+                .is_empty()
+                .then(Vec::new)
+                .unwrap_or_else(|| vec![("", node.detail.as_str())])
+        } else {
+            node.info
+                .iter()
+                .map(|f| (f.name.as_str(), f.value.as_str()))
+                .collect()
+        };
+        card(
+            &ctx,
+            layer,
+            &node.label,
+            (&node.kind, kind_colour(&node.kind)),
+            &facts,
+        );
+    } else if let Some(i) = on_line {
+        // A connection is a thing in its own right, and the two machines it
+        // joins are not enough to describe it: which card it was seen over,
+        // what each end answers to *here*. The map was writing those along the
+        // line and they crowded it; now the line holds them and says them when
+        // it is pointed at.
+        let edge = &edges[i];
+        let facts: Vec<(&str, &str)> = edge
+            .info
+            .iter()
+            .map(|f| (f.name.as_str(), f.value.as_str()))
+            .collect();
+        let name = if edge.label.is_empty() {
+            named_ends(nodes, edge)
+        } else {
+            edge.label.clone()
+        };
+        card(&ctx, layer, &name, ("", color::TEXT_MUTED), &facts);
     }
+}
+
+/// How far from a line the pointer may be and still be on it.
+const LINE_REACH: f32 = 6.0;
+
+/// What to call a connection nobody named: the two things it joins.
+fn named_ends(nodes: &[DiagramNode], edge: &DiagramEdge) -> String {
+    let name = |id: &str| {
+        nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.label.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+    format!("{} ↔ {}", name(&edge.from), name(&edge.to))
+}
+
+/// The card the map shows while the pointer is on something — a circle or a
+/// line, in the same shape either way, drawn by the app in the app's colours.
+/// A module hands over what it knows and nothing about where it goes.
+fn card(
+    ctx: &egui::Context,
+    layer: egui::LayerId,
+    title: &str,
+    (kind, tint): (&str, egui::Color32),
+    facts: &[(&str, &str)],
+) {
+    egui::show_tooltip_at_pointer(ctx, layer, egui::Id::new("diagram.host"), |ui| {
+        ui.set_max_width(340.0);
+        ui.label(egui::RichText::new(title).strong().color(color::TEXT));
+        if !kind.is_empty() {
+            ui.label(egui::RichText::new(kind).small().color(tint));
+        }
+        if facts.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        egui::Grid::new("diagram.host.facts")
+            .num_columns(2)
+            .spacing(egui::vec2(12.0, 3.0))
+            .show(ui, |ui| {
+                for (name, value) in facts {
+                    ui.label(egui::RichText::new(*name).small().color(color::TEXT_MUTED));
+                    ui.label(egui::RichText::new(*value).monospace().color(color::TEXT));
+                    ui.end_row();
+                }
+            });
+    });
 }
 
 /// The screen point of the diagram's own origin, under the current pan and zoom.

@@ -93,6 +93,19 @@ pub struct AutoAction {
     /// ready for the next one, and the result keeps its own place.
     #[serde(default)]
     pub open_in_tab: bool,
+    /// How long to wait before asking again, in milliseconds.
+    ///
+    /// A chain with no pause asks as fast as the module can answer — sixteen
+    /// hundred times a second for a cheap answer — and the application spends
+    /// every frame building and parsing a screen instead of drawing one or
+    /// noticing a click. What a progress screen needs is a cadence: often
+    /// enough to look live, rarely enough to leave the machine to the work it
+    /// is reporting on.
+    ///
+    /// Zero (the default) keeps the old behaviour: ask again at once. A module
+    /// that polls something long should say a number.
+    #[serde(default)]
+    pub every_ms: u64,
 }
 
 impl AutoAction {
@@ -466,24 +479,13 @@ pub fn render_view(
     let mut clicked = None;
     let now = ui.input(|i| i.time);
 
-    // A module that swaps one screen for another — Basic to Advanced, settings
-    // to results — gets the entrance again, so the change reads as a change
-    // rather than the view blinking into a different arrangement. Keyed on the
-    // shape, so a view that merely refreshes in place keeps its clock.
-    let shape = view_shape(view);
-    let id = ui.id().with("limen_view_shape");
-    let changed_at = ui.data_mut(|d| {
-        let seen = d.get_temp::<(u64, f64)>(id);
-        match seen {
-            Some((s, at)) if s == shape => at,
-            _ => {
-                d.insert_temp(id, (shape, now));
-                now
-            }
-        }
-    });
+    // What has changed on this screen since last frame, worked out once. A
+    // screen replaced wholesale restarts the entrance; a screen that has gained
+    // or lost a widget animates that widget and leaves the rest alone. See
+    // [`crate::flow`].
+    let flow = flow::flow(ui, ui.id(), &view.widgets);
     // Whichever entrance is newer: the tab's, or this screen's own.
-    let reveal_at = reveal_at.max(changed_at);
+    let reveal_at = reveal_at.max(flow.shown);
 
     // Publish this entrance so widgets nested deeper — tables, which clock
     // themselves — can join it instead of snapping in.
@@ -494,9 +496,33 @@ pub fn render_view(
     // whole point of the screen.
     let fills = view.widgets.iter().position(fills_the_screen);
 
-    for (i, w) in view.widgets.iter().enumerate() {
-        if Some(i) == fills {
-            let t = reveal_t(ui, i, reveal_at, now, 0.02, 0.13);
+    // The gap between widgets is taken over from the layout, so that a widget
+    // on its way in or out can take its gap with it: left to the layout, a
+    // widget still at no height would already have pushed everything below it
+    // down by a whole gap.
+    let gap = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+
+    // The gap between two widgets belongs to the one above it, and travels with
+    // it: a widget still at nothing brings no gap with it, so the one after it
+    // stays exactly where it was — and a widget removed from the middle takes
+    // its gap away with it rather than leaving one behind.
+    let mut prev_grow = 1.0_f32;
+    for (place, step) in flow.steps.iter().enumerate() {
+        let w = match (&step.ghost, step.at) {
+            (Some(ghost), _) => ghost,
+            (None, Some(i)) => &view.widgets[i],
+            (None, None) => continue,
+        };
+        let grow = step.grow.clamp(0.0, 1.0);
+        if place > 0 {
+            ui.add_space(gap * prev_grow);
+        }
+        prev_grow = grow;
+        if let Some(i) = fills
+            && step.at == Some(i)
+        {
+            let t = reveal_t(ui, place, reveal_at, now, 0.02, 0.13);
             render_filling(
                 ui,
                 w,
@@ -504,7 +530,7 @@ pub fn render_view(
                 inputs,
                 busy,
                 &mut clicked,
-                (i, reveal_at, now, t),
+                (place, reveal_at, now, t),
             );
             break;
         }
@@ -513,7 +539,43 @@ pub fn render_view(
             render_widget(ui, w, inputs, busy, &mut clicked);
             continue;
         }
-        let t = reveal_t(ui, i, reveal_at, now, 0.02, 0.13);
+
+        // A widget in motion is drawn whole inside a band as tall as it has
+        // grown, and clipped to it. Its own height is only known by drawing it,
+        // so the first frame of an arrival opens from nothing and measures while
+        // it is invisible — after which it has a height to grow into.
+        if !step.settled() {
+            let full = step.full.map(|f| f.y).unwrap_or(0.0);
+            let dx = (1.0 - grow) * if step.leaving { -22.0 } else { 18.0 };
+            let avail = ui.available_width();
+            let (band, _) =
+                ui.allocate_exact_size(egui::vec2(avail, full * grow), egui::Sense::hover());
+            let room = egui::Rect::from_min_size(
+                band.min + egui::vec2(dx, 0.0),
+                egui::vec2(avail, full.max(1.0) * 4.0 + 2000.0),
+            );
+            let mut inner = ui.child_ui_with_id_source(
+                room,
+                egui::Layout::top_down(egui::Align::Min),
+                step.token,
+                None,
+            );
+            // Nothing outside the band is painted, and nothing outside it can
+            // be clicked either — egui tests a hit against the clip rect.
+            inner.set_clip_rect(band.intersect(ui.clip_rect()));
+            inner.set_opacity(grow);
+            render_widget(&mut inner, w, inputs, busy, &mut clicked);
+            let natural = inner.min_rect().size();
+            flow::remember(ui, ui.id(), step.token, natural);
+            if (natural.y - full).abs() > 0.5 {
+                // Drawn against a height it has only now learned; the frame
+                // after this one has it right.
+                ui.ctx().request_repaint();
+            }
+            continue;
+        }
+
+        let t = reveal_t(ui, place, reveal_at, now, 0.02, 0.13);
         // Slide as well as fade. A fade alone is easy to miss on a screen that
         // swaps for a similar one — Basic to Advanced keeps the same header and
         // target field — so the motion is what reads as "this changed".
@@ -522,17 +584,38 @@ pub fn render_view(
         // turns the child into a *row*, which stands separators on end and puts
         // every label beside its field instead of above it.
         let dx = (1.0 - t) * 18.0;
-        egui::Frame::none()
-            .outer_margin(egui::Margin {
-                left: dx,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                ui.set_opacity(t);
-                render_widget(ui, w, inputs, busy, &mut clicked);
-            });
+        // Keyed by the widget rather than by its place in the list: a line
+        // inserted above a text box must not hand that box the id — and with it
+        // the cursor and the scroll — of the box that used to be there.
+        let inner = ui.push_id(step.token, |ui| {
+            egui::Frame::none()
+                .outer_margin(egui::Margin {
+                    left: dx,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    ui.set_opacity(t);
+                    render_widget(ui, w, inputs, busy, &mut clicked);
+                })
+        });
+        // How tall it is when whole, for its own departure to close against and
+        // for the next widget like it to open into.
+        flow::remember(ui, ui.id(), step.token, inner.response.rect.size());
     }
     clicked
+}
+
+/// Whether this widget takes all the width it is offered.
+///
+/// A box to type in has no width of its own — it is as wide as it is allowed to
+/// be. Put two of them side by side without sharing the row out and the first
+/// takes the lot: a date field followed by another was one enormous box and a
+/// second one off the right edge of the window, where it could not be reached.
+fn takes_the_width(w: &Widget) -> bool {
+    matches!(
+        w,
+        Widget::Text { .. } | Widget::File { .. } | Widget::DateField { .. }
+    )
 }
 
 /// Whether this widget wants the height that is left.
@@ -587,6 +670,82 @@ fn render_filling(
     ui.advance_cursor_after_rect(rest);
 }
 
+
+/// Draw the children of a row, with the same arriving and leaving a screen's
+/// widgets get — sideways.
+///
+/// A button that joins a row opens across, from nothing to its own width, and
+/// the buttons after it travel right by exactly as much as it has opened. One
+/// that has gone closes the same way. See [`crate::flow`]; this is that
+/// machinery laid on its side.
+fn render_row_flow(
+    ui: &mut egui::Ui,
+    children: &[Widget],
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+    clicked: &mut Option<Invoke>,
+) {
+    let flow = flow::flow(ui, ui.id(), children);
+    // The gap between two children travels with them, as it does on a screen.
+    let gap = ui.spacing().item_spacing.x;
+    ui.spacing_mut().item_spacing.x = 0.0;
+    let mut prev_grow = 1.0_f32;
+    for (place, step) in flow.steps.iter().enumerate() {
+        let w = match (&step.ghost, step.at) {
+            (Some(ghost), _) => ghost,
+            (None, Some(i)) => &children[i],
+            (None, None) => continue,
+        };
+        let grow = step.grow.clamp(0.0, 1.0);
+        if place > 0 {
+            // The gap belongs to the child before it — see `render_view`.
+            ui.add_space(gap * prev_grow);
+        }
+        prev_grow = grow;
+
+        if step.settled() {
+            let inner = ui.push_id(step.token, |ui| {
+                render_widget(ui, w, inputs, busy, clicked);
+            });
+            flow::remember(ui, ui.id(), step.token, inner.response.rect.size());
+            continue;
+        }
+
+        let full = step.full.unwrap_or(egui::Vec2::ZERO);
+        // A little vertical travel as well, so the motion reads as arriving
+        // rather than as the row being stretched.
+        let dy = (1.0 - grow) * if step.leaving { -8.0 } else { 8.0 };
+        let (band, _) = ui.allocate_exact_size(
+            egui::vec2(full.x * grow, full.y),
+            egui::Sense::hover(),
+        );
+        // Drawn at its own size and cut to the band, which is as wide as it has
+        // opened. On its first frame it has no size yet: it is given room to
+        // lay out in, measured there, and seen from the next frame on.
+        let room = egui::Rect::from_min_size(
+            band.min + egui::vec2(0.0, dy),
+            egui::vec2(
+                if full.x > 0.0 { full.x } else { ui.available_width() },
+                if full.y > 0.0 { full.y } else { ui.available_height().max(200.0) },
+            ),
+        );
+        let mut inner = ui.child_ui_with_id_source(
+            room,
+            egui::Layout::left_to_right(egui::Align::Center),
+            step.token,
+            None,
+        );
+        inner.set_clip_rect(band.intersect(ui.clip_rect()));
+        inner.set_opacity(grow);
+        render_widget(&mut inner, w, inputs, busy, clicked);
+        let natural = inner.min_rect().size();
+        flow::remember(ui, ui.id(), step.token, natural);
+        if (natural - full).length() > 0.5 {
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
 pub fn render_widgets(
     ui: &mut egui::Ui,
     widgets: &[Widget],
@@ -622,7 +781,7 @@ pub fn render_widget(
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
-            let value = inputs.entry(id.clone()).or_insert_with(|| default.clone());
+            let value = field_value(ui, id, default, inputs);
             let before = value.clone();
             if *multiline {
                 ui.add(
@@ -674,7 +833,7 @@ pub fn render_widget(
             } else {
                 default.clone()
             };
-            let value = inputs.entry(id.clone()).or_insert(initial);
+            let value = field_value(ui, id, &initial, inputs);
             let before = value.clone();
             dropdown(ui, id.clone(), value, options);
             if let (Some(a), true) = (on_change, *value != before) {
@@ -707,7 +866,7 @@ pub fn render_widget(
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
-            let value = inputs.entry(id.clone()).or_insert_with(|| default.clone());
+            let value = field_value(ui, id, default, inputs);
             let mut path = value.clone();
             let browse_label = if browse.is_empty() {
                 "Browse…"
@@ -727,9 +886,9 @@ pub fn render_widget(
             }
         }
         Widget::Checkbox { id, label, default } => {
-            let entry = inputs
-                .entry(id.clone())
-                .or_insert_with(|| default.to_string());
+            // Through `field_value`, like every other field: a module that
+            // turns its own box off must be able to.
+            let entry = field_value(ui, id, &default.to_string(), inputs);
             let mut on = entry.as_str() == "true";
             toggle(ui, &mut on, label);
             *entry = on.to_string();
@@ -822,7 +981,7 @@ pub fn render_widget(
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
-            let value = inputs.entry(id.clone()).or_insert_with(|| default.clone());
+            let value = field_value(ui, id, default, inputs);
             let mut v = value.clone();
             if date_field(ui, id, &mut v, placeholder, *time) {
                 *value = v;
@@ -862,11 +1021,10 @@ pub fn render_widget(
                 for c in children {
                     let w = button_width(ui, c);
                     if !line.is_empty() && used + gap + w > room {
+                        let row: Vec<Widget> = line.iter().map(|c| (*c).clone()).collect();
                         ui.horizontal(|ui| {
-                        for c in &line {
-                            render_widget(ui, c, inputs, busy, clicked);
-                        }
-                    });
+                            render_row_flow(ui, &row, inputs, busy, clicked);
+                        });
                         line.clear();
                         used = 0.0;
                     }
@@ -874,10 +1032,9 @@ pub fn render_widget(
                     line.push(c);
                 }
                 if !line.is_empty() {
+                    let row: Vec<Widget> = line.iter().map(|c| (*c).clone()).collect();
                     ui.horizontal(|ui| {
-                        for c in &line {
-                            render_widget(ui, c, inputs, busy, clicked);
-                        }
+                        render_row_flow(ui, &row, inputs, busy, clicked);
                     });
                 }
                 return;
@@ -909,12 +1066,9 @@ pub fn render_widget(
                 // equal slice, the fields are held to theirs, and the rest take
                 // the width they need. A row with no field keeps its natural
                 // layout, which is what a row of buttons wants.
-                let greedy = children
-                    .iter()
-                    .filter(|c| matches!(c, Widget::Text { .. } | Widget::File { .. }))
-                    .count();
+                let greedy = children.iter().filter(|c| takes_the_width(c)).count();
                 if greedy == 0 || children.len() < 2 {
-                    render_widgets(ui, children, inputs, busy, clicked);
+                    render_row_flow(ui, children, inputs, busy, clicked);
                     return;
                 }
                 let gap = ui.spacing().item_spacing.x;
@@ -924,7 +1078,7 @@ pub fn render_widget(
                 let fixed: f32 = gap * (children.len().saturating_sub(1)) as f32;
                 let share = ((ui.available_width() - fixed) / children.len() as f32).max(72.0);
                 for c in children {
-                    if matches!(c, Widget::Text { .. } | Widget::File { .. }) {
+                    if takes_the_width(c) {
                         // A field's label sits *beside* its box here, so it is
                         // centred against it rather than left on its top edge.
                         // The zero desired height is what keeps that honest:
@@ -984,6 +1138,39 @@ pub fn render_widget(
             clicked,
         ),
     }
+}
+
+/// The value a field shows: what the person typed, unless the module has since
+/// said something different.
+///
+/// A field's value belongs to the person once they have touched it, so the
+/// default cannot simply win every frame — that would wipe out what is being
+/// typed. But a module *rewriting* a field is how several screens work: a
+/// folder chosen with a button joining the list of places, a form restored from
+/// what was saved, a value corrected after it was read back. Those were
+/// impossible, because an input that existed was never written to again.
+///
+/// So the default wins exactly when it has changed since this field last saw
+/// it, which is the module saying something new rather than repeating itself.
+fn field_value<'a>(
+    ui: &egui::Ui,
+    id: &str,
+    default: &str,
+    inputs: &'a mut HashMap<String, String>,
+) -> &'a mut String {
+    let key = egui::Id::new(("limen_field_default", id));
+    let last: Option<String> = ui.data(|d| d.get_temp(key));
+    let said_something_new = last.as_deref().is_some_and(|l| l != default);
+    if last.as_deref() != Some(default) {
+        ui.data_mut(|d| d.insert_temp(key, default.to_string()));
+    }
+    let slot = inputs
+        .entry(id.to_string())
+        .or_insert_with(|| default.to_string());
+    if said_something_new {
+        *slot = default.to_string();
+    }
+    slot
 }
 
 /// Render a [`Widget::Chart`] as labelled horizontal bars scaled to the largest
@@ -1066,40 +1253,6 @@ pub fn fmt_num(v: f64) -> String {
     } else {
         format!("{v:.2}")
     }
-}
-
-/// A fingerprint of a view's *shape* — its title and the kinds of widget it is
-/// made of, not their contents.
-///
-/// This is what decides whether a view has become a different screen or merely
-/// refreshed. Switching a module between Basic and Advanced adds controls and so
-/// changes the shape; a progress checklist ticking through its steps swaps a
-/// label's text and keeps it, which must not count, or the screen would restart
-/// its entrance on every tick and strobe.
-pub fn view_shape(view: &View) -> u64 {
-    use std::hash::{Hash, Hasher};
-    fn walk<H: std::hash::Hasher>(widgets: &[Widget], h: &mut H) {
-        widgets.len().hash(h);
-        for w in widgets {
-            std::mem::discriminant(w).hash(h);
-            match w {
-                // A button's label is part of the shape. Two screens can be
-                // built from the same widgets and still be different screens —
-                // a mode switch offering "Scan processes" or "Scan autostart"
-                // differs only in what its one button says. Safe to include
-                // because a screen that merely refreshes keeps its buttons: a
-                // progress view's Stop is Stop on every tick, while the counts
-                // beside it change and are deliberately left out.
-                Widget::Button { text, .. } => text.hash(h),
-                Widget::Row { children } | Widget::Chrome { children } => walk(children, h),
-                _ => {}
-            }
-        }
-    }
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    view.title.hash(&mut h);
-    walk(&view.widgets, &mut h);
-    h.finish()
 }
 
 /// Where [`render_view`] parks the current entrance's start time, for widgets

@@ -389,3 +389,94 @@ fn a_tab_with_no_screen_yet_has_no_inputs() {
     let empty = ui::collect_params_opt(None, &inputs);
     assert_eq!(empty, serde_json::json!({}));
 }
+
+/// An answer belongs to the tab that asked for it, not to the tab in front of
+/// the user when it arrives.
+///
+/// The case this was written for: a search polling in one tab while the user
+/// works in another. Its answer used to be shown wherever they were — and
+/// because that answer carries the next step of the poll, the loop went on
+/// painting one module's screen over another's for as long as the search ran.
+#[test]
+fn an_answer_goes_to_the_tab_that_asked_for_it() {
+    let mapper = Tab::Module("net-mapper".into());
+    let search = Tab::Module("search".into());
+
+    // Asked from the search tab, arriving while the mapper is on screen.
+    assert_eq!(
+        answer_lands(Some("search"), Some(&mapper)),
+        Landing::Stored("search".into())
+    );
+    // Asked from the search tab, still on the search tab.
+    assert_eq!(answer_lands(Some("search"), Some(&search)), Landing::OnScreen);
+    // Asked from one of Limen's own pages, which has no tab to be put away in.
+    assert_eq!(answer_lands(None, Some(&mapper)), Landing::OnScreen);
+    assert_eq!(answer_lands(None, None), Landing::OnScreen);
+    // A module tab's answer arriving while a page that is not a module tab is
+    // shown is still that module's answer.
+    assert_eq!(
+        answer_lands(Some("search"), Some(&Tab::Settings)),
+        Landing::Stored("search".into())
+    );
+    assert_eq!(
+        answer_lands(Some("search"), None),
+        Landing::Stored("search".into())
+    );
+}
+
+/// A module's own question offers a word that says only "go ahead".
+///
+/// It used to offer *Remove* — the word the module manager's own dialog uses,
+/// borrowed as a default. A module asking "knock on every address?" then
+/// offered a button marked Remove, which answers a question nobody asked.
+#[test]
+fn a_modules_question_does_not_offer_to_remove_something() {
+    let remove = limen_gui::i18n::t("confirm.remove_yes");
+    let cancel = limen_gui::i18n::t("confirm.cancel");
+
+    // A module that named neither button.
+    let (yes, no) = confirm_words("", "");
+    assert!(!yes.is_empty(), "the host has no word for 'go ahead'");
+    assert_ne!(yes, remove, "it still offers to remove something");
+    assert_eq!(no, cancel, "backing out is the word every dialog uses");
+
+    // And one that named both keeps its own words, which is how a question
+    // that really is about deleting something says so.
+    let (yes, no) = confirm_words("Forget", "Keep it");
+    assert_eq!(yes, "Forget");
+    assert_eq!(no, "Keep it");
+}
+
+/// A polling chain waits as long as it asked to between its steps.
+///
+/// The bug this is written for: a chain with no pause asks again the instant
+/// it is answered — sixteen hundred times a second for a cheap answer — and
+/// the application then spends every frame building and parsing a screen
+/// instead of drawing one. The Stop button beside the spinner was never
+/// noticed, so a search looked like it could not be stopped.
+#[test]
+fn a_polling_chain_waits_as_long_as_it_asked_to() {
+    let auto = |json: &str| {
+        serde_json::from_str::<ui::View>(json)
+            .unwrap()
+            .auto
+            .expect("an auto action")
+    };
+
+    // A chain that said nothing asks again at once, as it always did.
+    let eager = auto(
+        r#"{"title":"S","widgets":[],
+            "auto":{"capability":"c","method":"poll","args":{}}}"#,
+    );
+    assert_eq!(eager.every_ms, 0);
+
+    // One that knows its job is long says how often it wants to be asked.
+    let paced = auto(
+        r#"{"title":"S","widgets":[],
+            "auto":{"capability":"c","method":"poll","args":{},"every_ms":150}}"#,
+    );
+    assert_eq!(paced.every_ms, 150);
+    // And the pause is on the chain, not on what it calls: the step itself is
+    // the same invoke either way.
+    assert_eq!(paced.into_invoke().action.method, "poll");
+}

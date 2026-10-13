@@ -198,12 +198,12 @@ impl DiagramNode {
 pub fn diagram(
     title: impl Into<String>,
     nodes: Vec<DiagramNode>,
-    edges: Vec<(String, String, bool)>,
+    edges: Vec<impl Into<DiagramLink>>,
 ) -> Widget {
     let nodes: Vec<Value> = nodes.iter().map(DiagramNode::to_value).collect();
     let edges: Vec<Value> = edges
         .into_iter()
-        .map(|(from, to, dashed)| json!({ "from": from, "to": to, "dashed": dashed }))
+        .map(|e| e.into().to_value())
         .collect();
     Widget::of_kind("diagram")
         .set("title", json!(title.into()))
@@ -211,6 +211,81 @@ pub fn diagram(
         .set("edges", Value::Array(edges))
 }
 
+
+/// A line between two nodes of a [`diagram`], and what it is.
+///
+/// A connection carries facts that belong to neither end on its own: the
+/// address each end answers to *there*, the card it was seen over, when it
+/// last answered. The map shows them when the pointer is on the line, the same
+/// way a circle shows what it knows — so a crowded map stays readable and
+/// nothing is lost.
+#[derive(Debug, Clone)]
+pub struct DiagramLink {
+    from: String,
+    to: String,
+    dashed: bool,
+    label: String,
+    info: Vec<(String, String)>,
+}
+
+/// A line from one node to another.
+pub fn link(from: impl Into<String>, to: impl Into<String>) -> DiagramLink {
+    DiagramLink {
+        from: from.into(),
+        to: to.into(),
+        dashed: false,
+        label: String::new(),
+        info: Vec::new(),
+    }
+}
+
+impl DiagramLink {
+    /// One named fact about this connection, shown on its card. Called as
+    /// many times as there are facts; they are shown in order.
+    pub fn info(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.info.push((name.into(), value.into()));
+        self
+    }
+
+    /// What to call the connection itself. Without one, the map names it by
+    /// the two things it joins.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Dashed: a connection inferred rather than observed.
+    pub fn dashed(mut self) -> Self {
+        self.dashed = true;
+        self
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "from": self.from,
+            "to": self.to,
+            "dashed": self.dashed,
+            "label": self.label,
+            "info": self.info
+                .iter()
+                .map(|(name, value)| json!({ "name": name, "value": value }))
+                .collect::<Vec<Value>>(),
+        })
+    }
+}
+
+/// The plain form a diagram has always taken: from, to, and whether it is
+/// dashed.
+impl From<(String, String, bool)> for DiagramLink {
+    fn from((from, to, dashed): (String, String, bool)) -> Self {
+        let line = link(from, to);
+        if dashed {
+            line.dashed()
+        } else {
+            line
+        }
+    }
+}
 
 /// The shares of one whole: `(label, value)` slices of a ring.
 ///
