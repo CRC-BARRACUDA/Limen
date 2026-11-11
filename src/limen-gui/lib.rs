@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod i18n;
+pub mod session;
 pub mod worker;
 
 /// The widget toolkit, under the name the rest of the crate has always used for
