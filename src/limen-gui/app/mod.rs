@@ -175,8 +175,12 @@ pub struct LimenApp {
     pub(crate) dev_limen_path: String,
     pub(crate) dev_modules_path: String,
 
-    /// Global UI scale as a percentage (persisted in settings).
+    /// Global UI scale as a percentage (persisted in settings) — the one that
+    /// was *chosen*, which the Settings chips show as selected.
     pub(crate) ui_scale: f32,
+    /// The scale actually in force, on its way to `ui_scale`: the window grows
+    /// into a new size rather than snapping to it.
+    pub(crate) zoom: ui::Glide,
 
     /// Whether UI animations are enabled (persisted in settings).
     pub(crate) animations: bool,
@@ -288,6 +292,14 @@ impl LimenApp {
         limen_registry::set_github_token(
             limen_core::Config::load().ok().and_then(|c| c.github_token),
         );
+        // The saved scale, as a percentage. Nothing saved (or a zero left by an
+        // older settings file) means the unscaled 100%.
+        let ui_scale = {
+            let pct = limen_core::Config::load()
+                .map(|c| c.ui_scale_percent)
+                .unwrap_or(0);
+            if pct == 0 { 100.0 } else { pct as f32 }
+        };
         Self {
             worker: Worker::spawn(dirs),
             status: "starting modules…".to_string(),
@@ -354,12 +366,10 @@ impl LimenApp {
             dev_mode_on: false,
             dev_limen_path: String::new(),
             dev_modules_path: String::new(),
-            ui_scale: {
-                let pct = limen_core::Config::load()
-                    .map(|c| c.ui_scale_percent)
-                    .unwrap_or(0);
-                if pct == 0 { 100.0 } else { pct as f32 }
-            },
+            ui_scale,
+            // Resting at the saved scale: the first frame is drawn at the size
+            // the application was left at, not zoomed into it.
+            zoom: ui::Glide::resting(ui_scale),
             animations,
             alerts,
             language,

@@ -106,6 +106,26 @@ pub fn ease_out_back(t: f32) -> f32 {
     1.0 + C3 * u * u * u + C1 * u * u
 }
 
+/// The overshoot curve, both ends: it draws back *before* it sets off, then
+/// runs past the target and settles onto it.
+///
+/// The anticipation is what [`ease_out_back`] has no room for — a motion that
+/// begins by moving the other way reads as something gathering itself, which
+/// is worth having when what moves is the whole window rather than one box.
+/// The constant is the usual one, scaled by 1.525 so each half of the curve
+/// overshoots by about as much as the one-sided version does.
+pub fn ease_in_out_back(t: f32) -> f32 {
+    const C1: f32 = 1.70158;
+    const C2: f32 = C1 * 1.525;
+    if t < 0.5 {
+        let u = 2.0 * t;
+        (u * u * ((C2 + 1.0) * u - C2)) * 0.5
+    } else {
+        let u = 2.0 * t - 2.0;
+        (u * u * ((C2 + 1.0) * u + C2) + 2.0) * 0.5
+    }
+}
+
 /// Where an eased value is in its journey.
 #[derive(Clone, Copy)]
 pub struct Eased {
@@ -182,4 +202,85 @@ pub fn pop_layer_about(ctx: &egui::Context, layer: egui::LayerId, pivot: egui::P
     // Scaling about a point: p' = s·p + c·(1 − s) keeps `c` where it is.
     let c = pivot.to_vec2();
     ctx.set_transform_layer(layer, egui::emath::TSTransform::new(c * (1.0 - s), s));
+}
+
+// ---- travelling values ----------------------------------------------------- //
+
+/// Where a journey from `from` to `to` has reached, `elapsed` seconds into
+/// `secs`, along [`ease_in_out_back`].
+///
+/// The value leaves the far side of both ends on the way — before `from` as it
+/// gathers itself, past `to` before it settles — so it is not bounded by the
+/// two. Past the end it returns `to` exactly. Returns `to` immediately when
+/// animations are off.
+pub fn glide(from: f32, to: f32, elapsed: f64, secs: f64) -> f32 {
+    if !animations_enabled() || secs <= 0.0 {
+        return to;
+    }
+    let t = (elapsed / secs).clamp(0.0, 1.0) as f32;
+    if t >= 1.0 {
+        return to;
+    }
+    from + (to - from) * ease_in_out_back(t)
+}
+
+/// A value that travels to its target instead of jumping there.
+///
+/// Where [`animate_back`] keeps its state in egui's temporary store, this
+/// keeps it in the caller: what needs it first is the global UI scale, which
+/// has to be in force *before* any `Ui` exists — the store is read through the
+/// same context the scale configures.
+#[derive(Clone, Copy, Debug)]
+pub struct Glide {
+    /// What is in force this frame.
+    pub at: f32,
+    from: f32,
+    to: f32,
+    start: f64,
+    moving: bool,
+}
+
+impl Glide {
+    /// A glide already resting at `value`.
+    pub fn resting(value: f32) -> Self {
+        Self {
+            at: value,
+            from: value,
+            to: value,
+            start: 0.0,
+            moving: false,
+        }
+    }
+
+    /// Carry [`Self::at`] toward `goal`, `secs` for the whole journey.
+    ///
+    /// Returns whether it is still travelling, so the caller can ask for the
+    /// next frame — nothing else is driving the clock between them.
+    pub fn step(&mut self, goal: f32, now: f64, secs: f64) -> bool {
+        // A new goal starts from wherever the value *is*: picking 200% while a
+        // 100→150 journey is still running must not snap back to 100 first.
+        if self.to != goal {
+            self.from = self.at;
+            self.to = goal;
+            self.start = now;
+        }
+        self.at = glide(self.from, self.to, now - self.start, secs);
+        // Arrival is decided by the clock rather than by the value: the curve
+        // runs past its target before settling, so it is equal to it twice.
+        self.moving = animations_enabled() && secs > 0.0 && now - self.start < secs;
+        self.moving
+    }
+
+    /// [`Self::at`] rounded onto a `grid`-sized lattice while it travels, and
+    /// the goal exactly once it has arrived.
+    ///
+    /// For a value whose every distinct setting costs something to apply. The
+    /// grid must never decide where the journey *ends* — 125% is not on a 2%
+    /// lattice — so the last frame is the goal itself, untouched.
+    pub fn on_grid(&self, grid: f32) -> f32 {
+        if !self.moving || grid <= 0.0 {
+            return self.to;
+        }
+        (self.at / grid).round() * grid
+    }
 }

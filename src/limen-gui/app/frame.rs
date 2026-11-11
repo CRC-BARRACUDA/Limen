@@ -3,6 +3,21 @@
 
 use super::*;
 
+/// How long a change of UI scale takes to travel, in seconds. Short: every
+/// widget in the window moves at once, and a long zoom reads as the
+/// application labouring rather than as a setting being applied.
+const SCALE_SECS: f64 = 0.28;
+
+/// The lattice the travelling scale is rounded onto, in percent.
+///
+/// egui keeps one font atlas per `pixels_per_point` and builds it the first
+/// time it sees one, so every distinct value along the way costs an atlas
+/// build and a texture upload. Rounding ties that cost to the distance
+/// travelled instead of to the refresh rate: a 25% change rebuilds thirteen
+/// atlases whether the screen runs at 60Hz or 240Hz. 2% of a 14px glyph is
+/// sub-pixel, so the motion still reads as continuous.
+const SCALE_STEP: f32 = 2.0;
+
 impl eframe::App for LimenApp {
     /// Clear transparent during the startup splash so only the floating icons
     /// show over the desktop; opaque warm-black once the app takes over.
@@ -44,8 +59,13 @@ impl eframe::App for LimenApp {
             ctx.request_repaint();
         }
 
-        // Apply the global UI scale (set_zoom_factor no-ops if unchanged).
-        ctx.set_zoom_factor(self.ui_scale / 100.0);
+        // Apply the global UI scale. `ui_scale` is the chosen one; the zoom
+        // travels to it so the whole window grows into the new size instead of
+        // snapping (set_zoom_factor no-ops if unchanged).
+        if self.zoom.step(self.ui_scale, now_t, SCALE_SECS) {
+            ctx.request_repaint();
+        }
+        ctx.set_zoom_factor(self.zoom.on_grid(SCALE_STEP) / 100.0);
 
         // The window is created hidden; on the first frame centre it on the
         // monitor and reveal it, so the splash appears cleanly mid-screen instead
