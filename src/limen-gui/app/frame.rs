@@ -56,6 +56,11 @@ impl eframe::App for LimenApp {
         if let Some(left) = self.due_now() {
             ctx.request_repaint_after(left);
         }
+        // A language change retypes every string in the chrome; nothing else
+        // asks for the frames that plays over.
+        if i18n::switching() {
+            ctx.request_repaint();
+        }
         // Keep the screen→UI mapping current, so a file drag (during which the
         // window system stops reporting the pointer) can still be located.
         ui::cursor::calibrate(ctx);

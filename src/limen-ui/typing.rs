@@ -189,3 +189,28 @@ pub fn typed_label(ui: &mut egui::Ui, id: egui::Id, text: &str, style: &Typed) -
 }
 
 // ---- widgets --------------------------------------------------------------- //
+
+/// The byte length of the first `share` of `text`, rounded to whole characters
+/// and always on a character boundary (see [`revealed_len`] for why that is not
+/// automatic).
+///
+/// A fraction of the text rather than a count of characters: when the whole
+/// screen retypes itself at once, every string has to finish together. Counted
+/// in characters, a nav chip would be done while a paragraph was still going,
+/// and the screen would settle in pieces over a second or more.
+pub fn share_len(text: &str, share: f32) -> usize {
+    let count = text.chars().count();
+    if !share.is_finite() || share <= 0.0 || count == 0 {
+        return 0;
+    }
+    if share >= 1.0 {
+        return text.len();
+    }
+    let want = (count as f32 * share).round() as usize;
+    text.char_indices().nth(want).map_or(text.len(), |(i, _)| i)
+}
+
+/// The first `share` of `text`. See [`share_len`].
+pub fn share(text: &str, share: f32) -> &str {
+    &text[..share_len(text, share)]
+}

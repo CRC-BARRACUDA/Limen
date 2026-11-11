@@ -50,3 +50,45 @@ let para = "first line\nsecond line";
 assert_eq!(revealed(para, Reveal::Words, 0.75, 4.0), "first line\nsecond");
 assert_eq!(revealed(para, Reveal::Words, 99.0, 4.0), para);
 }
+
+/// The same boundary rule as the letter-by-letter reveal, for the fraction of
+/// a string a retype shows: a Ukrainian label cut part-way through a character
+/// panics, and a language change cuts every label on screen at once.
+#[test]
+fn a_share_of_cyrillic_never_splits_a_character() {
+    let uk = "Налаштування — мова інтерфейсу";
+    assert!(
+        uk.len() > uk.chars().count(),
+        "the test needs multi-byte text"
+    );
+    for step in 0..=100 {
+        let s = step as f32 / 100.0;
+        let n = share_len(uk, s);
+        assert!(uk.is_char_boundary(n), "cut at byte {n} for share {s}");
+        let _ = &uk[..n]; // would panic on a bad boundary
+    }
+}
+
+/// Both ends are exact: a share of 0 shows nothing and a share of 1 shows
+/// everything. An entrance that stopped one character short, or a backspace
+/// that left one behind, is what a reader notices.
+#[test]
+fn a_share_runs_from_nothing_to_the_whole_string() {
+    let s = "Modules";
+    assert_eq!(share(s, 0.0), "");
+    assert_eq!(share(s, 1.0), s);
+    assert_eq!(share(s, -1.0), "", "nonsense shares show nothing");
+    assert_eq!(share(s, 2.0), s);
+    assert_eq!(share(s, f32::NAN), "");
+    // Monotonic, and it never overshoots the string.
+    let mut last = 0;
+    for step in 0..=20 {
+        let n = share_len(s, step as f32 / 20.0);
+        assert!(n >= last && n <= s.len(), "share {step}/20 gave {n}");
+        last = n;
+    }
+    // Proportional: half of a long string and half of a short one are both
+    // half, which is what makes every label finish together.
+    assert_eq!(share("12345678", 0.5), "1234");
+    assert_eq!(share("1234", 0.5), "12");
+}

@@ -738,7 +738,9 @@ impl LimenApp {
     /// on screen is re-asked — otherwise the app sits in two languages at once
     /// until something happens to invoke it.
     pub(crate) fn save_language(&mut self) {
-        i18n::set_locale(self.language);
+        // Not `set_locale`: the change is played out on screen, the old text
+        // erased and the new text typed in its place.
+        i18n::switch_to(self.language);
         limen_proto::locale::set(self.language.code());
         if let Ok(mut cfg) = limen_core::Config::load() {
             cfg.language = Some(self.language.code().to_string());
