@@ -36,3 +36,13 @@ limen-core = { path = "src/limen-core" }
 limen-registry = { path = "src/limen-registry" }
 limen-sdk-rust = { path = "src/limen-sdk-rust" }
 limen-ui = { path = "src/limen-ui" }
+
+# Debug builds optimize their dependencies, not our own crates.
+#
+# egui rasterizes glyphs and tessellates every shape on the CPU, and unoptimized
+# that is ~8ms a frame where optimized it is ~1ms — which a debug build spends on
+# anything that redraws continuously (a change of UI scale, the topology map, a
+# live table). Our own crates stay at opt-level 0, so breakpoints and backtraces
+# are unaffected; the dependencies are compiled once and cached.
+[profile.dev.package."*"]
+opt-level = 2
