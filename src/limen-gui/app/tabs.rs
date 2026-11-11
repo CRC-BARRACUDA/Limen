@@ -238,3 +238,18 @@ pub struct DetailTab {
     pub inputs: HashMap<String, String>,
     pub busy: bool,
 }
+
+/// When the page now on screen arrived, remembering it in `shown`.
+///
+/// A page plays its arrival from the moment it *became* the page on screen, not
+/// from the frame it is drawn in — it is drawn on every frame. So the time is
+/// kept, and replaced only when the page underneath it changes: staying on a
+/// page must not restart its entrance, and going back to one must.
+pub fn page_arrived(shown: &mut Option<(Tab, f64)>, showing: Option<Tab>, now: f64) -> f64 {
+    if shown.as_ref().map(|(t, _)| t) != showing.as_ref() {
+        *shown = showing.map(|t| (t, now));
+    }
+    // No page at all (every tab closed) has no arrival to play: `now` leaves
+    // the entrance finished rather than starting one on an empty screen.
+    shown.as_ref().map_or(now, |&(_, at)| at)
+}

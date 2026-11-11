@@ -18,6 +18,15 @@ const SCALE_SECS: f64 = 0.28;
 /// sub-pixel, so the motion still reads as continuous.
 const SCALE_STEP: f32 = 2.0;
 
+/// How long an arriving page takes to fade in, in seconds, and how far it
+/// rises on the way.
+///
+/// Short, and shorter than the item staggers inside the pages: the transition
+/// is there to say *the screen changed*, and anything longer puts a wait
+/// between a click on the nav and the page being readable.
+const PAGE_SECS: f64 = 0.16;
+const PAGE_RISE: f32 = 10.0;
+
 impl eframe::App for LimenApp {
     /// Clear transparent during the startup splash so only the floating icons
     /// show over the desktop; opaque warm-black once the app takes over.
@@ -543,6 +552,12 @@ impl eframe::App for LimenApp {
                 now_t
             }
         };
+        // A page swap is a change of place, not of contents. Without a
+        // transition the nav swaps one screenful for another between two
+        // frames, which reads as a teleport however well the items inside the
+        // new page animate — and the items of a page that is mostly chrome (a
+        // heading, a separator, a form) have little to animate at all.
+        let page_since = page_arrived(&mut self.page_at, active_tab.clone(), now_t);
         let about_reveal = self.about_revealed_at.unwrap_or(now_t);
         let settings_reveal = self.settings_revealed_at.unwrap_or(now_t);
         {
@@ -606,6 +621,18 @@ impl eframe::App for LimenApp {
                         ui.monospace(err.as_str());
                         return;
                     }
+                    // The arriving page fades in and rises the last few
+                    // pixels into place. Set on the `Ui` rather than wrapped
+                    // around the pages in a scope, so every page gets it
+                    // without being touched, and so the brackets painted above
+                    // stay solid — they belong to the window, not the page.
+                    //
+                    // The per-page item staggers play inside this: a card at
+                    // half opacity inside a page at half opacity is a quarter
+                    // of the way in, which is where it should be.
+                    let arriving = ui::reveal_t(ui, 0, page_since, now_t, 0.0, PAGE_SECS);
+                    ui.set_opacity(arriving);
+                    ui.add_space((1.0 - arriving) * PAGE_RISE);
                     match active_tab {
                         None => {
                             ui.add_space(24.0);

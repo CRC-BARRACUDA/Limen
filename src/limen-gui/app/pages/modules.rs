@@ -689,3 +689,122 @@ pub(crate) fn available_card(
             });
         });
 }
+
+#[cfg(test)]
+mod entrance {
+    use super::*;
+
+    /// One installed module, as the engine would hand it over.
+    fn spec(name: &str) -> ModuleSpec {
+        ModuleSpec {
+            name: name.into(),
+            display_name: None,
+            version: "1".into(),
+            description: Some("a module".into()),
+            authors: vec![],
+            tags: vec![],
+            repo: None,
+            os: vec![],
+            capabilities: vec![],
+            requires: Default::default(),
+            optional: Default::default(),
+            permissions: Default::default(),
+            language: limen_proto::manifest::Language::Native,
+            launch: limen_core::Launch::Native("x".into()),
+            cwd: std::path::PathBuf::from("."),
+        }
+    }
+
+    /// Draw the page at `time`, with the reveal armed at `armed`, and report
+    /// how many pieces of text were painted and the faintest of them.
+    ///
+    /// Both halves matter: egui drops a shape whose opacity is exactly zero, so
+    /// a card that has not started arriving yet is *absent* rather than
+    /// transparent — the count catches those, the alpha catches the ones
+    /// part-way in.
+    fn painted(ctx: &egui::Context, armed: f64, time: f64) -> (usize, u8) {
+        let mods = [spec("alpha"), spec("beta"), spec("gamma")];
+        let mut revealed = Some(armed);
+        let out = ctx.run(
+            egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(980.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    modules_page(
+                        ui,
+                        &mods,
+                        &HashMap::new(),
+                        &HashSet::new(),
+                        &HashMap::new(),
+                        &HashMap::new(),
+                        &[],
+                        false,
+                        &None,
+                        &None,
+                        &None,
+                        &mut ModuleFilter::All,
+                        &mut String::new(),
+                        &mut None,
+                        &mut None,
+                        &mut None,
+                        &mut None,
+                        &mut None,
+                        &mut false,
+                        &mut revealed,
+                        &mut ModuleFilter::All,
+                        &HashMap::new(),
+                        &HashMap::new(),
+                        &HashSet::new(),
+                        &mut None,
+                        &mut Categories {
+                            all: &std::collections::BTreeMap::new(),
+                            filter: &mut None,
+                        },
+                    );
+                });
+            },
+        );
+        let mut faintest = 255;
+        let mut texts = 0;
+        for clipped in &out.shapes {
+            if let egui::Shape::Text(t) = &clipped.shape {
+                texts += 1;
+                faintest = faintest.min(t.fallback_color.a());
+            }
+        }
+        (texts, faintest)
+    }
+
+    /// The card list has a staggered entrance: the cards are not all there at
+    /// once, and the ones on their way are part-way faded. If arriving on the
+    /// page paints the finished list straight away, the entrance is not
+    /// running — which is what "it just shows" looks like.
+    #[test]
+    fn the_card_list_fades_in_when_the_page_is_arrived_at() {
+        let ctx = egui::Context::default();
+        ui::apply_theme(&ctx);
+        ui::set_animations(true);
+        // A frame to let egui settle its fonts and layout.
+        let _ = painted(&ctx, 0.0, 0.0);
+
+        let (arriving, _) = painted(&ctx, 10.0, 10.0);
+        let (early, faint) = painted(&ctx, 10.0, 10.06);
+        let (settled, opaque) = painted(&ctx, 10.0, 11.0);
+
+        assert_eq!(opaque, 255, "a second later everything is fully opaque");
+        assert!(
+            arriving < settled,
+            "on arrival the cards are not all painted yet: {arriving} of {settled}"
+        );
+        assert!(
+            early < settled || faint < 255,
+            "part-way through, the list is still arriving: {early} of {settled}, faintest {faint}"
+        );
+    }
+}

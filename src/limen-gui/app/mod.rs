@@ -190,6 +190,12 @@ pub struct LimenApp {
     /// The active UI language (persisted in settings; mirrors `i18n`'s global).
     pub(crate) language: i18n::Lang,
 
+    /// Which page the content area is showing, and since when — drives the
+    /// transition a page plays when it arrives. Distinct from the per-page
+    /// reveal timers below: this one is about the *swap*, those about the items
+    /// inside the page that lands.
+    pub(crate) page_at: Option<(Tab, f64)>,
+
     /// When the About tab was last shown — drives its staggered content reveal.
     pub(crate) about_revealed_at: Option<f64>,
     /// Reveal timers for the Settings/Developer/License tab entrance animations.
@@ -373,6 +379,7 @@ impl LimenApp {
             animations,
             alerts,
             language,
+            page_at: None,
             about_revealed_at: None,
             settings_revealed_at: None,
             developer_revealed_at: None,

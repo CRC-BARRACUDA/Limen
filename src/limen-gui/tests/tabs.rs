@@ -480,3 +480,39 @@ fn a_polling_chain_waits_as_long_as_it_asked_to() {
     // the same invoke either way.
     assert_eq!(paced.into_invoke().action.method, "poll");
 }
+
+/// A page's entrance runs from when the page arrived, so it must not restart
+/// while you sit on it — and must restart when you come back to it.
+#[test]
+fn a_page_entrance_starts_on_arrival_and_not_again() {
+    let mut shown = None;
+
+    let arrived = page_arrived(&mut shown, Some(Tab::Modules), 10.0);
+    assert_eq!(arrived, 10.0, "first sight of a page is its arrival");
+    assert_eq!(
+        page_arrived(&mut shown, Some(Tab::Modules), 10.5),
+        10.0,
+        "half a second later it is still the same arrival, not a new one"
+    );
+
+    assert_eq!(
+        page_arrived(&mut shown, Some(Tab::About), 11.0),
+        11.0,
+        "another page arrives when it is switched to"
+    );
+    assert_eq!(
+        page_arrived(&mut shown, Some(Tab::Modules), 12.0),
+        12.0,
+        "and coming back to the first one plays its entrance again"
+    );
+
+    // One module tab is not another: the page is the name, not the kind.
+    let a = page_arrived(&mut shown, Some(Tab::Module("search".into())), 13.0);
+    let b = page_arrived(&mut shown, Some(Tab::Module("net-mapper".into())), 13.4);
+    assert_eq!((a, b), (13.0, 13.4));
+
+    // Nothing on screen: there is no page to play in, so the entrance is over
+    // rather than starting on an empty content area.
+    assert_eq!(page_arrived(&mut shown, None, 14.0), 14.0);
+    assert_eq!(page_arrived(&mut shown, None, 15.0), 15.0);
+}
