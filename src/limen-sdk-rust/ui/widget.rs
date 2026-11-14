@@ -93,6 +93,10 @@ impl Widget {
     pub fn rows(self, rows: u32) -> Self {
         self.set("rows", json!(rows))
     }
+    /// A [`commander`](super::commander)'s line under its panes.
+    pub fn status(self, text: impl Into<String>) -> Self {
+        self.set("status", json!(text.into()))
+    }
     /// A [`terminal`](super::terminal) that takes the height left, down to the
     /// bottom of the window.
     pub fn fill(self) -> Self {

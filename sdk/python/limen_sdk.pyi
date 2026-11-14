@@ -115,6 +115,24 @@ class Row(Widget):
     """A horizontal group of widgets, laid out left to right."""
     def __init__(self, children: List[Widget]) -> None: ...
 
+class Commander(Widget):
+    """Two file panes side by side (Midnight Commander). Panes are dicts with
+    title, path, up, busy, error and entries; asks come to `calls` with op,
+    pane, path and names."""
+    def __init__(
+        self,
+        id: str,
+        left: Dict[str, Any],
+        right: Dict[str, Any],
+        calls: Optional[str] = ...,
+        capability: Optional[str] = ...,
+        method: Optional[str] = ...,
+        args: Optional[Dict[str, Any]] = ...,
+        status: str = ...,
+        rows: int = ...,
+        fill: bool = ...,
+    ) -> None: ...
+
 class Terminal(Widget):
     """A transcript and a prompt in one box, as an SSH session. Enter calls
     `calls` with the typed line under `id`; answer with `lines` grown, and

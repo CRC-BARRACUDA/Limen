@@ -201,6 +201,44 @@ pub struct Invoke {
     pub confirm: Option<Confirm>,
 }
 
+/// One pane of a [`Widget::Commander`].
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CommanderPane {
+    /// What the pane shows: "This PC", a host's name.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub path: String,
+    /// Offer `..` — false at the top of a drive or of `/`.
+    #[serde(default)]
+    pub up: bool,
+    /// Being listed: no rows until it is.
+    #[serde(default)]
+    pub busy: bool,
+    /// Why it could not be listed.
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub entries: Vec<CommanderEntry>,
+    /// Where the cursor goes when the pane arrives at a new path: the folder
+    /// just come up out of, as Midnight Commander does. The top when empty.
+    #[serde(default)]
+    pub select: String,
+}
+
+/// One file or folder in a [`CommanderPane`].
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CommanderEntry {
+    pub name: String,
+    #[serde(default)]
+    pub dir: bool,
+    /// As it is to be shown: the module knows the units its users expect.
+    #[serde(default)]
+    pub size: String,
+    #[serde(default)]
+    pub modified: String,
+}
+
 /// One section in a [`Widget::Sidebar`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct SidebarItem {
@@ -459,6 +497,25 @@ pub enum Widget {
         busy: bool,
         /// Take the height that is left, down to the bottom of the window, and
         /// follow the window as it is resized — `rows` is ignored.
+        #[serde(default)]
+        fill: bool,
+    },
+    /// Two file panes side by side, as Midnight Commander has them. Limen
+    /// keeps the cursor, the marks and which pane is active; what is asked of
+    /// the module goes through `on_action` as `{op, pane, path, names}` — copy
+    /// and delete after Limen's confirmation window. See [`crate::commander`].
+    Commander {
+        id: String,
+        left: CommanderPane,
+        right: CommanderPane,
+        on_action: AutoAction,
+        /// A line under the panes: what is being done, or what was.
+        #[serde(default)]
+        status: String,
+        /// Rows tall (20 when not given), unless it fills.
+        #[serde(default)]
+        rows: u32,
+        /// Take the height left, down to the bottom of the window.
         #[serde(default)]
         fill: bool,
     },
@@ -1091,6 +1148,7 @@ pub fn render_widget(
         }
         Widget::Sidebar { .. } => crate::sidebar::render(ui, widget, inputs, busy, clicked),
         Widget::Terminal { .. } => crate::terminal::render(ui, widget, inputs, clicked),
+        Widget::Commander { .. } => crate::commander::render(ui, widget, clicked),
         Widget::Row { children } => {
             // A row of many things — a strip of category buttons, a long list of
             // actions — is wider than the window before anybody notices, and the

@@ -265,6 +265,36 @@ class Terminal(Widget):
                 "busy": self.busy, "fill": self.fill}
 
 
+class Commander(Widget):
+    """Two file panes side by side, as Midnight Commander has them.
+
+    `left` and `right` are dicts: `{"title", "path", "up", "busy", "error",
+    "select", "entries": [{"name", "dir", "size", "modified"}]}` — `up` offers
+    `..`; `select` names the entry the cursor starts on when the path changes
+    (the folder just come up out of).
+    Limen keeps the cursor, the marks and the active pane; what is asked comes
+    to `calls` (a method on THIS module) with `op` (`open`, `up`, `refresh`,
+    `copy`, `delete`), `pane` ("left"/"right"), `path` and `names` — copy and
+    delete only after Limen's confirmation window. `status` is a line under the
+    panes; `fill=True` takes the height left down to the bottom of the window.
+    """
+
+    def __init__(self, id, left, right, calls=None, capability=None, method=None,
+                 args=None, status="", rows=20, fill=False):
+        self.id, self.left, self.right = id, left, right
+        self.calls, self.capability, self.method, self.args = calls, capability, method, args
+        self.status, self.rows, self.fill = status, rows, fill
+
+    def to_spec(self):
+        action = {"capability": self.capability or _CURRENT_CAPABILITY[0],
+                  "method": self.method or self.calls}
+        if self.args:
+            action["args"] = self.args
+        return {"kind": "commander", "id": self.id, "left": self.left,
+                "right": self.right, "on_action": action, "status": self.status,
+                "rows": self.rows, "fill": self.fill}
+
+
 class MenuItem:
     """A row right-click menu entry.
 

@@ -219,3 +219,21 @@ missing = "not installed"
 [sidebar]
 hide = "Hide the sections"
 show = "Show the sections"
+
+# The two-pane file manager (commander).
+[commander]
+name = "Name"
+size = "Size"
+modified = "Modified"
+up = "UP"
+dir = "<DIR>"
+loading = "Loading…"
+f5 = "F5 Copy"
+f8 = "F8 Delete"
+refresh = "Ctrl+R Refresh"
+keys = "Tab: other pane · Insert: mark · Enter: open · Backspace: up"
+copy_title = "Copy {n} item(s) to {to}?"
+delete_title = "Delete {n} item(s) from {from}?"
+copy = "Copy"
+delete = "Delete"
+cancel = "Cancel"

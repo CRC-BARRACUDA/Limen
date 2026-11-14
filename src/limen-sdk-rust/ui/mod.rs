@@ -184,6 +184,28 @@ pub fn terminal(
         .set("on_submit", json!({ "capability": capability.into(), "method": method.into() }))
 }
 
+/// Two file panes side by side, as Midnight Commander has them.
+///
+/// `left` and `right` are the panes: `{title, path, up, busy, error, select,
+/// entries: [{name, dir, size, modified}]}` — `select` names the entry the
+/// cursor starts on when the path changes. Limen keeps the cursor, the marks and the
+/// active pane; what is asked comes to `capability`/`method` as `{op, pane,
+/// path, names}` — `open`, `up`, `refresh`, `copy`, `delete` — copy and delete
+/// after Limen's confirmation window. `.status(..)` writes a line under them.
+pub fn commander(
+    id: impl Into<String>,
+    capability: impl Into<String>,
+    method: impl Into<String>,
+    left: Value,
+    right: Value,
+) -> Widget {
+    Widget::of_kind("commander")
+        .set("id", json!(id.into()))
+        .set("left", left)
+        .set("right", right)
+        .set("on_action", json!({ "capability": capability.into(), "method": method.into() }))
+}
+
 pub fn row(children: Vec<Widget>) -> Widget {
     let kids: Vec<Value> = children.into_iter().map(Widget::into_value).collect();
     Widget::of_kind("row").set("children", Value::Array(kids))

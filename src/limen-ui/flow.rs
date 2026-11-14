@@ -64,6 +64,8 @@ pub(crate) fn key(w: &Widget) -> String {
         Widget::Sidebar { id, .. } => format!("sidebar:{id}"),
         // By its id: a terminal whose transcript grew is the same terminal.
         Widget::Terminal { id, .. } => format!("terminal:{id}"),
+        // By its id: panes that list somewhere else are the same commander.
+        Widget::Commander { id, .. } => format!("commander:{id}"),
     }
 }
 
@@ -88,6 +90,7 @@ fn kind_of(w: &Widget) -> &'static str {
         Widget::Diagram { .. } => "diagram",
         Widget::Sidebar { .. } => "sidebar",
         Widget::Terminal { .. } => "terminal",
+        Widget::Commander { .. } => "commander",
     }
 }
 

@@ -91,6 +91,7 @@ mod overlay;
 mod rows;
 mod sidebar;
 mod terminal;
+mod commander;
 mod table;
 mod theme;
 pub mod toast;
