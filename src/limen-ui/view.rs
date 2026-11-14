@@ -438,6 +438,30 @@ pub enum Widget {
         #[serde(default)]
         body: Vec<Widget>,
     },
+    /// A terminal: the transcript so far and a prompt to type at, in one box,
+    /// as an SSH session is. Enter calls `on_submit` with the typed line under
+    /// `id`, and the line empties; the module answers with `lines` grown. See
+    /// [`crate::terminal`].
+    Terminal {
+        id: String,
+        /// What has been run and printed, oldest first.
+        #[serde(default)]
+        lines: String,
+        /// Written before the line being typed: `C:\Users>`, `/home $`.
+        #[serde(default)]
+        prompt: String,
+        on_submit: AutoAction,
+        /// How many lines tall it is (20 when not given).
+        #[serde(default)]
+        rows: u32,
+        /// A command is running: no prompt until it is done.
+        #[serde(default)]
+        busy: bool,
+        /// Take the height that is left, down to the bottom of the window, and
+        /// follow the window as it is resized — `rows` is ignored.
+        #[serde(default)]
+        fill: bool,
+    },
     /// A table with a header row and string cells. Rows become interactive
     /// (right-click menu + double-click) when `menu` or `on_activate` is set.
     Table {
@@ -1066,6 +1090,7 @@ pub fn render_widget(
             render_widgets(ui, children, inputs, busy, clicked);
         }
         Widget::Sidebar { .. } => crate::sidebar::render(ui, widget, inputs, busy, clicked),
+        Widget::Terminal { .. } => crate::terminal::render(ui, widget, inputs, clicked),
         Widget::Row { children } => {
             // A row of many things — a strip of category buttons, a long list of
             // actions — is wider than the window before anybody notices, and the

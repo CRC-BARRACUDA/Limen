@@ -115,6 +115,24 @@ class Row(Widget):
     """A horizontal group of widgets, laid out left to right."""
     def __init__(self, children: List[Widget]) -> None: ...
 
+class Terminal(Widget):
+    """A transcript and a prompt in one box, as an SSH session. Enter calls
+    `calls` with the typed line under `id`; answer with `lines` grown, and
+    `busy=True` while the command runs."""
+    def __init__(
+        self,
+        id: str,
+        lines: str = ...,
+        prompt: str = ...,
+        calls: Optional[str] = ...,
+        capability: Optional[str] = ...,
+        method: Optional[str] = ...,
+        args: Optional[Dict[str, Any]] = ...,
+        rows: int = ...,
+        busy: bool = ...,
+        fill: bool = ...,
+    ) -> None: ...
+
 class Sidebar(Widget):
     """Sections down the left, the open one beside it. Picking an item calls
     `calls` with its `key` merged into `args`; answer with that item `selected`

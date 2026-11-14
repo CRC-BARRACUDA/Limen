@@ -62,6 +62,8 @@ pub(crate) fn key(w: &Widget) -> String {
         // and that is still the same sidebar — the body animates its own
         // change, and the list must not fly in again around it.
         Widget::Sidebar { id, .. } => format!("sidebar:{id}"),
+        // By its id: a terminal whose transcript grew is the same terminal.
+        Widget::Terminal { id, .. } => format!("terminal:{id}"),
     }
 }
 
@@ -85,6 +87,7 @@ fn kind_of(w: &Widget) -> &'static str {
         Widget::Donut { .. } => "donut",
         Widget::Diagram { .. } => "diagram",
         Widget::Sidebar { .. } => "sidebar",
+        Widget::Terminal { .. } => "terminal",
     }
 }
 

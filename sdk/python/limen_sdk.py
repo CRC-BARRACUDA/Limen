@@ -237,6 +237,34 @@ class Sidebar(Widget):
         return spec
 
 
+class Terminal(Widget):
+    """A terminal: the transcript so far and a prompt to type at, in one box,
+    as an SSH session is.
+
+    `lines` is what has been run and printed, oldest first; `prompt` is written
+    before the line being typed. Enter calls `calls` (a method on THIS module)
+    with the typed line under `id`, and the line empties — answer with `lines`
+    grown, and `busy=True` while the command runs, which hides the prompt until
+    it is done. `rows` is its height in lines — or `fill=True`, the height left
+    down to the bottom of the window. Ctrl+ and Ctrl- size its text.
+    """
+
+    def __init__(self, id, lines="", prompt="", calls=None, capability=None,
+                 method=None, args=None, rows=20, busy=False, fill=False):
+        self.id, self.lines, self.prompt = id, lines, prompt
+        self.calls, self.capability, self.method, self.args = calls, capability, method, args
+        self.rows, self.busy, self.fill = rows, busy, fill
+
+    def to_spec(self):
+        action = {"capability": self.capability or _CURRENT_CAPABILITY[0],
+                  "method": self.method or self.calls}
+        if self.args:
+            action["args"] = self.args
+        return {"kind": "terminal", "id": self.id, "lines": self.lines,
+                "prompt": self.prompt, "on_submit": action, "rows": self.rows,
+                "busy": self.busy, "fill": self.fill}
+
+
 class MenuItem:
     """A row right-click menu entry.
 

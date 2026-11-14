@@ -180,6 +180,12 @@ pub fn demo_view() -> Value {
             )
             .centre("49 findings"),
             separator(),
+            label("terminal — a transcript and a prompt in one box; Enter sends the line, Ctrl+ / Ctrl− size the text").strong(),
+            terminal("demo.terminal", "ui.kit", "terminal")
+                .lines("C:\\> cd Users\nC:\\Users> dir /b\nAll Users\nDefault\nPublic")
+                .prompt("C:\\Users>")
+                .rows(6),
+            separator(),
             label("sidebar — sections down the left, the open one beside it; the chevron folds the list away").strong(),
             sidebar(
                 "demo.sidebar",

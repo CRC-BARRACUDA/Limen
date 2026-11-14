@@ -167,6 +167,23 @@ pub fn sidebar(
         .set("body", Value::Array(body))
 }
 
+/// A terminal: the transcript so far and a prompt to type at, in one box, as
+/// an SSH session is.
+///
+/// Enter calls `capability`/`method` with the typed line under `id`, and the
+/// line empties. Answer with the transcript grown (`.lines(..)`), the prompt as
+/// it now is (`.prompt(..)`), and `.busy()` while the command runs. Ctrl+ and
+/// Ctrl− size its text; that is Limen's, and needs nothing from the module.
+pub fn terminal(
+    id: impl Into<String>,
+    capability: impl Into<String>,
+    method: impl Into<String>,
+) -> Widget {
+    Widget::of_kind("terminal")
+        .set("id", json!(id.into()))
+        .set("on_submit", json!({ "capability": capability.into(), "method": method.into() }))
+}
+
 pub fn row(children: Vec<Widget>) -> Widget {
     let kids: Vec<Value> = children.into_iter().map(Widget::into_value).collect();
     Widget::of_kind("row").set("children", Value::Array(kids))
