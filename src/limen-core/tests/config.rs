@@ -73,3 +73,50 @@ fn a_settings_file_from_an_older_version_still_loads() {
         assert!(cfg.categories.is_empty());
     });
 }
+
+/// The first load after an update fills in what the file lacks, once, and
+/// keeps what is there — the user's values and keys this version does not know.
+#[test]
+fn an_update_fills_in_missing_fields_once() {
+    in_temp_home("upgrade", || {
+        let path = limen_core::paths::settings_path();
+        let old = r#"{"version":"0.1.0","ui_scale_percent":125,"platform_url":"https://auth.example/api","from_the_future":7}"#;
+        std::fs::write(&path, old).expect("write an old settings file");
+
+        let cfg = Config::load().expect("load");
+        assert_eq!(cfg.ui_scale_percent, 125);
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(file["version"], limen_core::config::VERSION, "stamped with this version");
+        assert_eq!(file["ui_scale_percent"], 125, "the user's value is kept");
+        assert_eq!(file["platform_url"], "https://auth.example/api");
+        assert_eq!(file["from_the_future"], 7, "an unknown key is kept");
+        assert_eq!(file["animations"], true, "a missing field gets its default");
+        assert_eq!(file["favorites"], serde_json::json!([]));
+        assert!(file.as_object().unwrap().contains_key("platform_client_id"));
+
+        // Same version: the file is not written again.
+        let mut without = file.clone();
+        without.as_object_mut().unwrap().remove("alerts");
+        std::fs::write(&path, without.to_string()).unwrap();
+        Config::load().expect("load again");
+        let again: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(again, without, "this version's file is left as it is");
+    });
+}
+
+/// A file from before `version` existed counts as an older one.
+#[test]
+fn a_file_without_a_version_is_upgraded() {
+    in_temp_home("noversion", || {
+        let path = limen_core::paths::settings_path();
+        std::fs::write(&path, r#"{"alerts":false}"#).unwrap();
+        assert!(!Config::load().unwrap().alerts);
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(file["version"], limen_core::config::VERSION);
+        assert_eq!(file["alerts"], false);
+        assert_eq!(file["animations"], true);
+    });
+}
