@@ -99,6 +99,11 @@ pub struct Config {
     /// [`crate::avatar::DEFAULT_ASSET_BASE`]. `LIMEN_AVATAR_ASSET_BASE` wins.
     #[serde(default)]
     pub avatar_asset_base: Option<String>,
+
+    /// Lock the vault after this many minutes without use. Absent = 15;
+    /// 0 = never.
+    #[serde(default)]
+    pub vault_lock_minutes: Option<u32>,
 }
 
 impl Default for Config {
@@ -118,6 +123,7 @@ impl Default for Config {
             account: None,
             avatar_url: None,
             avatar_asset_base: None,
+            vault_lock_minutes: None,
         }
     }
 }

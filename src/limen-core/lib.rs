@@ -17,6 +17,7 @@ pub mod net;
 pub mod paths;
 pub mod setup;
 pub mod update;
+pub mod vault;
 
 pub use config::Config;
 pub use engine::Engine;
