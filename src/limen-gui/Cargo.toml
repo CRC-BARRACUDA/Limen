@@ -16,6 +16,8 @@ path = "main.rs"
 
 [dependencies]
 limen-core = { workspace = true }
+limen-host = { workspace = true }
+zeroize = { workspace = true }
 limen-registry = { workspace = true }
 limen-proto = { workspace = true }
 limen-ui = { workspace = true }

@@ -9,6 +9,8 @@ pub enum Tab {
     Modules,
     /// The categories the user has made, and what is in them.
     Categories,
+    /// Limen's vault: the secrets kept for Limen and its modules.
+    Vault,
     Module(String),
     Settings,
     Developer,
@@ -34,7 +36,7 @@ impl Tab {
     pub fn is_chrome(&self) -> bool {
         matches!(
             self,
-            Tab::About | Tab::Modules | Tab::Categories | Tab::Settings | Tab::Developer
+            Tab::About | Tab::Modules | Tab::Categories | Tab::Vault | Tab::Settings | Tab::Developer
         )
     }
 
@@ -43,6 +45,7 @@ impl Tab {
             Tab::About => i18n::t("tab.about"),
             Tab::Modules => i18n::t("tab.modules"),
             Tab::Categories => i18n::t("tab.categories"),
+            Tab::Vault => i18n::t("tab.vault"),
             Tab::Module(n) => n.clone(),
             Tab::Settings => i18n::t("tab.settings"),
             Tab::Developer => i18n::t("tab.developer"),

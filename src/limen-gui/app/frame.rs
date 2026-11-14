@@ -216,6 +216,9 @@ impl eframe::App for LimenApp {
                     {
                         open_tab = Some(Tab::Categories);
                     }
+                    if ui::chip(ui, &i18n::t("nav.vault"), active == Some(Tab::Vault)).clicked() {
+                        open_tab = Some(Tab::Vault);
+                    }
                     // "Update available" pill, next to Modules.
                     if self.update.is_some() {
                         ui.add_space(6.0);
@@ -283,6 +286,8 @@ impl eframe::App for LimenApp {
                         {
                             open_tab = Some(Tab::Settings);
                         }
+                        // The vault's padlock, beside the gear: shut or open.
+                        self.vault.padlock(ui);
                         // The account, left of the gear: as the website's header.
                         if !matches!(
                             self.account.state,
@@ -547,6 +552,11 @@ impl eframe::App for LimenApp {
         } else {
             self.categories_revealed_at = None;
         }
+        if active_tab == Some(Tab::Vault) {
+            self.vault_revealed_at.get_or_insert(now_t);
+        } else {
+            self.vault_revealed_at = None;
+        }
         if active_tab == Some(Tab::Settings) {
             self.settings_revealed_at.get_or_insert(now_t);
         } else {
@@ -600,6 +610,7 @@ impl eframe::App for LimenApp {
                 dev_tab,
                 logs,
                 log_autoscroll,
+                vault,
                 ui_scale,
                 animations,
                 alerts,
@@ -611,6 +622,7 @@ impl eframe::App for LimenApp {
                 favorites,
                 categories,
                 categories_revealed_at,
+                vault_revealed_at,
                 category_filter,
                 new_category,
                 modules_revealed_at,
@@ -692,6 +704,12 @@ impl eframe::App for LimenApp {
                                 all: categories,
                                 filter: category_filter,
                             },
+                        ),
+                        Some(Tab::Vault) => vault_page(
+                            ui,
+                            vault,
+                            &modules.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+                            vault_revealed_at.unwrap_or(now_t),
                         ),
                         Some(Tab::Categories) => categories_page(
                             ui,
@@ -825,6 +843,7 @@ impl eframe::App for LimenApp {
             self.settings_revealed_at = None;
             self.developer_revealed_at = None;
             self.modules_revealed_at = None;
+            self.vault_revealed_at = None;
             // Installed cards re-resolve their description in-place (localized_desc
             // reads the module's locales/ folder, cached per language) — no engine
             // reload. The org list, though, resolved its descriptions over the
@@ -907,6 +926,7 @@ impl eframe::App for LimenApp {
                 self.removing.insert(name, now_t);
             } else {
                 self.busy = true;
+                self.vault.forget_module(&name);
                 self.worker.send(Command::RemoveModule(name));
             }
         }
@@ -925,6 +945,9 @@ impl eframe::App for LimenApp {
             }
             for name in fire {
                 self.busy = true;
+                // Its secrets go with it (if the vault is open; if not, the
+                // Vault page shows them as a removed module's, to delete).
+                self.vault.forget_module(&name);
                 self.worker.send(Command::RemoveModule(name));
             }
             if !self.removing.is_empty() {
@@ -1097,6 +1120,7 @@ impl eframe::App for LimenApp {
         // having asked for none of the repaints that would have carried it in.
         {
             self.account.sign_out_dialog(ctx, self.content_rect);
+            self.vault.frame(ctx, self.content_rect);
             let open = self.pending_confirm.is_some();
             if open {
                 self.confirm_showing = self.pending_confirm.clone();

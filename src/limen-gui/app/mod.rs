@@ -28,6 +28,7 @@ use crate::worker::{Command, Event, RunTag, Worker};
 // the re-exports keep every name reachable from where it was, so splitting
 // the file moved code and nothing else.
 mod account;
+mod vault;
 mod brand;
 mod dialogs;
 // Nothing to re-export: it holds the `eframe::App` impl and no names of its
@@ -81,6 +82,8 @@ pub struct LimenApp {
     /// `None` while the tab is not on screen, which is what replays the entrance
     /// on every return rather than only the first.
     pub(crate) categories_revealed_at: Option<f64>,
+    /// When the Vault page was shown, for its entrance.
+    pub(crate) vault_revealed_at: Option<f64>,
     /// The consent dialog still on screen, which outlives `pending_action` by
     /// the length of its closing animation.
     pub(crate) consent_showing: Option<ui::Invoke>,
@@ -244,6 +247,8 @@ pub struct LimenApp {
     pub(crate) updating: bool,
     /// Signing in to the platform, and who is signed in.
     pub(crate) account: account::AccountUi,
+    /// Limen's vault: secrets for Limen and its modules.
+    pub(crate) vault: vault::VaultUi,
     /// A portable interpreter currently being installed (e.g. "Python"), if any.
     pub(crate) installing_runtime: Option<String>,
     /// Startup splash: the frame time it first rendered (set lazily on the first
@@ -335,6 +340,7 @@ impl LimenApp {
             category_filter: None,
             new_category: String::new(),
             categories_revealed_at: None,
+            vault_revealed_at: None,
             pending_action: None,
             pending_remove: None,
             confirm_subject: None,
@@ -403,6 +409,7 @@ impl LimenApp {
             update: None,
             updating: false,
             account: account::AccountUi::new(&cc.egui_ctx),
+            vault: vault::VaultUi::new(&cc.egui_ctx),
             installing_runtime: None,
             splash_start: None,
             splash_done: false,
