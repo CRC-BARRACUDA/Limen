@@ -180,6 +180,24 @@ pub fn demo_view() -> Value {
             )
             .centre("49 findings"),
             separator(),
+            label("sidebar — sections down the left, the open one beside it; the chevron folds the list away").strong(),
+            sidebar(
+                "demo.sidebar",
+                "ui.kit",
+                "section",
+                vec![
+                    sidebar_item("overview", "Overview"),
+                    sidebar_item("network", "Network"),
+                    sidebar_item("apps", "Apps — a name long enough to need an ellipsis"),
+                    sidebar_item("updates", "Updates").muted(),
+                ],
+                "overview",
+                vec![
+                    label("The open section is drawn the way a screen is.").strong(),
+                    label("Picking another calls the module with its key; folding the list is the host's alone.").weak(),
+                ],
+            ),
+            separator(),
             label("diagram — what is connected to what; hover a circle, drag to move, double-click to put it back").strong(),
             diagram(
                 "diagram",

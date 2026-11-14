@@ -206,3 +206,8 @@ remove_module = "Натисніть, щоб прибрати з цієї кат�
 delete = "Видалити"
 delete_hint = "Видалити категорію. Модулі в ній не зачіпаються."
 missing = "не встановлено"
+
+# The fold toggle on a module's sidebar.
+[sidebar]
+hide = "Сховати розділи"
+show = "Показати розділи"

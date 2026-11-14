@@ -214,3 +214,8 @@ remove_module = "Click to take it out of this category"
 delete = "Delete"
 delete_hint = "Delete this category. The modules in it are not touched."
 missing = "not installed"
+
+# The fold toggle on a module's sidebar.
+[sidebar]
+hide = "Hide the sections"
+show = "Show the sections"

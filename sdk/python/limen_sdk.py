@@ -193,6 +193,50 @@ class Row(Widget):
         return {"kind": "row", "children": [c.to_spec() for c in self.children]}
 
 
+class Sidebar(Widget):
+    """A list of sections down the left, and the open section beside it.
+
+    `items` is a list of `(key, text)` pairs, or `(key, text, True)` for a
+    section drawn quieter because it has nothing to show yet. Picking one calls
+    `calls` (a method on THIS module) with the item's `key` merged into `args`;
+    answer with the same sidebar, that item `selected`, and that section as
+    `body`, and only the section changes on screen.
+
+    The user can fold the list away. That is the host's alone - no call is
+    made - and it is remembered by `id`, so it stays folded across sections.
+    """
+
+    def __init__(self, id, items, selected="", calls=None, capability=None,
+                 method=None, args=None, body=None):
+        self.id = id
+        self.items = items
+        self.selected = selected
+        self.calls = calls
+        self.capability = capability
+        self.method = method
+        self.args = args
+        self.body = body or []
+
+    def to_spec(self):
+        items = []
+        for it in self.items:
+            key, text = it[0], it[1]
+            muted = bool(it[2]) if len(it) > 2 else False
+            items.append({"key": str(key), "text": str(text), "muted": muted})
+        spec = {
+            "kind": "sidebar",
+            "id": self.id,
+            "items": items,
+            "selected": self.selected,
+            "action": {"capability": self.capability or _CURRENT_CAPABILITY[0],
+                       "method": self.method or self.calls},
+            "body": [w.to_spec() for w in self.body],
+        }
+        if self.args:
+            spec["args"] = self.args
+        return spec
+
+
 class MenuItem:
     """A row right-click menu entry.
 

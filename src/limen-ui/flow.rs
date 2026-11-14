@@ -57,6 +57,11 @@ pub(crate) fn key(w: &Widget) -> String {
         Widget::Chart { title, .. } => format!("chart:{title}"),
         Widget::Donut { title, .. } => format!("donut:{title}"),
         Widget::Diagram { title, .. } => format!("diagram:{title}"),
+        // By its id, and nothing it holds: picking a section answers with a
+        // new screen whose sidebar has another item selected and another body,
+        // and that is still the same sidebar — the body animates its own
+        // change, and the list must not fly in again around it.
+        Widget::Sidebar { id, .. } => format!("sidebar:{id}"),
     }
 }
 
@@ -79,6 +84,7 @@ fn kind_of(w: &Widget) -> &'static str {
         Widget::Chart { .. } => "chart",
         Widget::Donut { .. } => "donut",
         Widget::Diagram { .. } => "diagram",
+        Widget::Sidebar { .. } => "sidebar",
     }
 }
 

@@ -115,6 +115,22 @@ class Row(Widget):
     """A horizontal group of widgets, laid out left to right."""
     def __init__(self, children: List[Widget]) -> None: ...
 
+class Sidebar(Widget):
+    """Sections down the left, the open one beside it. Picking an item calls
+    `calls` with its `key` merged into `args`; answer with that item `selected`
+    and its section as `body`. Folding the list is the host's alone."""
+    def __init__(
+        self,
+        id: str,
+        items: List[tuple],
+        selected: str = ...,
+        calls: Optional[str] = ...,
+        capability: Optional[str] = ...,
+        method: Optional[str] = ...,
+        args: Optional[Dict[str, Any]] = ...,
+        body: Optional[List[Widget]] = ...,
+    ) -> None: ...
+
 class Chart(Widget):
     """A horizontal bar chart: `data` is a list of (label, value) pairs."""
     def __init__(self, title: Any, data: List[tuple[Any, float]]) -> None: ...

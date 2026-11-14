@@ -201,6 +201,17 @@ pub struct Invoke {
     pub confirm: Option<Confirm>,
 }
 
+/// One section in a [`Widget::Sidebar`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct SidebarItem {
+    /// What the module is told was picked.
+    pub key: String,
+    pub text: String,
+    /// Drawn quieter: a section that is there but has nothing to show yet.
+    #[serde(default)]
+    pub muted: bool,
+}
+
 /// One bar in a [`Widget::Chart`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChartBar {
@@ -406,6 +417,27 @@ pub enum Widget {
     Row {
         children: Vec<Widget>,
     },
+    /// A list of sections down the left, and the open section beside it.
+    ///
+    /// Picking a section calls `action` with that item's `key` merged into
+    /// `args`; the module answers with the same sidebar, that item `selected`,
+    /// and that section's `body`. The list can be folded away to give the body
+    /// its width — the host's alone, with no call made — and stays folded
+    /// across sections, remembered by `id`. See [`crate::sidebar`].
+    Sidebar {
+        id: String,
+        items: Vec<SidebarItem>,
+        #[serde(default)]
+        selected: String,
+        action: Action,
+        /// Extra params merged into every call (e.g. which host the sections
+        /// are about). `key` is added on top.
+        #[serde(default)]
+        args: serde_json::Map<String, Value>,
+        /// What the open section shows, drawn the way a screen is.
+        #[serde(default)]
+        body: Vec<Widget>,
+    },
     /// A table with a header row and string cells. Rows become interactive
     /// (right-click menu + double-click) when `menu` or `on_activate` is set.
     Table {
@@ -495,6 +527,22 @@ pub fn render_view(
     busy: Option<&Action>,
     reveal_at: f64,
 ) -> Option<Invoke> {
+    render_list(ui, &view.widgets, inputs, busy, reveal_at)
+}
+
+/// Draw a list of widgets the way a screen is drawn: arriving, leaving and
+/// entering as one.
+///
+/// A screen is one of these, and so is anything that holds a screenful of its
+/// own — a sidebar's open section — so that what changes inside it animates
+/// exactly as a screen's widgets do, keyed under the `Ui` it is drawn in.
+pub(crate) fn render_list(
+    ui: &mut egui::Ui,
+    widgets: &[Widget],
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+    reveal_at: f64,
+) -> Option<Invoke> {
     let mut clicked = None;
     let now = ui.input(|i| i.time);
 
@@ -502,7 +550,7 @@ pub fn render_view(
     // screen replaced wholesale restarts the entrance; a screen that has gained
     // or lost a widget animates that widget and leaves the rest alone. See
     // [`crate::flow`].
-    let flow = flow::flow(ui, ui.id(), &view.widgets);
+    let flow = flow::flow(ui, ui.id(), widgets);
     // Whichever entrance is newer: the tab's, or this screen's own.
     let reveal_at = reveal_at.max(flow.shown);
 
@@ -513,7 +561,7 @@ pub fn render_view(
     // then goes at the bottom of the screen rather than directly underneath,
     // which is where a row of buttons belongs when the thing above it is the
     // whole point of the screen.
-    let fills = view.widgets.iter().position(fills_the_screen);
+    let fills = widgets.iter().position(fills_the_screen);
 
     // The gap between widgets is taken over from the layout, so that a widget
     // on its way in or out can take its gap with it: left to the layout, a
@@ -530,7 +578,7 @@ pub fn render_view(
     for (place, step) in flow.steps.iter().enumerate() {
         let w = match (&step.ghost, step.at) {
             (Some(ghost), _) => ghost,
-            (None, Some(i)) => &view.widgets[i],
+            (None, Some(i)) => &widgets[i],
             (None, None) => continue,
         };
         let grow = step.grow.clamp(0.0, 1.0);
@@ -545,7 +593,7 @@ pub fn render_view(
             render_filling(
                 ui,
                 w,
-                &view.widgets[i + 1..],
+                &widgets[i + 1..],
                 inputs,
                 busy,
                 &mut clicked,
@@ -1017,6 +1065,7 @@ pub fn render_widget(
         Widget::Chrome { children } => {
             render_widgets(ui, children, inputs, busy, clicked);
         }
+        Widget::Sidebar { .. } => crate::sidebar::render(ui, widget, inputs, busy, clicked),
         Widget::Row { children } => {
             // A row of many things — a strip of category buttons, a long list of
             // actions — is wider than the window before anybody notices, and the
@@ -1338,6 +1387,7 @@ pub fn widget_ids(view: &View) -> Vec<String> {
                 | Widget::DateField { id, .. }
                 | Widget::Checkbox { id, .. } => out.push(id.clone()),
                 Widget::Row { children } | Widget::Chrome { children } => walk(children, out),
+                Widget::Sidebar { body, .. } => walk(body, out),
                 _ => {}
             }
         }
@@ -1369,6 +1419,7 @@ pub fn collect_ids(
             Widget::Row { children } | Widget::Chrome { children } => {
                 collect_ids(children, inputs, map)
             }
+            Widget::Sidebar { body, .. } => collect_ids(body, inputs, map),
             _ => {}
         }
     }

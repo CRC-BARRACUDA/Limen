@@ -111,6 +111,62 @@ pub fn chrome(children: Vec<Widget>) -> Widget {
     Widget::of_kind("chrome").set("children", Value::Array(kids))
 }
 
+/// One section of a [`sidebar`]: what the module is told was picked, and what
+/// the list says.
+#[derive(Debug, Clone)]
+pub struct SidebarItem {
+    key: String,
+    text: String,
+    muted: bool,
+}
+
+impl SidebarItem {
+    /// Drawn quieter: a section that is there but has nothing to show yet.
+    pub fn muted(mut self) -> Self {
+        self.muted = true;
+        self
+    }
+}
+
+/// One section of a [`sidebar`].
+pub fn sidebar_item(key: impl Into<String>, text: impl Into<String>) -> SidebarItem {
+    SidebarItem {
+        key: key.into(),
+        text: text.into(),
+        muted: false,
+    }
+}
+
+/// A list of sections down the left, and the open section beside it.
+///
+/// Picking a section calls `capability`/`method` with the item's `key` merged
+/// into the args (add your own with `.args(..)` — which host, say). Answer with
+/// the same sidebar, that item `selected`, and that section as `body`: the list
+/// stays where it is and only the section changes.
+///
+/// The user can fold the list away; that is the host's alone, and it is
+/// remembered by `id`, so it stays folded while the sections change.
+pub fn sidebar(
+    id: impl Into<String>,
+    capability: impl Into<String>,
+    method: impl Into<String>,
+    items: Vec<SidebarItem>,
+    selected: impl Into<String>,
+    body: Vec<Widget>,
+) -> Widget {
+    let items: Vec<Value> = items
+        .into_iter()
+        .map(|i| json!({ "key": i.key, "text": i.text, "muted": i.muted }))
+        .collect();
+    let body: Vec<Value> = body.into_iter().map(Widget::into_value).collect();
+    Widget::of_kind("sidebar")
+        .set("id", json!(id.into()))
+        .set("items", Value::Array(items))
+        .set("selected", json!(selected.into()))
+        .set("action", json!({ "capability": capability.into(), "method": method.into() }))
+        .set("body", Value::Array(body))
+}
+
 pub fn row(children: Vec<Widget>) -> Widget {
     let kids: Vec<Value> = children.into_iter().map(Widget::into_value).collect();
     Widget::of_kind("row").set("children", Value::Array(kids))
