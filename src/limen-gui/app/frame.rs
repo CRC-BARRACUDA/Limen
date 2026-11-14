@@ -709,18 +709,28 @@ impl eframe::App for LimenApp {
                             &mut show_panic,
                         ),
                         Some(Tab::Detail { id }) => detail_view(ui, id, detail_tabs, &mut action),
-                        Some(Tab::Settings) => settings_view(
-                            ui,
-                            ui_scale,
-                            &mut scale_changed,
-                            animations,
-                            &mut anim_changed,
-                            alerts,
-                            &mut alerts_changed,
-                            language,
-                            &mut lang_changed,
-                            settings_reveal,
-                        ),
+                        // Scrolls, as every page that can outgrow the window
+                        // does: its last sections fall below the fold on a
+                        // short window, or at a large UI scale.
+                        Some(Tab::Settings) => {
+                            egui::ScrollArea::vertical()
+                                .id_source("settings_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    settings_view(
+                                        ui,
+                                        ui_scale,
+                                        &mut scale_changed,
+                                        animations,
+                                        &mut anim_changed,
+                                        alerts,
+                                        &mut alerts_changed,
+                                        language,
+                                        &mut lang_changed,
+                                        settings_reveal,
+                                    )
+                                });
+                        }
                         Some(Tab::Developer) => developer_view(
                             ui,
                             dev_tab,
