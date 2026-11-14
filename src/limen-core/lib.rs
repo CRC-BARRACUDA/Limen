@@ -13,6 +13,7 @@ pub mod account;
 pub mod avatar;
 pub mod config;
 pub mod engine;
+pub mod environment;
 pub mod net;
 pub mod paths;
 pub mod setup;

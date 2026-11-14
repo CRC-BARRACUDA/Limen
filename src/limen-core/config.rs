@@ -75,7 +75,8 @@ pub struct Config {
     pub github_token: Option<String>,
 
     /// The platform's API root to sign in to (`https://auth…/api`). Absent =
-    /// [`crate::account::DEFAULT_PLATFORM_URL`]. `LIMEN_PLATFORM_URL` wins.
+    /// this build's [environment](crate::environment) — local for a debug
+    /// build, production for a release one. `LIMEN_PLATFORM_URL` wins.
     #[serde(default)]
     pub platform_url: Option<String>,
 
@@ -91,12 +92,12 @@ pub struct Config {
     pub account: Option<crate::account::Account>,
 
     /// The Avatar Decoration service's API. Absent =
-    /// [`crate::avatar::DEFAULT_AVATAR_API`]. `LIMEN_AVATAR_URL` wins.
+    /// this build's [environment](crate::environment). `LIMEN_AVATAR_URL` wins.
     #[serde(default)]
     pub avatar_url: Option<String>,
 
     /// The files host avatars and frames are served from. Absent =
-    /// [`crate::avatar::DEFAULT_ASSET_BASE`]. `LIMEN_AVATAR_ASSET_BASE` wins.
+    /// this build's [environment](crate::environment). `LIMEN_AVATAR_ASSET_BASE` wins.
     #[serde(default)]
     pub avatar_asset_base: Option<String>,
 

@@ -282,7 +282,27 @@ fn the_platform_comes_from_the_settings_and_needs_a_client() {
     assert_eq!(Platform::from_config(&cfg), None, "no client id: signing in is off");
     cfg.platform_client_id = Some(" abc ".into());
     let p = Platform::from_config(&cfg).unwrap();
-    assert_eq!((p.api_url.as_str(), p.client_id.as_str()), (DEFAULT_PLATFORM_URL, "abc"));
+    assert_eq!(
+        (p.api_url.as_str(), p.client_id.as_str()),
+        (limen_core::environment::current().auth_api, "abc"),
+        "this build's platform"
+    );
     cfg.platform_url = Some("https://auth.example/api/".into());
     assert_eq!(Platform::from_config(&cfg).unwrap().api_url, "https://auth.example/api");
+}
+
+#[test]
+fn a_debug_build_talks_to_local_and_a_release_build_to_production() {
+    use limen_core::environment::{self, for_build, LOCAL, PRODUCTION};
+    assert_eq!(for_build(true), &LOCAL);
+    assert_eq!(for_build(false), &PRODUCTION);
+    assert_eq!(environment::current(), for_build(cfg!(debug_assertions)));
+    assert_eq!(PRODUCTION.auth_api, "https://auth.barracuda-team.tech/api");
+    // Each environment's services are its own: no mixing hosts.
+    for e in [environment::LOCAL, environment::DEV, environment::PRODUCTION] {
+        let host = |u: &str| url::Url::parse(u).unwrap().host_str().unwrap().to_string();
+        let suffix = host(e.auth_api).trim_start_matches("auth").to_string();
+        assert!(host(e.avatar_api).ends_with(&suffix) && host(e.asset_base).ends_with(&suffix), "{}", e.name);
+        assert!(e.asset_base.ends_with('/'), "a files base is a directory: {}", e.name);
+    }
 }

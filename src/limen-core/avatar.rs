@@ -19,10 +19,6 @@ use serde_json::Value;
 
 use crate::Config;
 
-/// The Avatar Decoration service's API, until one is configured.
-pub const DEFAULT_AVATAR_API: &str = "https://avatar.local.barracuda-team.tech:3443/api";
-/// The files host the pictures live on, until one is configured.
-pub const DEFAULT_ASSET_BASE: &str = "https://files.local.barracuda-team.tech:3443/avatar-decorations/";
 
 /// The only schema version understood. Anything else draws a plain avatar.
 pub const CURRENT_SCHEMA: i64 = 1;
@@ -377,8 +373,10 @@ impl AvatarService {
                 .unwrap_or_else(|| default.to_string())
         };
         Self {
-            api_url: pick("LIMEN_AVATAR_URL", &cfg.avatar_url, DEFAULT_AVATAR_API).trim_end_matches('/').to_string(),
-            asset_base: pick("LIMEN_AVATAR_ASSET_BASE", &cfg.avatar_asset_base, DEFAULT_ASSET_BASE),
+            api_url: pick("LIMEN_AVATAR_URL", &cfg.avatar_url, crate::environment::current().avatar_api)
+                .trim_end_matches('/')
+                .to_string(),
+            asset_base: pick("LIMEN_AVATAR_ASSET_BASE", &cfg.avatar_asset_base, crate::environment::current().asset_base),
         }
     }
 }

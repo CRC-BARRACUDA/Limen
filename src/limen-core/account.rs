@@ -32,8 +32,6 @@ use sha2::{Digest, Sha256};
 
 use crate::Config;
 
-/// The platform's API, until one is configured.
-pub const DEFAULT_PLATFORM_URL: &str = "https://auth.local.barracuda-team.tech:3443/api";
 
 /// What Limen asks for: who the user is.
 pub const SCOPES: &str = "openid profile email";
@@ -62,7 +60,7 @@ impl Platform {
         let env = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         let api_url = env("LIMEN_PLATFORM_URL")
             .or_else(|| cfg.platform_url.clone().filter(|v| !v.trim().is_empty()))
-            .unwrap_or_else(|| DEFAULT_PLATFORM_URL.to_string());
+            .unwrap_or_else(|| crate::environment::current().auth_api.to_string());
         let client_id = env("LIMEN_PLATFORM_CLIENT_ID")
             .or_else(|| cfg.platform_client_id.clone().filter(|v| !v.trim().is_empty()))?;
         Some(Self { api_url: api_url.trim().trim_end_matches('/').to_string(), client_id: client_id.trim().to_string() })
