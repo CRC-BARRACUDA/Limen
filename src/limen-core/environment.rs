@@ -17,6 +17,10 @@ pub struct Environment {
     pub avatar_api: &'static str,
     /// The files host avatars and frames are served from.
     pub asset_base: &'static str,
+    /// Limen's public OAuth2 client id there, when Limen is registered with
+    /// it. A public client's id is not a secret, so it is built in; `None`
+    /// means it has to come from settings.json or `LIMEN_PLATFORM_CLIENT_ID`.
+    pub client_id: Option<&'static str>,
 }
 
 /// The platform on a developer's own machine.
@@ -25,6 +29,8 @@ pub const LOCAL: Environment = Environment {
     auth_api: "https://auth.local.barracuda-team.tech:3443/api",
     avatar_api: "https://avatar.local.barracuda-team.tech:3443/api",
     asset_base: "https://files.local.barracuda-team.tech:3443/avatar-decorations/",
+    // Each developer registers their own local client.
+    client_id: None,
 };
 
 /// The shared dev deployment.
@@ -33,6 +39,7 @@ pub const DEV: Environment = Environment {
     auth_api: "https://auth-dev.barracuda-team.tech/api",
     avatar_api: "https://avatar-dev.barracuda-team.tech/api",
     asset_base: "https://files-dev.barracuda-team.tech/avatar-decorations/",
+    client_id: None,
 };
 
 /// Production.
@@ -41,6 +48,7 @@ pub const PRODUCTION: Environment = Environment {
     auth_api: "https://auth.barracuda-team.tech/api",
     avatar_api: "https://avatar.barracuda-team.tech/api",
     asset_base: "https://files.barracuda-team.tech/avatar-decorations/",
+    client_id: Some("szkyo06i69uinrmr"),
 };
 
 /// The environment a build of this kind talks to: local when built for
@@ -56,4 +64,10 @@ pub const fn for_build(debug: bool) -> &'static Environment {
 /// This build's.
 pub fn current() -> &'static Environment {
     for_build(cfg!(debug_assertions))
+}
+
+/// The known environment whose auth API is `api_url` (a trailing `/` aside).
+pub fn by_auth_api(api_url: &str) -> Option<&'static Environment> {
+    let api_url = api_url.trim().trim_end_matches('/');
+    [&LOCAL, &DEV, &PRODUCTION].into_iter().find(|e| e.auth_api == api_url)
 }

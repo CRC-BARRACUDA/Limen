@@ -2,12 +2,20 @@
 //!
 //! Everything has a sensible default, so the file is optional. Only fields the
 //! user changes need to be present.
+//!
+//! The file says which version of Limen last wrote it (`version`). When that
+//! is not this version — Limen was updated, or the file predates the field —
+//! [`Config::load`] fills in every field the file lacks with its default and
+//! writes the file back once, so the user can see (and edit) what the new
+//! version reads. Values already there are kept as they are, and so are keys
+//! this version does not know.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::paths;
 
@@ -17,6 +25,10 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// The version of Limen that last wrote this file. Set on every save.
+    #[serde(default)]
+    pub version: Option<String>,
+
     /// Extra directories to search for modules, in addition to the default
     /// `~/.limen/modules`. Each entry may be a modules root (containing module
     /// subdirectories) or a single module directory.
@@ -80,7 +92,8 @@ pub struct Config {
     #[serde(default)]
     pub platform_url: Option<String>,
 
-    /// Limen's public OAuth2 client id on the platform. Absent = signing in is
+    /// Limen's public OAuth2 client id on the platform. Absent = the one built
+    /// in for that platform (production has one); with none, signing in is
     /// off. `LIMEN_PLATFORM_CLIENT_ID` wins.
     #[serde(default)]
     pub platform_client_id: Option<String>,
@@ -110,6 +123,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: None,
             module_dirs: Vec::new(),
             default_org: None,
             ui_scale_percent: 0,
@@ -132,8 +146,42 @@ impl Default for Config {
 /// The org used when none is configured.
 pub const DEFAULT_ORG: &str = "CRC-BARRACUDA";
 
+/// This build's version, as the settings file records it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// When `raw` was written by another version, add each field it lacks, with
+/// the value `cfg` (what it loaded as) has for it — its default — and stamp it
+/// with this version. Present keys, known or not, are left alone. Whether
+/// anything changed.
+fn upgrade(raw: &mut Value, cfg: &Config) -> Result<bool> {
+    let Some(file) = raw.as_object_mut() else {
+        return Ok(false);
+    };
+    if file.get("version").and_then(Value::as_str) == Some(VERSION) {
+        return Ok(false);
+    }
+    if let Value::Object(full) = serde_json::to_value(cfg)? {
+        for (key, value) in full {
+            file.entry(key).or_insert(value);
+        }
+    }
+    file.insert("version".into(), Value::from(VERSION));
+    Ok(true)
+}
+
+fn write(raw: &Value) -> Result<()> {
+    let path = paths::settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(raw)?;
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+}
+
 impl Config {
-    /// Load settings, or defaults if the file is absent.
+    /// Load settings, or defaults if the file is absent. The first load after
+    /// an update fills in the fields the file lacks and writes it back.
     pub fn load() -> Result<Self> {
         let path = paths::settings_path();
         if !path.exists() {
@@ -141,18 +189,23 @@ impl Config {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut raw: Value =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let cfg: Self =
+            serde_json::from_value(raw.clone()).with_context(|| format!("parsing {}", path.display()))?;
+        if upgrade(&mut raw, &cfg)? {
+            // Settings that load but cannot be written back are still settings.
+            let _ = write(&raw);
+        }
+        Ok(cfg)
     }
 
-    /// Write settings back to `~/.limen/settings.json`.
+    /// Write settings back to `~/.limen/settings.json`, stamped with this
+    /// version.
     pub fn save(&self) -> Result<()> {
-        let path = paths::settings_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+        let mut raw = serde_json::to_value(self)?;
+        raw["version"] = Value::from(VERSION);
+        write(&raw)
     }
 
     /// The directories to search for modules: the default modules dir first,

@@ -54,16 +54,21 @@ pub struct Platform {
 
 impl Platform {
     /// From the settings, with `LIMEN_PLATFORM_URL` and
-    /// `LIMEN_PLATFORM_CLIENT_ID` in the environment taking precedence. `None`
-    /// when no client id is set anywhere: there is nothing to sign in as.
+    /// `LIMEN_PLATFORM_CLIENT_ID` in the environment taking precedence. With
+    /// no client id set, the one built in for that platform (production's);
+    /// `None` when there is none of those either: nothing to sign in as.
     pub fn from_config(cfg: &Config) -> Option<Self> {
         let env = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         let api_url = env("LIMEN_PLATFORM_URL")
             .or_else(|| cfg.platform_url.clone().filter(|v| !v.trim().is_empty()))
             .unwrap_or_else(|| crate::environment::current().auth_api.to_string());
+        let api_url = api_url.trim().trim_end_matches('/').to_string();
+        // A built-in id belongs to its own platform only: pointed at another,
+        // Limen needs that platform's id.
         let client_id = env("LIMEN_PLATFORM_CLIENT_ID")
-            .or_else(|| cfg.platform_client_id.clone().filter(|v| !v.trim().is_empty()))?;
-        Some(Self { api_url: api_url.trim().trim_end_matches('/').to_string(), client_id: client_id.trim().to_string() })
+            .or_else(|| cfg.platform_client_id.clone().filter(|v| !v.trim().is_empty()))
+            .or_else(|| crate::environment::by_auth_api(&api_url)?.client_id.map(str::to_string))?;
+        Some(Self { api_url, client_id: client_id.trim().to_string() })
     }
 
     fn endpoint(&self, path: &str) -> String {
