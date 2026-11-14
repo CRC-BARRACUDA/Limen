@@ -499,6 +499,17 @@ _CURRENT_CAPABILITY = [""]
 # Host bridge — call other modules, emit/subscribe events, log.
 # --------------------------------------------------------------------------- #
 
+# Limen's vault answers with these while it cannot: locked, or not made yet.
+VAULT_LOCKED = -32006
+VAULT_MISSING = -32007
+
+
+class VaultLocked(RuntimeError):
+    """Limen's vault is locked, or there is none yet. The user is being asked to
+    unlock (or create) it; the call can be made again once they have. A
+    RuntimeError, so code that catches those still does."""
+
+
 class Host:
     def __init__(self, module):
         self._m = module
@@ -590,6 +601,26 @@ class Host:
 
     def log(self, message):
         self._m._request("host.log", str(message))
+
+    # Limen's vault: this module's own compartment. Needs the `secrets`
+    # permission. While the vault is locked (or not made yet) these raise
+    # VaultLocked — the user is being asked to unlock it; try again after.
+
+    def secret_get(self, name):
+        """A secret by name, or None when there is none."""
+        return self._m._request("host.secret_get", {"name": str(name)})
+
+    def secret_set(self, name, value):
+        """Keep a secret, replacing any of that name."""
+        self._m._request("host.secret_set", {"name": str(name), "value": str(value)})
+
+    def secret_delete(self, name):
+        """Remove a secret; whether there was one."""
+        return bool(self._m._request("host.secret_delete", {"name": str(name)}))
+
+    def secret_names(self):
+        """The names (never the values) in this module's compartment."""
+        return self._m._request("host.secret_names", None) or []
 
 
 # --------------------------------------------------------------------------- #
@@ -767,7 +798,10 @@ class Module:
                 raise RuntimeError("host closed the connection")
             if "method" not in msg and msg.get("id") == rid:
                 if msg.get("error"):
-                    raise RuntimeError(msg["error"]["message"])
+                    err = msg["error"]
+                    if err.get("code") in (VAULT_LOCKED, VAULT_MISSING):
+                        raise VaultLocked(err["message"])
+                    raise RuntimeError(err["message"])
                 return msg.get("result")
             # Anything else arriving mid-call (an event, or a request from the
             # host) is dispatched now so we stay responsive and deadlock-free.

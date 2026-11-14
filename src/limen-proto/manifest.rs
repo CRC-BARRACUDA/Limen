@@ -216,6 +216,11 @@ pub struct Permissions {
     /// cannot reach for it without having said so where the user can read it.
     #[serde(default)]
     pub elevate: bool,
+    /// May keep secrets — tokens, passwords — in Limen's vault, through
+    /// `host.secret_*`. Each module has a compartment of its own and reaches
+    /// nothing else; the host refuses the calls unless this is set.
+    #[serde(default)]
+    pub secrets: bool,
 }
 
 impl Permissions {
@@ -223,6 +228,7 @@ impl Permissions {
     pub fn sensitive(&self) -> bool {
         self.admin
             || self.elevate
+            || self.secrets
             || self.run_hosts
             || self.subprocess
             || !self.elevated_methods.is_empty()
@@ -253,6 +259,9 @@ impl Permissions {
             // Worded so it reads as what it is on the consent screen: the module
             // does not become root, it asks the OS to run something as root.
             out.push("run commands as administrator".to_string());
+        }
+        if self.secrets {
+            out.push("keep secrets in Limen's vault".to_string());
         }
         if !self.network.is_empty() {
             out.push(format!("network: {}", self.network.join(", ")));
