@@ -9,8 +9,10 @@
 //! Like v1, there is **no required config file**: defaults work out of the box,
 //! and `~/.limen/settings.json` only holds what the user changes.
 
+pub mod account;
 pub mod config;
 pub mod engine;
+pub mod net;
 pub mod paths;
 pub mod setup;
 pub mod update;

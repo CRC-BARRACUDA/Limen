@@ -29,6 +29,11 @@ semver = "1"
 libloading = "0.8"
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
+# Signing in to the platform (limen-core/account.rs): the OS's random source for
+# PKCE, query strings, and the OS keychain for the refresh token.
+getrandom = "0.3"
+url = "2"
+keyring = "4"
 eframe = "0.28"
 limen-proto = { path = "src/limen-proto" }
 limen-host = { path = "src/limen-host" }

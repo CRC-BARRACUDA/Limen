@@ -73,6 +73,22 @@ pub struct Config {
     /// unauthenticated (the default). Only a read/public-repo scope is needed.
     #[serde(default)]
     pub github_token: Option<String>,
+
+    /// The platform's API root to sign in to (`https://auth…/api`). Absent =
+    /// [`crate::account::DEFAULT_PLATFORM_URL`]. `LIMEN_PLATFORM_URL` wins.
+    #[serde(default)]
+    pub platform_url: Option<String>,
+
+    /// Limen's public OAuth2 client id on the platform. Absent = signing in is
+    /// off. `LIMEN_PLATFORM_CLIENT_ID` wins.
+    #[serde(default)]
+    pub platform_client_id: Option<String>,
+
+    /// Who is signed in, as the platform last said — shown at once on start,
+    /// before the session is checked. Not a secret: the refresh token is in the
+    /// OS keychain, never here.
+    #[serde(default)]
+    pub account: Option<crate::account::Account>,
 }
 
 impl Default for Config {
@@ -87,6 +103,9 @@ impl Default for Config {
             favorites: Vec::new(),
             categories: BTreeMap::new(),
             github_token: None,
+            platform_url: None,
+            platform_client_id: None,
+            account: None,
         }
     }
 }
