@@ -89,6 +89,8 @@ mod markdown;
 mod menu;
 mod overlay;
 mod rows;
+pub mod avatar;
+pub mod user_card;
 mod sidebar;
 mod terminal;
 mod commander;
