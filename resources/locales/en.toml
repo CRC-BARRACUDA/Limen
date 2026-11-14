@@ -237,3 +237,16 @@ delete_title = "Delete {n} item(s) from {from}?"
 copy = "Copy"
 delete = "Delete"
 cancel = "Cancel"
+
+# The account in the title bar: signing in to the Barracuda platform.
+[account]
+sign_in = "Sign in"
+waiting = "Finish signing in in your browser…"
+cancel_hint = "Click to cancel."
+not_remembered = "No system keychain is available, so you will have to sign in again next time."
+unreachable = "Could not reach the platform to check the session: {why}"
+sign_out = "Sign out"
+sign_out_title = "Sign out of the platform?"
+stay = "Stay signed in"
+you = "You"
+settings_link = "Account settings"

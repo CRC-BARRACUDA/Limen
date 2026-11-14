@@ -27,6 +27,7 @@ use crate::worker::{Command, Event, RunTag, Worker};
 // The shell is one module but not one file. Each of these is a piece of it;
 // the re-exports keep every name reachable from where it was, so splitting
 // the file moved code and nothing else.
+mod account;
 mod brand;
 mod dialogs;
 // Nothing to re-export: it holds the `eframe::App` impl and no names of its
@@ -241,6 +242,8 @@ pub struct LimenApp {
     pub(crate) update: Option<limen_core::UpdateInfo>,
     /// True while an update download/install is in flight.
     pub(crate) updating: bool,
+    /// Signing in to the platform, and who is signed in.
+    pub(crate) account: account::AccountUi,
     /// A portable interpreter currently being installed (e.g. "Python"), if any.
     pub(crate) installing_runtime: Option<String>,
     /// Startup splash: the frame time it first rendered (set lazily on the first
@@ -399,6 +402,7 @@ impl LimenApp {
             removing: HashMap::new(),
             update: None,
             updating: false,
+            account: account::AccountUi::new(&cc.egui_ctx),
             installing_runtime: None,
             splash_start: None,
             splash_done: false,

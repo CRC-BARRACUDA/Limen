@@ -48,6 +48,7 @@ impl eframe::App for LimenApp {
         let now_t = ctx.input(|i| i.time);
         self.drain_events(now_t);
         self.drain_file_picks();
+        self.account.poll();
         // A polling chain that asked for a pause between its steps: take the
         // next step when it is due, and ask to be drawn again when it is.
         // Without the pause the chain asks as fast as the module can answer,
@@ -153,6 +154,7 @@ impl eframe::App for LimenApp {
         let mut anim_changed = false;
         let mut alerts_changed = false;
         let mut lang_changed = false;
+        let mut account_action: Option<account::AccountAction> = None;
         let mut dev_applied = false;
 
         // Custom-decoration resize grips along the window edges/corners.
@@ -280,6 +282,16 @@ impl eframe::App for LimenApp {
                             .clicked()
                         {
                             open_tab = Some(Tab::Settings);
+                        }
+                        // The account, left of the gear: as the website's header.
+                        if !matches!(
+                            self.account.state,
+                            account::AccountState::Off | account::AccountState::Restoring { who: None }
+                        ) {
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            account::account_chip(ui, &self.account, &mut account_action);
                         }
                     });
                 });
@@ -801,6 +813,9 @@ impl eframe::App for LimenApp {
             ui::toast::set_enabled(self.alerts);
             self.save_alerts();
         }
+        if let Some(a) = account_action {
+            self.account.act(a);
+        }
         if lang_changed {
             self.save_language();
             // Re-play the current page's staggered entrance so it animates into
@@ -1081,6 +1096,7 @@ impl eframe::App for LimenApp {
         // "open" has no shut frame to come from: it arrives at full strength,
         // having asked for none of the repaints that would have carried it in.
         {
+            self.account.sign_out_dialog(ctx, self.content_rect);
             let open = self.pending_confirm.is_some();
             if open {
                 self.confirm_showing = self.pending_confirm.clone();
