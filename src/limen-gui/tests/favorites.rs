@@ -5,6 +5,11 @@ use std::collections::HashSet;
 use limen_core::{Launch, ModuleSpec};
 use limen_gui::app::*;
 
+/// The chosen language is one global, and several tests here set it while one
+/// reads it: they take turns, or a test expecting English can be handed
+/// Ukrainian by another running beside it.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The engine's order, as the list would receive it.
 fn installed(names: &[&str]) -> Vec<ModuleSpec> {
     names
@@ -93,8 +98,7 @@ fn a_star_for_a_module_that_is_not_installed_is_ignored() {
 /// chip that reads "Favourites" and one that reads "modules.filter.favorites".
 #[test]
 fn the_favorites_strings_are_translated() {
-    // Each test file is its own binary, so the locale global is this process's
-    // alone — no lock needed, unlike the i18n tests where several cases share one.
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     use limen_gui::i18n::*;
     for lang in [Lang::En, Lang::Uk] {
         set_locale(lang);
@@ -186,6 +190,7 @@ fn a_category_naming_an_uninstalled_module_shows_only_what_is_there() {
 /// Both languages name every category string.
 #[test]
 fn the_category_strings_are_translated() {
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     use limen_gui::i18n::*;
     for lang in [Lang::En, Lang::Uk] {
         set_locale(lang);
@@ -207,6 +212,7 @@ fn the_category_strings_are_translated() {
 /// nav chip reading "Categories" and one reading "nav.categories".
 #[test]
 fn the_categories_page_strings_are_translated() {
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     use limen_gui::i18n::*;
     for lang in [Lang::En, Lang::Uk] {
         set_locale(lang);
@@ -235,6 +241,7 @@ fn the_categories_page_strings_are_translated() {
 /// The Categories tab titles itself from the catalog like every other tab.
 #[test]
 fn the_categories_tab_is_titled() {
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     use limen_gui::i18n::*;
     set_locale(Lang::En);
     assert_eq!(Tab::Categories.title(), "Categories");
