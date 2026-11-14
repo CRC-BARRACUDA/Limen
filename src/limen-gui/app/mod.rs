@@ -27,6 +27,8 @@ use crate::worker::{Command, Event, RunTag, Worker};
 // The shell is one module but not one file. Each of these is a piece of it;
 // the re-exports keep every name reachable from where it was, so splitting
 // the file moved code and nothing else.
+mod account;
+mod vault;
 mod brand;
 mod dialogs;
 // Nothing to re-export: it holds the `eframe::App` impl and no names of its
@@ -80,6 +82,8 @@ pub struct LimenApp {
     /// `None` while the tab is not on screen, which is what replays the entrance
     /// on every return rather than only the first.
     pub(crate) categories_revealed_at: Option<f64>,
+    /// When the Vault page was shown, for its entrance.
+    pub(crate) vault_revealed_at: Option<f64>,
     /// The consent dialog still on screen, which outlives `pending_action` by
     /// the length of its closing animation.
     pub(crate) consent_showing: Option<ui::Invoke>,
@@ -101,7 +105,9 @@ pub struct LimenApp {
     /// building and parsing a screen instead of drawing one or noticing a
     /// click. A module that knows its job is long says how often it wants to
     /// be asked; see [`ui::AutoAction::every_ms`].
-    pub(crate) due_auto: Option<(ui::Invoke, std::time::Instant)>,
+    ///
+    /// It belongs to the tab that asked; see [`take_due`].
+    pub(crate) due_auto: Option<PendingStep>,
     /// A module action waiting on the question its button carried, and the one
     /// still fading out — the same pair as the consent dialog, for the same
     /// reason: an answered question has to keep drawing while it leaves.
@@ -175,8 +181,12 @@ pub struct LimenApp {
     pub(crate) dev_limen_path: String,
     pub(crate) dev_modules_path: String,
 
-    /// Global UI scale as a percentage (persisted in settings).
+    /// Global UI scale as a percentage (persisted in settings) — the one that
+    /// was *chosen*, which the Settings chips show as selected.
     pub(crate) ui_scale: f32,
+    /// The scale actually in force, on its way to `ui_scale`: the window grows
+    /// into a new size rather than snapping to it.
+    pub(crate) zoom: ui::Glide,
 
     /// Whether UI animations are enabled (persisted in settings).
     pub(crate) animations: bool,
@@ -185,6 +195,12 @@ pub struct LimenApp {
 
     /// The active UI language (persisted in settings; mirrors `i18n`'s global).
     pub(crate) language: i18n::Lang,
+
+    /// Which page the content area is showing, and since when — drives the
+    /// transition a page plays when it arrives. Distinct from the per-page
+    /// reveal timers below: this one is about the *swap*, those about the items
+    /// inside the page that lands.
+    pub(crate) page_at: Option<(Tab, f64)>,
 
     /// When the About tab was last shown — drives its staggered content reveal.
     pub(crate) about_revealed_at: Option<f64>,
@@ -229,6 +245,10 @@ pub struct LimenApp {
     pub(crate) update: Option<limen_core::UpdateInfo>,
     /// True while an update download/install is in flight.
     pub(crate) updating: bool,
+    /// Signing in to the platform, and who is signed in.
+    pub(crate) account: account::AccountUi,
+    /// Limen's vault: secrets for Limen and its modules.
+    pub(crate) vault: vault::VaultUi,
     /// A portable interpreter currently being installed (e.g. "Python"), if any.
     pub(crate) installing_runtime: Option<String>,
     /// Startup splash: the frame time it first rendered (set lazily on the first
@@ -288,6 +308,14 @@ impl LimenApp {
         limen_registry::set_github_token(
             limen_core::Config::load().ok().and_then(|c| c.github_token),
         );
+        // The saved scale, as a percentage. Nothing saved (or a zero left by an
+        // older settings file) means the unscaled 100%.
+        let ui_scale = {
+            let pct = limen_core::Config::load()
+                .map(|c| c.ui_scale_percent)
+                .unwrap_or(0);
+            if pct == 0 { 100.0 } else { pct as f32 }
+        };
         Self {
             worker: Worker::spawn(dirs),
             status: "starting modules…".to_string(),
@@ -312,6 +340,7 @@ impl LimenApp {
             category_filter: None,
             new_category: String::new(),
             categories_revealed_at: None,
+            vault_revealed_at: None,
             pending_action: None,
             pending_remove: None,
             confirm_subject: None,
@@ -354,15 +383,14 @@ impl LimenApp {
             dev_mode_on: false,
             dev_limen_path: String::new(),
             dev_modules_path: String::new(),
-            ui_scale: {
-                let pct = limen_core::Config::load()
-                    .map(|c| c.ui_scale_percent)
-                    .unwrap_or(0);
-                if pct == 0 { 100.0 } else { pct as f32 }
-            },
+            ui_scale,
+            // Resting at the saved scale: the first frame is drawn at the size
+            // the application was left at, not zoomed into it.
+            zoom: ui::Glide::resting(ui_scale),
             animations,
             alerts,
             language,
+            page_at: None,
             about_revealed_at: None,
             settings_revealed_at: None,
             developer_revealed_at: None,
@@ -380,6 +408,8 @@ impl LimenApp {
             removing: HashMap::new(),
             update: None,
             updating: false,
+            account: account::AccountUi::new(&cc.egui_ctx),
+            vault: vault::VaultUi::new(&cc.egui_ctx),
             installing_runtime: None,
             splash_start: None,
             splash_done: false,
@@ -426,6 +456,20 @@ impl LimenApp {
             Some(Tab::Module(name)) => {
                 self.restore_page(&name);
                 self.resume_page();
+            }
+            // A tab of its own that was polling something picks its loop up
+            // again, as a module tab does: its step was let go when it was left.
+            Some(Tab::Detail { id }) => {
+                self.restore_page("");
+                if let Some(a) = self
+                    .detail_tabs
+                    .get(&id)
+                    .and_then(|t| t.view.as_ref())
+                    .and_then(|v| v.auto.clone())
+                    && resumes(&a)
+                {
+                    self.chain(a);
+                }
             }
             // Not a module tab: leave the fields empty rather than showing the
             // last module's view behind a Settings page.
@@ -581,23 +625,25 @@ impl LimenApp {
             self.dispatch(invoke);
             return;
         }
-        self.due_auto = Some((
+        self.due_auto = Some(PendingStep {
+            tab: self.active_tab(),
             invoke,
-            std::time::Instant::now() + std::time::Duration::from_millis(wait),
-        ));
+            when: std::time::Instant::now() + std::time::Duration::from_millis(wait),
+        });
     }
 
     /// Whatever the chain is waiting to do, once it is time. Returns how long
     /// is left to wait, so the frame can ask to be drawn again then.
     pub(crate) fn due_now(&mut self) -> Option<std::time::Duration> {
-        let (_, when) = self.due_auto.as_ref()?;
-        let left = when.saturating_duration_since(std::time::Instant::now());
-        if !left.is_zero() {
-            return Some(left);
+        let active = self.active_tab();
+        match take_due(&mut self.due_auto, std::time::Instant::now(), active.as_ref()) {
+            Due::Wait(left) => Some(left),
+            Due::Run(invoke) => {
+                self.dispatch(invoke);
+                None
+            }
+            Due::Idle | Due::Dropped => None,
         }
-        let (invoke, _) = self.due_auto.take()?;
-        self.dispatch(invoke);
-        None
     }
 
     /// Pick up a chain the tab was in the middle of.
@@ -721,7 +767,9 @@ impl LimenApp {
     /// on screen is re-asked — otherwise the app sits in two languages at once
     /// until something happens to invoke it.
     pub(crate) fn save_language(&mut self) {
-        i18n::set_locale(self.language);
+        // Not `set_locale`: the change is played out on screen, the old text
+        // erased and the new text typed in its place.
+        i18n::switch_to(self.language);
         limen_proto::locale::set(self.language.code());
         if let Ok(mut cfg) = limen_core::Config::load() {
             cfg.language = Some(self.language.code().to_string());
@@ -731,6 +779,22 @@ impl LimenApp {
         // Tabs that are not on screen: drop what they were showing, so each is
         // rebuilt in the new language when it is next opened.
         self.module_pages.clear();
+
+        // Tabs of their own keep the screen they were given — unless it says how
+        // to ask for it again, in which case it is asked, in the new language.
+        // One that does not say is left as it is: it may be the answer to an
+        // action, and asking again would repeat the action.
+        for (id, redraw) in redraws(&self.detail_tabs) {
+            if let Some(tab) = self.detail_tabs.get_mut(&id) {
+                tab.busy = true;
+            }
+            self.worker.send(Command::Run {
+                tag: RunTag::Detail { id },
+                capability: redraw.capability,
+                method: redraw.method,
+                params: serde_json::Value::Object(redraw.args),
+            });
+        }
 
         // The tab on screen: ask its module for its view again. `ui` is a
         // module's landing screen, so this returns the user to it — a language
@@ -745,6 +809,22 @@ impl LimenApp {
             self.busy = false;
             self.busy_action = None;
             self.select_module(name);
+        }
+    }
+
+    /// The vault has just opened: a GitHub token still in the settings file
+    /// moves into it (and out of the file), and the registry uses the vault's.
+    pub(crate) fn adopt_github_token(&mut self) {
+        use crate::app::pages::GITHUB_TOKEN;
+        if let Ok(mut cfg) = limen_core::Config::load()
+            && let Some(t) = cfg.github_token.clone()
+            && self.vault.set_limen_secret(GITHUB_TOKEN, Some(&t))
+        {
+            cfg.github_token = None;
+            let _ = cfg.save();
+        }
+        if let Some(t) = self.vault.limen_secret(GITHUB_TOKEN) {
+            limen_registry::set_github_token(Some(t));
         }
     }
 
@@ -1028,6 +1108,10 @@ impl LimenApp {
                         self.status = "done".to_string();
                     }
                     RunTag::Detail { id } => {
+                        // The step a screen in this tab asks to be taken next.
+                        let mut next: Option<ui::AutoAction> = None;
+                        // Whether a screen (not a pop-up) landed in the tab.
+                        let mut landed = false;
                         // Fill the detail tab, if it's still open.
                         let Some(tab) = self.detail_tabs.get_mut(&id) else {
                             return;
@@ -1064,6 +1148,8 @@ impl LimenApp {
                                         if !view.title.is_empty() {
                                             tab.title = view.title.clone();
                                         }
+                                        next = view.auto.clone();
+                                        landed = true;
                                         tab.view = Some(view);
                                     }
                                 }
@@ -1077,6 +1163,27 @@ impl LimenApp {
                                 // detail tab keeps its own message.
                                 self.note_panic(&e);
                             }
+                        }
+                        // A screen in a tab of its own polls like any other:
+                        // without this, one that said "reading…, ask me again"
+                        // was never asked, and sat there until clicked. Only
+                        // while its tab is on screen — off screen, the loop
+                        // resumes when the tab is shown (see `show_tab`).
+                        let here = self.active_tab() == Some(Tab::Detail { id });
+                        // A screen arriving in the tab on screen closes the
+                        // pop-ups standing over it, as it does on a module's own
+                        // page (see `accept_view`): the pop-up was a form, and
+                        // this is its answer. Left open, a Save that worked
+                        // would leave the form it saved still on screen.
+                        if landed && here {
+                            for v in std::mem::take(&mut self.modal_stack) {
+                                self.forget_inputs(&v);
+                            }
+                        }
+                        if let Some(a) = next
+                            && here
+                        {
+                            self.chain(a);
                         }
                     }
                 },

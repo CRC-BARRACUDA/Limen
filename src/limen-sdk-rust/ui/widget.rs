@@ -80,6 +80,39 @@ impl Widget {
     pub fn password(self) -> Self {
         self.set("password", json!(true))
     }
+    /// A [`terminal`](super::terminal)'s transcript: what has been run and
+    /// printed, oldest first.
+    pub fn lines(self, text: impl Into<String>) -> Self {
+        self.set("lines", json!(text.into()))
+    }
+    /// A [`terminal`](super::terminal)'s prompt: `C:\Users>`, `/home $`.
+    pub fn prompt(self, prompt: impl Into<String>) -> Self {
+        self.set("prompt", json!(prompt.into()))
+    }
+    /// How many lines tall a [`terminal`](super::terminal) is.
+    pub fn rows(self, rows: u32) -> Self {
+        self.set("rows", json!(rows))
+    }
+    /// A [`commander`](super::commander)'s line under its panes.
+    pub fn status(self, text: impl Into<String>) -> Self {
+        self.set("status", json!(text.into()))
+    }
+    /// A [`terminal`](super::terminal) that takes the height left, down to the
+    /// bottom of the window.
+    pub fn fill(self) -> Self {
+        self.set("fill", json!(true))
+    }
+    /// A [`terminal`](super::terminal) running a command: no prompt until it
+    /// is done.
+    pub fn busy(self) -> Self {
+        self.set("busy", json!(true))
+    }
+    /// Make this text field read-only while the checkbox `checkbox` (its id) is
+    /// ticked — "get the address from DHCP" over the address box. Limen locks
+    /// and frees it as the box is clicked, without asking the module.
+    pub fn locked_by(self, checkbox: impl Into<String>) -> Self {
+        self.set("locked_by", json!(checkbox.into()))
+    }
 
     /// Draw the button, but do not let it be pressed.
     ///

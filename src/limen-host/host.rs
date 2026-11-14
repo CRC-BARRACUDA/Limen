@@ -179,6 +179,9 @@ impl Host {
             // module, so the check lives here rather than in the shared
             // dispatcher, which cannot tell who is calling.
             let may_elevate = spec.permissions.elevate;
+            // So is whether it may keep secrets in the vault — and which
+            // compartment is its own: `who`, never a name it gives.
+            let may_secrets = spec.permissions.secrets;
             // Elevation is the one thing here the user cannot watch happen: a
             // prompt they answered, a command they never saw, run as root. It
             // goes to the console so there is a record of what was asked for.
@@ -190,6 +193,9 @@ impl Host {
                 "host.can_elevate" => Ok(host_can_elevate()),
                 "host.elevate_status" => host_elevate_status(params),
                 "host.elevate_stop" => host_elevate_stop(params, &log, &who),
+                "host.secret_get" | "host.secret_set" | "host.secret_delete" | "host.secret_names" => {
+                    crate::secrets::host_secret(method, params, may_secrets, &log, &who)
+                }
                 _ => shared(method, params),
             })
         };

@@ -16,6 +16,16 @@ pub struct View {
     /// one.
     #[serde(default)]
     pub auto: Option<AutoAction>,
+    /// How to ask for this screen again as it stands — called when the language
+    /// changes, so that a screen in a tab of its own is drawn in the new one
+    /// rather than left in the old.
+    ///
+    /// Declared by the module rather than guessed by the host. The call that
+    /// produced a screen may have been an action — a refresh, a delete — and
+    /// repeating it to redraw would repeat what it did. A screen that does not
+    /// say keeps what it shows.
+    #[serde(default)]
+    pub redraw: Option<AutoAction>,
     /// A passing notice to raise when this view arrives — the module reporting
     /// what just happened, rather than finding room for it on the screen.
     ///
@@ -191,6 +201,55 @@ pub struct Invoke {
     pub confirm: Option<Confirm>,
 }
 
+/// One pane of a [`Widget::Commander`].
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CommanderPane {
+    /// What the pane shows: "This PC", a host's name.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub path: String,
+    /// Offer `..` — false at the top of a drive or of `/`.
+    #[serde(default)]
+    pub up: bool,
+    /// Being listed: no rows until it is.
+    #[serde(default)]
+    pub busy: bool,
+    /// Why it could not be listed.
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub entries: Vec<CommanderEntry>,
+    /// Where the cursor goes when the pane arrives at a new path: the folder
+    /// just come up out of, as Midnight Commander does. The top when empty.
+    #[serde(default)]
+    pub select: String,
+}
+
+/// One file or folder in a [`CommanderPane`].
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CommanderEntry {
+    pub name: String,
+    #[serde(default)]
+    pub dir: bool,
+    /// As it is to be shown: the module knows the units its users expect.
+    #[serde(default)]
+    pub size: String,
+    #[serde(default)]
+    pub modified: String,
+}
+
+/// One section in a [`Widget::Sidebar`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct SidebarItem {
+    /// What the module is told was picked.
+    pub key: String,
+    pub text: String,
+    /// Drawn quieter: a section that is there but has nothing to show yet.
+    #[serde(default)]
+    pub muted: bool,
+}
+
 /// One bar in a [`Widget::Chart`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChartBar {
@@ -261,6 +320,15 @@ pub enum Widget {
         /// cheaply: redraw its form, and nothing more.
         #[serde(default)]
         on_change: Option<AutoAction>,
+        /// The id of a checkbox on the same screen that, while ticked, makes this
+        /// field read-only — "get the address from DHCP" over the address box.
+        ///
+        /// Decided here rather than by the module, so the field locks and frees
+        /// as the box is clicked, with no round trip and no screen redrawn in
+        /// between. The field still shows its value, greyed; what to do with it
+        /// while locked is the module's to decide when the form is sent.
+        #[serde(default)]
+        locked_by: String,
     },
     /// A date, typed or picked off a calendar. Its value reaches the module in
     /// one canonical form whichever way it was given.
@@ -387,6 +455,70 @@ pub enum Widget {
     Row {
         children: Vec<Widget>,
     },
+    /// A list of sections down the left, and the open section beside it.
+    ///
+    /// Picking a section calls `action` with that item's `key` merged into
+    /// `args`; the module answers with the same sidebar, that item `selected`,
+    /// and that section's `body`. The list can be folded away to give the body
+    /// its width — the host's alone, with no call made — and stays folded
+    /// across sections, remembered by `id`. See [`crate::sidebar`].
+    Sidebar {
+        id: String,
+        items: Vec<SidebarItem>,
+        #[serde(default)]
+        selected: String,
+        action: Action,
+        /// Extra params merged into every call (e.g. which host the sections
+        /// are about). `key` is added on top.
+        #[serde(default)]
+        args: serde_json::Map<String, Value>,
+        /// What the open section shows, drawn the way a screen is.
+        #[serde(default)]
+        body: Vec<Widget>,
+    },
+    /// A terminal: the transcript so far and a prompt to type at, in one box,
+    /// as an SSH session is. Enter calls `on_submit` with the typed line under
+    /// `id`, and the line empties; the module answers with `lines` grown. See
+    /// [`crate::terminal`].
+    Terminal {
+        id: String,
+        /// What has been run and printed, oldest first.
+        #[serde(default)]
+        lines: String,
+        /// Written before the line being typed: `C:\Users>`, `/home $`.
+        #[serde(default)]
+        prompt: String,
+        on_submit: AutoAction,
+        /// How many lines tall it is (20 when not given).
+        #[serde(default)]
+        rows: u32,
+        /// A command is running: no prompt until it is done.
+        #[serde(default)]
+        busy: bool,
+        /// Take the height that is left, down to the bottom of the window, and
+        /// follow the window as it is resized — `rows` is ignored.
+        #[serde(default)]
+        fill: bool,
+    },
+    /// Two file panes side by side, as Midnight Commander has them. Limen
+    /// keeps the cursor, the marks and which pane is active; what is asked of
+    /// the module goes through `on_action` as `{op, pane, path, names}` — copy
+    /// and delete after Limen's confirmation window. See [`crate::commander`].
+    Commander {
+        id: String,
+        left: CommanderPane,
+        right: CommanderPane,
+        on_action: AutoAction,
+        /// A line under the panes: what is being done, or what was.
+        #[serde(default)]
+        status: String,
+        /// Rows tall (20 when not given), unless it fills.
+        #[serde(default)]
+        rows: u32,
+        /// Take the height left, down to the bottom of the window.
+        #[serde(default)]
+        fill: bool,
+    },
     /// A table with a header row and string cells. Rows become interactive
     /// (right-click menu + double-click) when `menu` or `on_activate` is set.
     Table {
@@ -476,6 +608,22 @@ pub fn render_view(
     busy: Option<&Action>,
     reveal_at: f64,
 ) -> Option<Invoke> {
+    render_list(ui, &view.widgets, inputs, busy, reveal_at)
+}
+
+/// Draw a list of widgets the way a screen is drawn: arriving, leaving and
+/// entering as one.
+///
+/// A screen is one of these, and so is anything that holds a screenful of its
+/// own — a sidebar's open section — so that what changes inside it animates
+/// exactly as a screen's widgets do, keyed under the `Ui` it is drawn in.
+pub(crate) fn render_list(
+    ui: &mut egui::Ui,
+    widgets: &[Widget],
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+    reveal_at: f64,
+) -> Option<Invoke> {
     let mut clicked = None;
     let now = ui.input(|i| i.time);
 
@@ -483,7 +631,7 @@ pub fn render_view(
     // screen replaced wholesale restarts the entrance; a screen that has gained
     // or lost a widget animates that widget and leaves the rest alone. See
     // [`crate::flow`].
-    let flow = flow::flow(ui, ui.id(), &view.widgets);
+    let flow = flow::flow(ui, ui.id(), widgets);
     // Whichever entrance is newer: the tab's, or this screen's own.
     let reveal_at = reveal_at.max(flow.shown);
 
@@ -494,7 +642,7 @@ pub fn render_view(
     // then goes at the bottom of the screen rather than directly underneath,
     // which is where a row of buttons belongs when the thing above it is the
     // whole point of the screen.
-    let fills = view.widgets.iter().position(fills_the_screen);
+    let fills = widgets.iter().position(fills_the_screen);
 
     // The gap between widgets is taken over from the layout, so that a widget
     // on its way in or out can take its gap with it: left to the layout, a
@@ -511,7 +659,7 @@ pub fn render_view(
     for (place, step) in flow.steps.iter().enumerate() {
         let w = match (&step.ghost, step.at) {
             (Some(ghost), _) => ghost,
-            (None, Some(i)) => &view.widgets[i],
+            (None, Some(i)) => &widgets[i],
             (None, None) => continue,
         };
         let grow = step.grow.clamp(0.0, 1.0);
@@ -526,7 +674,7 @@ pub fn render_view(
             render_filling(
                 ui,
                 w,
-                &view.widgets[i + 1..],
+                &widgets[i + 1..],
                 inputs,
                 busy,
                 &mut clicked,
@@ -777,24 +925,32 @@ pub fn render_widget(
             default,
             password,
             on_change,
+            locked_by,
         } => {
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
+            // Read before this field's own entry is borrowed: the box that
+            // locks it lives in the same map.
+            let locked = !locked_by.is_empty()
+                && inputs.get(locked_by).is_some_and(|v| v == "true");
             let value = field_value(ui, id, default, inputs);
             let before = value.clone();
-            if *multiline {
-                ui.add(
-                    egui::TextEdit::multiline(value)
-                        .desired_rows(4)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(placeholder.as_str()),
-                );
-            } else {
-                // Single-line fields — including password/secret ones — get the
-                // animated focus border.
-                text_field(ui, value, placeholder.as_str(), f32::INFINITY, *password);
-            }
+            // A locked field is drawn as it is, greyed, and takes no input.
+            ui.add_enabled_ui(!locked, |ui| {
+                if *multiline {
+                    ui.add(
+                        egui::TextEdit::multiline(value)
+                            .desired_rows(4)
+                            .desired_width(f32::INFINITY)
+                            .hint_text(placeholder.as_str()),
+                    );
+                } else {
+                    // Single-line fields — including password/secret ones — get
+                    // the animated focus border.
+                    text_field(ui, value, placeholder.as_str(), f32::INFINITY, *password);
+                }
+            });
             // A field that tells the module as it is typed, so a form can act
             // on what is in it rather than waiting for a button — a button
             // whose own state depends on the field cannot wait for itself.
@@ -990,6 +1146,9 @@ pub fn render_widget(
         Widget::Chrome { children } => {
             render_widgets(ui, children, inputs, busy, clicked);
         }
+        Widget::Sidebar { .. } => crate::sidebar::render(ui, widget, inputs, busy, clicked),
+        Widget::Terminal { .. } => crate::terminal::render(ui, widget, inputs, clicked),
+        Widget::Commander { .. } => crate::commander::render(ui, widget, clicked),
         Widget::Row { children } => {
             // A row of many things — a strip of category buttons, a long list of
             // actions — is wider than the window before anybody notices, and the
@@ -1311,6 +1470,7 @@ pub fn widget_ids(view: &View) -> Vec<String> {
                 | Widget::DateField { id, .. }
                 | Widget::Checkbox { id, .. } => out.push(id.clone()),
                 Widget::Row { children } | Widget::Chrome { children } => walk(children, out),
+                Widget::Sidebar { body, .. } => walk(body, out),
                 _ => {}
             }
         }
@@ -1342,6 +1502,7 @@ pub fn collect_ids(
             Widget::Row { children } | Widget::Chrome { children } => {
                 collect_ids(children, inputs, map)
             }
+            Widget::Sidebar { body, .. } => collect_ids(body, inputs, map),
             _ => {}
         }
     }

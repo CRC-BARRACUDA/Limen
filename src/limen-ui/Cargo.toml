@@ -16,6 +16,9 @@ limen-sdk-rust = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 eframe = { workspace = true }
+# Avatar pictures: users' icons (JPEG photos among them) and decoration frames,
+# animated or not (GIF, APNG, WebP). eframe already brings image with PNG.
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp", "jpeg"] }
 
 # Ask the OS where the cursor is during a file drag — winit reports the drag but
 # never its position, on any backend. X11 only; a Wayland session simply gets

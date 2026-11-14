@@ -33,6 +33,7 @@ class Text(Widget):
         multiline: bool = ...,
         default: str = ...,
         password: bool = ...,
+        locked_by: str = ...,
     ) -> None: ...
 
 class File(Widget):
@@ -114,6 +115,58 @@ class Row(Widget):
     """A horizontal group of widgets, laid out left to right."""
     def __init__(self, children: List[Widget]) -> None: ...
 
+class Commander(Widget):
+    """Two file panes side by side (Midnight Commander). Panes are dicts with
+    title, path, up, busy, error and entries; asks come to `calls` with op,
+    pane, path and names."""
+    def __init__(
+        self,
+        id: str,
+        left: Dict[str, Any],
+        right: Dict[str, Any],
+        calls: Optional[str] = ...,
+        capability: Optional[str] = ...,
+        method: Optional[str] = ...,
+        args: Optional[Dict[str, Any]] = ...,
+        status: str = ...,
+        rows: int = ...,
+        fill: bool = ...,
+    ) -> None: ...
+
+class Terminal(Widget):
+    """A transcript and a prompt in one box, as an SSH session. Enter calls
+    `calls` with the typed line under `id`; answer with `lines` grown, and
+    `busy=True` while the command runs."""
+    def __init__(
+        self,
+        id: str,
+        lines: str = ...,
+        prompt: str = ...,
+        calls: Optional[str] = ...,
+        capability: Optional[str] = ...,
+        method: Optional[str] = ...,
+        args: Optional[Dict[str, Any]] = ...,
+        rows: int = ...,
+        busy: bool = ...,
+        fill: bool = ...,
+    ) -> None: ...
+
+class Sidebar(Widget):
+    """Sections down the left, the open one beside it. Picking an item calls
+    `calls` with its `key` merged into `args`; answer with that item `selected`
+    and its section as `body`. Folding the list is the host's alone."""
+    def __init__(
+        self,
+        id: str,
+        items: List[tuple],
+        selected: str = ...,
+        calls: Optional[str] = ...,
+        capability: Optional[str] = ...,
+        method: Optional[str] = ...,
+        args: Optional[Dict[str, Any]] = ...,
+        body: Optional[List[Widget]] = ...,
+    ) -> None: ...
+
 class Chart(Widget):
     """A horizontal bar chart: `data` is a list of (label, value) pairs."""
     def __init__(self, title: Any, data: List[tuple[Any, float]]) -> None: ...
@@ -161,6 +214,12 @@ class Window:
 
 # ---- host bridge ---------------------------------------------------------- #
 
+VAULT_LOCKED: int
+VAULT_MISSING: int
+
+class VaultLocked(RuntimeError):
+    """Limen's vault is locked, or there is none yet: try again once unlocked."""
+
 class Host:
     def call(
         self, capability: str, method: str, params: Optional[Dict[str, Any]] = ...
@@ -174,6 +233,10 @@ class Host:
     def pick_file(self) -> Optional[str]: ...
     def save_file(self, suggested: str = ...) -> Optional[str]: ...
     def log(self, message: Any) -> None: ...
+    def secret_get(self, name: str) -> Optional[str]: ...
+    def secret_set(self, name: str, value: str) -> None: ...
+    def secret_delete(self, name: str) -> bool: ...
+    def secret_names(self) -> List[str]: ...
 
 # A method handler: (params, host) -> result
 Handler = Callable[[Dict[str, Any], Host], Any]

@@ -60,19 +60,28 @@ class Label(Widget):
 class Text(Widget):
     """A text input keyed by `id` (its value comes back in the method params).
     `multiline` makes it a box, `password` masks it. Single-line fields get an
-    animated focus border on the host."""
+    animated focus border on the host.
 
-    def __init__(self, id, label="", placeholder="", multiline=False, default="", password=False):
+    `locked_by` names a Checkbox on the same screen: while it is ticked, this
+    field is read-only — "get the address from DHCP" over the address box. The
+    host locks and frees it as the box is clicked, without calling the module."""
+
+    def __init__(self, id, label="", placeholder="", multiline=False, default="", password=False,
+                 locked_by=""):
         self.id, self.label = id, label
         self.placeholder, self.multiline, self.default = placeholder, multiline, default
         self.password = password
+        self.locked_by = locked_by
 
     def to_spec(self):
-        return {
+        spec = {
             "kind": "text", "id": self.id, "label": self.label,
             "placeholder": self.placeholder, "multiline": self.multiline,
             "default": self.default, "password": self.password,
         }
+        if self.locked_by:
+            spec["locked_by"] = self.locked_by
+        return spec
 
 
 class File(Widget):
@@ -182,6 +191,108 @@ class Row(Widget):
 
     def to_spec(self):
         return {"kind": "row", "children": [c.to_spec() for c in self.children]}
+
+
+class Sidebar(Widget):
+    """A list of sections down the left, and the open section beside it.
+
+    `items` is a list of `(key, text)` pairs, or `(key, text, True)` for a
+    section drawn quieter because it has nothing to show yet. Picking one calls
+    `calls` (a method on THIS module) with the item's `key` merged into `args`;
+    answer with the same sidebar, that item `selected`, and that section as
+    `body`, and only the section changes on screen.
+
+    The user can fold the list away. That is the host's alone - no call is
+    made - and it is remembered by `id`, so it stays folded across sections.
+    """
+
+    def __init__(self, id, items, selected="", calls=None, capability=None,
+                 method=None, args=None, body=None):
+        self.id = id
+        self.items = items
+        self.selected = selected
+        self.calls = calls
+        self.capability = capability
+        self.method = method
+        self.args = args
+        self.body = body or []
+
+    def to_spec(self):
+        items = []
+        for it in self.items:
+            key, text = it[0], it[1]
+            muted = bool(it[2]) if len(it) > 2 else False
+            items.append({"key": str(key), "text": str(text), "muted": muted})
+        spec = {
+            "kind": "sidebar",
+            "id": self.id,
+            "items": items,
+            "selected": self.selected,
+            "action": {"capability": self.capability or _CURRENT_CAPABILITY[0],
+                       "method": self.method or self.calls},
+            "body": [w.to_spec() for w in self.body],
+        }
+        if self.args:
+            spec["args"] = self.args
+        return spec
+
+
+class Terminal(Widget):
+    """A terminal: the transcript so far and a prompt to type at, in one box,
+    as an SSH session is.
+
+    `lines` is what has been run and printed, oldest first; `prompt` is written
+    before the line being typed. Enter calls `calls` (a method on THIS module)
+    with the typed line under `id`, and the line empties — answer with `lines`
+    grown, and `busy=True` while the command runs, which hides the prompt until
+    it is done. `rows` is its height in lines — or `fill=True`, the height left
+    down to the bottom of the window. Ctrl+ and Ctrl- size its text.
+    """
+
+    def __init__(self, id, lines="", prompt="", calls=None, capability=None,
+                 method=None, args=None, rows=20, busy=False, fill=False):
+        self.id, self.lines, self.prompt = id, lines, prompt
+        self.calls, self.capability, self.method, self.args = calls, capability, method, args
+        self.rows, self.busy, self.fill = rows, busy, fill
+
+    def to_spec(self):
+        action = {"capability": self.capability or _CURRENT_CAPABILITY[0],
+                  "method": self.method or self.calls}
+        if self.args:
+            action["args"] = self.args
+        return {"kind": "terminal", "id": self.id, "lines": self.lines,
+                "prompt": self.prompt, "on_submit": action, "rows": self.rows,
+                "busy": self.busy, "fill": self.fill}
+
+
+class Commander(Widget):
+    """Two file panes side by side, as Midnight Commander has them.
+
+    `left` and `right` are dicts: `{"title", "path", "up", "busy", "error",
+    "select", "entries": [{"name", "dir", "size", "modified"}]}` — `up` offers
+    `..`; `select` names the entry the cursor starts on when the path changes
+    (the folder just come up out of).
+    Limen keeps the cursor, the marks and the active pane; what is asked comes
+    to `calls` (a method on THIS module) with `op` (`open`, `up`, `refresh`,
+    `copy`, `delete`), `pane` ("left"/"right"), `path` and `names` — copy and
+    delete only after Limen's confirmation window. `status` is a line under the
+    panes; `fill=True` takes the height left down to the bottom of the window.
+    """
+
+    def __init__(self, id, left, right, calls=None, capability=None, method=None,
+                 args=None, status="", rows=20, fill=False):
+        self.id, self.left, self.right = id, left, right
+        self.calls, self.capability, self.method, self.args = calls, capability, method, args
+        self.status, self.rows, self.fill = status, rows, fill
+
+    def to_spec(self):
+        action = {"capability": self.capability or _CURRENT_CAPABILITY[0],
+                  "method": self.method or self.calls}
+        if self.args:
+            action["args"] = self.args
+        return {"kind": "commander", "id": self.id, "left": self.left,
+                "right": self.right, "on_action": action, "status": self.status,
+                "rows": self.rows, "fill": self.fill}
 
 
 class MenuItem:
@@ -388,6 +499,17 @@ _CURRENT_CAPABILITY = [""]
 # Host bridge — call other modules, emit/subscribe events, log.
 # --------------------------------------------------------------------------- #
 
+# Limen's vault answers with these while it cannot: locked, or not made yet.
+VAULT_LOCKED = -32006
+VAULT_MISSING = -32007
+
+
+class VaultLocked(RuntimeError):
+    """Limen's vault is locked, or there is none yet. The user is being asked to
+    unlock (or create) it; the call can be made again once they have. A
+    RuntimeError, so code that catches those still does."""
+
+
 class Host:
     def __init__(self, module):
         self._m = module
@@ -479,6 +601,26 @@ class Host:
 
     def log(self, message):
         self._m._request("host.log", str(message))
+
+    # Limen's vault: this module's own compartment. Needs the `secrets`
+    # permission. While the vault is locked (or not made yet) these raise
+    # VaultLocked — the user is being asked to unlock it; try again after.
+
+    def secret_get(self, name):
+        """A secret by name, or None when there is none."""
+        return self._m._request("host.secret_get", {"name": str(name)})
+
+    def secret_set(self, name, value):
+        """Keep a secret, replacing any of that name."""
+        self._m._request("host.secret_set", {"name": str(name), "value": str(value)})
+
+    def secret_delete(self, name):
+        """Remove a secret; whether there was one."""
+        return bool(self._m._request("host.secret_delete", {"name": str(name)}))
+
+    def secret_names(self):
+        """The names (never the values) in this module's compartment."""
+        return self._m._request("host.secret_names", None) or []
 
 
 # --------------------------------------------------------------------------- #
@@ -656,7 +798,10 @@ class Module:
                 raise RuntimeError("host closed the connection")
             if "method" not in msg and msg.get("id") == rid:
                 if msg.get("error"):
-                    raise RuntimeError(msg["error"]["message"])
+                    err = msg["error"]
+                    if err.get("code") in (VAULT_LOCKED, VAULT_MISSING):
+                        raise VaultLocked(err["message"])
+                    raise RuntimeError(err["message"])
                 return msg.get("result")
             # Anything else arriving mid-call (an event, or a request from the
             # host) is dispatched now so we stay responsive and deadlock-free.

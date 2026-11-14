@@ -68,6 +68,11 @@ pub fn demo_view() -> Value {
                 .default("alpha")
                 .on_change("ui.kit", "changed"),
             checkbox("demo.check", "checkbox").checked(),
+            checkbox("demo.lock", "checkbox — ticked, it locks the field under it").checked(),
+            text("demo.locked")
+                .label("text — locked_by the box above: read-only while it is ticked")
+                .default("192.168.1.20/24")
+                .locked_by("demo.lock"),
             separator(),
             label("step — every state").strong(),
             step("pending", "pending"),
@@ -174,6 +179,43 @@ pub fn demo_view() -> Value {
                 ],
             )
             .centre("49 findings"),
+            separator(),
+            label("commander — two file panes, as Midnight Commander has them; Tab, Enter, Insert, F5, F8").strong(),
+            commander(
+                "demo.files",
+                "ui.kit",
+                "files",
+                json!({"title": "This PC", "path": "/home/me", "up": true, "entries": [
+                    {"name": "Documents", "dir": true, "modified": "2026-11-10 09:12"},
+                    {"name": "notes.txt", "size": "4 KB", "modified": "2026-11-11 14:02"}]}),
+                json!({"title": "WS-017", "path": "C:\\Users", "up": true, "entries": [
+                    {"name": "Public", "dir": true, "modified": "2026-07-14 14:06"}]}),
+            )
+            .status("Copied 1 file."),
+            separator(),
+            label("terminal — a transcript and a prompt in one box; Enter sends the line, Ctrl+ / Ctrl− size the text").strong(),
+            terminal("demo.terminal", "ui.kit", "terminal")
+                .lines("C:\\> cd Users\nC:\\Users> dir /b\nAll Users\nDefault\nPublic")
+                .prompt("C:\\Users>")
+                .rows(6),
+            separator(),
+            label("sidebar — sections down the left, the open one beside it; the chevron folds the list away").strong(),
+            sidebar(
+                "demo.sidebar",
+                "ui.kit",
+                "section",
+                vec![
+                    sidebar_item("overview", "Overview"),
+                    sidebar_item("network", "Network"),
+                    sidebar_item("apps", "Apps — a name long enough to need an ellipsis"),
+                    sidebar_item("updates", "Updates").muted(),
+                ],
+                "overview",
+                vec![
+                    label("The open section is drawn the way a screen is.").strong(),
+                    label("Picking another calls the module with its key; folding the list is the host's alone.").weak(),
+                ],
+            ),
             separator(),
             label("diagram — what is connected to what; hover a circle, drag to move, double-click to put it back").strong(),
             diagram(

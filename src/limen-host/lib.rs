@@ -20,6 +20,7 @@ mod host;
 mod elevate;
 mod files;
 mod notify;
+mod secrets;
 mod sdk;
 mod spec;
 mod supervisor;
@@ -31,6 +32,7 @@ pub mod runtimes;
 pub use broker::Broker;
 pub use connection::ModuleConnection;
 pub use host::Host;
+pub use secrets::{set_secret_store, SecretError, SecretStore};
 pub use spec::{Launch, ModuleSpec};
 
 // Reachable so the supervisor's own test can start one and watch it die with

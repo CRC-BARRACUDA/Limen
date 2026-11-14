@@ -3,6 +3,30 @@
 
 use super::*;
 
+/// How long a change of UI scale takes to travel, in seconds. Short: every
+/// widget in the window moves at once, and a long zoom reads as the
+/// application labouring rather than as a setting being applied.
+const SCALE_SECS: f64 = 0.28;
+
+/// The lattice the travelling scale is rounded onto, in percent.
+///
+/// egui keeps one font atlas per `pixels_per_point` and builds it the first
+/// time it sees one, so every distinct value along the way costs an atlas
+/// build and a texture upload. Rounding ties that cost to the distance
+/// travelled instead of to the refresh rate: a 25% change rebuilds thirteen
+/// atlases whether the screen runs at 60Hz or 240Hz. 2% of a 14px glyph is
+/// sub-pixel, so the motion still reads as continuous.
+const SCALE_STEP: f32 = 2.0;
+
+/// How long an arriving page takes to fade in, in seconds, and how far it
+/// rises on the way.
+///
+/// Short, and shorter than the item staggers inside the pages: the transition
+/// is there to say *the screen changed*, and anything longer puts a wait
+/// between a click on the nav and the page being readable.
+const PAGE_SECS: f64 = 0.16;
+const PAGE_RISE: f32 = 10.0;
+
 impl eframe::App for LimenApp {
     /// Clear transparent during the startup splash so only the floating icons
     /// show over the desktop; opaque warm-black once the app takes over.
@@ -24,6 +48,7 @@ impl eframe::App for LimenApp {
         let now_t = ctx.input(|i| i.time);
         self.drain_events(now_t);
         self.drain_file_picks();
+        self.account.poll();
         // A polling chain that asked for a pause between its steps: take the
         // next step when it is due, and ask to be drawn again when it is.
         // Without the pause the chain asks as fast as the module can answer,
@@ -31,6 +56,11 @@ impl eframe::App for LimenApp {
         // drawing them or noticing a click.
         if let Some(left) = self.due_now() {
             ctx.request_repaint_after(left);
+        }
+        // A language change retypes every string in the chrome; nothing else
+        // asks for the frames that plays over.
+        if i18n::switching() {
+            ctx.request_repaint();
         }
         // Keep the screen→UI mapping current, so a file drag (during which the
         // window system stops reporting the pointer) can still be located.
@@ -44,8 +74,13 @@ impl eframe::App for LimenApp {
             ctx.request_repaint();
         }
 
-        // Apply the global UI scale (set_zoom_factor no-ops if unchanged).
-        ctx.set_zoom_factor(self.ui_scale / 100.0);
+        // Apply the global UI scale. `ui_scale` is the chosen one; the zoom
+        // travels to it so the whole window grows into the new size instead of
+        // snapping (set_zoom_factor no-ops if unchanged).
+        if self.zoom.step(self.ui_scale, now_t, SCALE_SECS) {
+            ctx.request_repaint();
+        }
+        ctx.set_zoom_factor(self.zoom.on_grid(SCALE_STEP) / 100.0);
 
         // The window is created hidden; on the first frame centre it on the
         // monitor and reveal it, so the splash appears cleanly mid-screen instead
@@ -119,6 +154,7 @@ impl eframe::App for LimenApp {
         let mut anim_changed = false;
         let mut alerts_changed = false;
         let mut lang_changed = false;
+        let mut account_action: Option<account::AccountAction> = None;
         let mut dev_applied = false;
 
         // Custom-decoration resize grips along the window edges/corners.
@@ -179,6 +215,9 @@ impl eframe::App for LimenApp {
                     .clicked()
                     {
                         open_tab = Some(Tab::Categories);
+                    }
+                    if ui::chip(ui, &i18n::t("nav.vault"), active == Some(Tab::Vault)).clicked() {
+                        open_tab = Some(Tab::Vault);
                     }
                     // "Update available" pill, next to Modules.
                     if self.update.is_some() {
@@ -246,6 +285,18 @@ impl eframe::App for LimenApp {
                             .clicked()
                         {
                             open_tab = Some(Tab::Settings);
+                        }
+                        // The vault's padlock, beside the gear: shut or open.
+                        self.vault.padlock(ui);
+                        // The account, left of the gear: as the website's header.
+                        if !matches!(
+                            self.account.state,
+                            account::AccountState::Off | account::AccountState::Restoring { who: None }
+                        ) {
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            account::account_chip(ui, &self.account, &mut account_action);
                         }
                     });
                 });
@@ -501,6 +552,11 @@ impl eframe::App for LimenApp {
         } else {
             self.categories_revealed_at = None;
         }
+        if active_tab == Some(Tab::Vault) {
+            self.vault_revealed_at.get_or_insert(now_t);
+        } else {
+            self.vault_revealed_at = None;
+        }
         if active_tab == Some(Tab::Settings) {
             self.settings_revealed_at.get_or_insert(now_t);
         } else {
@@ -523,6 +579,12 @@ impl eframe::App for LimenApp {
                 now_t
             }
         };
+        // A page swap is a change of place, not of contents. Without a
+        // transition the nav swaps one screenful for another between two
+        // frames, which reads as a teleport however well the items inside the
+        // new page animate — and the items of a page that is mostly chrome (a
+        // heading, a separator, a form) have little to animate at all.
+        let page_since = page_arrived(&mut self.page_at, active_tab.clone(), now_t);
         let about_reveal = self.about_revealed_at.unwrap_or(now_t);
         let settings_reveal = self.settings_revealed_at.unwrap_or(now_t);
         {
@@ -548,6 +610,7 @@ impl eframe::App for LimenApp {
                 dev_tab,
                 logs,
                 log_autoscroll,
+                vault,
                 ui_scale,
                 animations,
                 alerts,
@@ -559,6 +622,7 @@ impl eframe::App for LimenApp {
                 favorites,
                 categories,
                 categories_revealed_at,
+                vault_revealed_at,
                 category_filter,
                 new_category,
                 modules_revealed_at,
@@ -586,6 +650,18 @@ impl eframe::App for LimenApp {
                         ui.monospace(err.as_str());
                         return;
                     }
+                    // The arriving page fades in and rises the last few
+                    // pixels into place. Set on the `Ui` rather than wrapped
+                    // around the pages in a scope, so every page gets it
+                    // without being touched, and so the brackets painted above
+                    // stay solid — they belong to the window, not the page.
+                    //
+                    // The per-page item staggers play inside this: a card at
+                    // half opacity inside a page at half opacity is a quarter
+                    // of the way in, which is where it should be.
+                    let arriving = ui::reveal_t(ui, 0, page_since, now_t, 0.0, PAGE_SECS);
+                    ui.set_opacity(arriving);
+                    ui.add_space((1.0 - arriving) * PAGE_RISE);
                     match active_tab {
                         None => {
                             ui.add_space(24.0);
@@ -629,6 +705,12 @@ impl eframe::App for LimenApp {
                                 filter: category_filter,
                             },
                         ),
+                        Some(Tab::Vault) => vault_page(
+                            ui,
+                            vault,
+                            &modules.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+                            vault_revealed_at.unwrap_or(now_t),
+                        ),
                         Some(Tab::Categories) => categories_page(
                             ui,
                             &mut CategoriesPage {
@@ -657,18 +739,28 @@ impl eframe::App for LimenApp {
                             &mut show_panic,
                         ),
                         Some(Tab::Detail { id }) => detail_view(ui, id, detail_tabs, &mut action),
-                        Some(Tab::Settings) => settings_view(
-                            ui,
-                            ui_scale,
-                            &mut scale_changed,
-                            animations,
-                            &mut anim_changed,
-                            alerts,
-                            &mut alerts_changed,
-                            language,
-                            &mut lang_changed,
-                            settings_reveal,
-                        ),
+                        // Scrolls, as every page that can outgrow the window
+                        // does: its last sections fall below the fold on a
+                        // short window, or at a large UI scale.
+                        Some(Tab::Settings) => {
+                            egui::ScrollArea::vertical()
+                                .id_source("settings_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    settings_view(
+                                        ui,
+                                        ui_scale,
+                                        &mut scale_changed,
+                                        animations,
+                                        &mut anim_changed,
+                                        alerts,
+                                        &mut alerts_changed,
+                                        language,
+                                        &mut lang_changed,
+                                        settings_reveal,
+                                    )
+                                });
+                        }
                         Some(Tab::Developer) => developer_view(
                             ui,
                             dev_tab,
@@ -681,6 +773,7 @@ impl eframe::App for LimenApp {
                             &mut dev_applied,
                             developer_revealed_at,
                             shown_dev_tab,
+                            vault,
                         ),
                         Some(Tab::Update) => {
                             update_view(
@@ -739,6 +832,9 @@ impl eframe::App for LimenApp {
             ui::toast::set_enabled(self.alerts);
             self.save_alerts();
         }
+        if let Some(a) = account_action {
+            self.account.act(a);
+        }
         if lang_changed {
             self.save_language();
             // Re-play the current page's staggered entrance so it animates into
@@ -748,6 +844,7 @@ impl eframe::App for LimenApp {
             self.settings_revealed_at = None;
             self.developer_revealed_at = None;
             self.modules_revealed_at = None;
+            self.vault_revealed_at = None;
             // Installed cards re-resolve their description in-place (localized_desc
             // reads the module's locales/ folder, cached per language) — no engine
             // reload. The org list, though, resolved its descriptions over the
@@ -830,6 +927,7 @@ impl eframe::App for LimenApp {
                 self.removing.insert(name, now_t);
             } else {
                 self.busy = true;
+                self.vault.forget_module(&name);
                 self.worker.send(Command::RemoveModule(name));
             }
         }
@@ -848,6 +946,9 @@ impl eframe::App for LimenApp {
             }
             for name in fire {
                 self.busy = true;
+                // Its secrets go with it (if the vault is open; if not, the
+                // Vault page shows them as a removed module's, to delete).
+                self.vault.forget_module(&name);
                 self.worker.send(Command::RemoveModule(name));
             }
             if !self.removing.is_empty() {
@@ -1019,6 +1120,10 @@ impl eframe::App for LimenApp {
         // "open" has no shut frame to come from: it arrives at full strength,
         // having asked for none of the repaints that would have carried it in.
         {
+            self.account.sign_out_dialog(ctx, self.content_rect);
+            if self.vault.frame(ctx, self.content_rect) {
+                self.adopt_github_token();
+            }
             let open = self.pending_confirm.is_some();
             if open {
                 self.confirm_showing = self.pending_confirm.clone();

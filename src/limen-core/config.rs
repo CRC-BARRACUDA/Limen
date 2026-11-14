@@ -73,6 +73,38 @@ pub struct Config {
     /// unauthenticated (the default). Only a read/public-repo scope is needed.
     #[serde(default)]
     pub github_token: Option<String>,
+
+    /// The platform's API root to sign in to (`https://auth…/api`). Absent =
+    /// this build's [environment](crate::environment) — local for a debug
+    /// build, production for a release one. `LIMEN_PLATFORM_URL` wins.
+    #[serde(default)]
+    pub platform_url: Option<String>,
+
+    /// Limen's public OAuth2 client id on the platform. Absent = signing in is
+    /// off. `LIMEN_PLATFORM_CLIENT_ID` wins.
+    #[serde(default)]
+    pub platform_client_id: Option<String>,
+
+    /// Who is signed in, as the platform last said — shown at once on start,
+    /// before the session is checked. Not a secret: the refresh token is in the
+    /// OS keychain, never here.
+    #[serde(default)]
+    pub account: Option<crate::account::Account>,
+
+    /// The Avatar Decoration service's API. Absent =
+    /// this build's [environment](crate::environment). `LIMEN_AVATAR_URL` wins.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+
+    /// The files host avatars and frames are served from. Absent =
+    /// this build's [environment](crate::environment). `LIMEN_AVATAR_ASSET_BASE` wins.
+    #[serde(default)]
+    pub avatar_asset_base: Option<String>,
+
+    /// Lock the vault after this many minutes without use. Absent = 15;
+    /// 0 = never.
+    #[serde(default)]
+    pub vault_lock_minutes: Option<u32>,
 }
 
 impl Default for Config {
@@ -87,6 +119,12 @@ impl Default for Config {
             favorites: Vec::new(),
             categories: BTreeMap::new(),
             github_token: None,
+            platform_url: None,
+            platform_client_id: None,
+            account: None,
+            avatar_url: None,
+            avatar_asset_base: None,
+            vault_lock_minutes: None,
         }
     }
 }

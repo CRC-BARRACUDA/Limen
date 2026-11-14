@@ -88,6 +88,31 @@ impl Host {
         self.capabilities().iter().any(|c| c == capability)
     }
 
+    /// A secret from this module's compartment of Limen's vault: `Ok(None)`
+    /// when there is none by that name. Needs the `secrets` permission. While
+    /// the vault is locked (or not made yet) this is an error with code
+    /// [`rpc::VAULT_LOCKED`] (or [`rpc::VAULT_MISSING`]): the user is asked to
+    /// unlock it, and the call can be made again after.
+    pub fn secret_get(&self, name: &str) -> Result<Option<String>, RpcError> {
+        let v = self.raw("host.secret_get", json!({ "name": name }))?;
+        Ok(v.as_str().map(String::from))
+    }
+
+    /// Keep a secret in this module's compartment, replacing any of that name.
+    pub fn secret_set(&self, name: &str, value: &str) -> Result<(), RpcError> {
+        self.raw("host.secret_set", json!({ "name": name, "value": value })).map(|_| ())
+    }
+
+    /// Remove a secret; whether there was one.
+    pub fn secret_delete(&self, name: &str) -> Result<bool, RpcError> {
+        Ok(self.raw("host.secret_delete", json!({ "name": name }))?.as_bool().unwrap_or(false))
+    }
+
+    /// The names (never the values) in this module's compartment.
+    pub fn secret_names(&self) -> Result<Vec<String>, RpcError> {
+        Ok(serde_json::from_value(self.raw("host.secret_names", Value::Null)?).unwrap_or_default())
+    }
+
     /// Emit a log line to the host console.
     pub fn log(&self, message: &str) {
         let _ = self.raw("host.log", Value::String(message.to_string()));

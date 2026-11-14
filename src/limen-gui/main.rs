@@ -5,34 +5,43 @@
 //! Limen desktop GUI entry point: window options, startup failures, and where
 //! to look for modules. Everything else is the library beside it.
 
-use limen_gui::{app, i18n, ui};
+use limen_gui::{app, i18n, session, ui};
 
 use std::path::PathBuf;
 
 use eframe::egui;
 use limen_core::Config;
 
-/// Run on X11 rather than Wayland, where both are available.
+/// Run on the session's own display server, decided before the window exists.
 ///
-/// winit implements no file drag-and-drop on Wayland at all — the backend emits
-/// neither `HoveredFile` nor `DroppedFile` — so a path field could never be
-/// filled by dropping onto it there. Under X11 (including XWayland) the drop
-/// arrives, so we prefer it: winit picks X11 when `WAYLAND_DISPLAY` is unset.
+/// winit chooses by what it finds in the environment: Wayland when
+/// `WAYLAND_DISPLAY` names a session, X11 otherwise. So applying the decision is
+/// a matter of leaving the environment saying what [`session::chosen`] decided —
+/// which for Wayland is nothing at all, and for X11 is hiding the Wayland
+/// variables from it, as a session running both would otherwise go to Wayland.
 ///
-/// Only when there is an X display to fall back to. On a Wayland session with no
-/// XWayland, forcing this would leave the app unable to open a window at all,
-/// which is a far worse trade than losing drag-and-drop.
+/// Why it is decided here and not left to winit: winit's rule and ours agree
+/// only when there is one session to pick. Where both are offered we want the
+/// native one *and* an override that can say otherwise — see [`session`] for
+/// what each side of that trade costs.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn prefer_x11() {
-    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+fn pick_display_server() -> Option<session::Backend> {
+    let chosen = session::chosen();
+    if chosen == Some(session::Backend::X11) {
         // SAFETY: single-threaded here — this runs first thing in `main`, before
         // any thread is spawned and before winit reads the environment.
-        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::remove_var("WAYLAND_SOCKET");
+        }
     }
+    chosen
 }
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-fn prefer_x11() {}
+fn pick_display_server() -> Option<session::Backend> {
+    None
+}
 
 /// Be the elevated supervisor instead of opening a window, when asked.
 ///
@@ -88,7 +97,12 @@ fn main() -> eframe::Result<()> {
     if let Some(code) = supervise_instead() {
         std::process::exit(code);
     }
-    prefer_x11();
+    // Which display server, before anything that wants one. Printed because a
+    // window that misbehaves (a frozen frame, a missing file drop) is the first
+    // thing anybody needs to know the backend for.
+    if let Some(backend) = pick_display_server() {
+        eprintln!("limen: display server: {}", backend.name());
+    }
     // The toolkit has strings of its own — month names, the words on pop-up
     // buttons — but no catalogs and no opinion about language. It asks through
     // this, and the application answers.

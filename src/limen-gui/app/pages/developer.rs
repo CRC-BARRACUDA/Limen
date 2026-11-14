@@ -13,12 +13,16 @@ pub(crate) enum DevTab {
 /// The Developer tab's "Dev mode" sub-tab: source app/module updates from local
 /// directories instead of GitHub, for testing. Session-only (resets on restart).
 /// `applied` is set when the source changes so the caller can re-run the checks.
+/// The GitHub token's name in the vault's own (Limen's) compartment.
+pub(crate) const GITHUB_TOKEN: &str = "github_token";
+
 pub(crate) fn dev_mode_view(
     ui: &mut egui::Ui,
     dev_mode_on: &mut bool,
     dev_limen_path: &mut String,
     dev_modules_path: &mut String,
     applied: &mut bool,
+    vault: &crate::app::vault::VaultUi,
 ) {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(i18n::t("dev.dev_mode")).strong());
@@ -99,11 +103,12 @@ pub(crate) fn dev_mode_view(
     let tok_id = egui::Id::new("dev_github_token_buf");
     let status_id = egui::Id::new("dev_github_token_status");
     let probe_id = egui::Id::new("dev_github_token_probe");
+    // The token in force: the vault's, or — no open vault — the settings'.
     let mut token = ui.data_mut(|d| {
         d.get_temp::<String>(tok_id).unwrap_or_else(|| {
-            limen_core::Config::load()
-                .ok()
-                .and_then(|c| c.github_token)
+            vault
+                .limen_secret(GITHUB_TOKEN)
+                .or_else(|| limen_core::Config::load().ok().and_then(|c| c.github_token))
                 .unwrap_or_default()
         })
     });
@@ -116,7 +121,11 @@ pub(crate) fn dev_mode_view(
     if let Some(p) = probe {
         match p.lock().unwrap().take() {
             Some(Ok(t)) => {
-                if let Ok(mut cfg) = limen_core::Config::load() {
+                // Into the vault when it is open; the settings file otherwise,
+                // from where it moves into the vault once there is one open.
+                if !vault.set_limen_secret(GITHUB_TOKEN, Some(&t))
+                    && let Ok(mut cfg) = limen_core::Config::load()
+                {
                     cfg.github_token = Some(t.clone());
                     let _ = cfg.save();
                 }
@@ -143,7 +152,9 @@ pub(crate) fn dev_mode_view(
             if ui::primary_button(ui, &i18n::t("dev.save_token"), egui::Vec2::ZERO).clicked() {
                 let t = token.trim().to_string();
                 if t.is_empty() {
-                    // Clearing needs no test — revert to the unauthenticated default.
+                    // Clearing needs no test — revert to the unauthenticated default,
+                    // wherever it was kept.
+                    vault.set_limen_secret(GITHUB_TOKEN, None);
                     if let Ok(mut cfg) = limen_core::Config::load() {
                         cfg.github_token = None;
                         let _ = cfg.save();
@@ -216,6 +227,7 @@ pub(crate) fn developer_view(
     dev_applied: &mut bool,
     revealed_at: &mut Option<f64>,
     shown_dev_tab: &mut DevTab,
+    vault: &crate::app::vault::VaultUi,
 ) {
     ui.horizontal(|ui| {
         if ui::chip(
@@ -252,6 +264,7 @@ pub(crate) fn developer_view(
             dev_limen_path,
             dev_modules_path,
             dev_applied,
+            vault,
         ),
         DevTab::UiKit => ui::render_demo_ui(ui, inputs),
         DevTab::Console => dev_console(ui, logs, autoscroll),

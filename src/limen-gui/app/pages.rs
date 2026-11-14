@@ -9,6 +9,7 @@ mod categories;
 mod modules;
 mod settings;
 mod update;
+mod vault;
 
 pub(crate) use about::*;
 pub(crate) use developer::*;
@@ -17,6 +18,7 @@ pub(crate) use categories::*;
 pub(crate) use modules::*;
 pub(crate) use settings::*;
 pub(crate) use update::*;
+pub(crate) use vault::*;
 
 /// The Modules-page installed/available filter.
 #[derive(Clone, Copy, PartialEq)]

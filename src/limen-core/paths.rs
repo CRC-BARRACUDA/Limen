@@ -37,6 +37,12 @@ pub fn settings_path() -> PathBuf {
     home().join("settings.json")
 }
 
+/// The vault (`<home>/vault.json`): beside the settings, so it travels with
+/// a portable Limen.
+pub fn vault_path() -> PathBuf {
+    home().join("vault.json")
+}
+
 /// The app icon extracted to disk (`<home>/state/icon.png`).
 ///
 /// OS notifiers take an image *path*, but the icon is compiled into the binary —
