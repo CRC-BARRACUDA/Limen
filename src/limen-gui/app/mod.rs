@@ -812,6 +812,22 @@ impl LimenApp {
         }
     }
 
+    /// The vault has just opened: a GitHub token still in the settings file
+    /// moves into it (and out of the file), and the registry uses the vault's.
+    pub(crate) fn adopt_github_token(&mut self) {
+        use crate::app::pages::GITHUB_TOKEN;
+        if let Ok(mut cfg) = limen_core::Config::load()
+            && let Some(t) = cfg.github_token.clone()
+            && self.vault.set_limen_secret(GITHUB_TOKEN, Some(&t))
+        {
+            cfg.github_token = None;
+            let _ = cfg.save();
+        }
+        if let Some(t) = self.vault.limen_secret(GITHUB_TOKEN) {
+            limen_registry::set_github_token(Some(t));
+        }
+    }
+
     /// Apply any path the user chose in a file dialog to its widget's input.
     pub(crate) fn drain_file_picks(&mut self) {
         while let Ok((id, path)) = self.file_pick.1.try_recv() {

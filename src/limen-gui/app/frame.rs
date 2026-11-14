@@ -773,6 +773,7 @@ impl eframe::App for LimenApp {
                             &mut dev_applied,
                             developer_revealed_at,
                             shown_dev_tab,
+                            vault,
                         ),
                         Some(Tab::Update) => {
                             update_view(
@@ -1120,7 +1121,9 @@ impl eframe::App for LimenApp {
         // having asked for none of the repaints that would have carried it in.
         {
             self.account.sign_out_dialog(ctx, self.content_rect);
-            self.vault.frame(ctx, self.content_rect);
+            if self.vault.frame(ctx, self.content_rect) {
+                self.adopt_github_token();
+            }
             let open = self.pending_confirm.is_some();
             if open {
                 self.confirm_showing = self.pending_confirm.clone();

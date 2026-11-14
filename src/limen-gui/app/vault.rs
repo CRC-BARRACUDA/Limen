@@ -297,6 +297,20 @@ impl VaultUi {
         }
     }
 
+    /// Limen's own secret, when the vault is open: the GitHub token, say.
+    pub(crate) fn limen_secret(&self, name: &str) -> Option<String> {
+        self.shared.vault().get(LIMEN, name).ok().flatten()
+    }
+
+    /// Keep one of Limen's own secrets. `false` if the vault is not open.
+    pub(crate) fn set_limen_secret(&self, name: &str, value: Option<&str>) -> bool {
+        let mut v = self.shared.vault();
+        match value {
+            Some(val) => v.set(LIMEN, name, val).is_ok(),
+            None => v.delete(LIMEN, name).is_ok(),
+        }
+    }
+
     /// Once a frame: take in finished work, lock when idle, and answer a
     /// module that found the vault shut.
     pub(crate) fn frame(&mut self, ctx: &egui::Context, bounds: Option<egui::Rect>) -> bool {
