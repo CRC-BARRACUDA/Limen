@@ -89,6 +89,16 @@ pub struct Config {
     /// OS keychain, never here.
     #[serde(default)]
     pub account: Option<crate::account::Account>,
+
+    /// The Avatar Decoration service's API. Absent =
+    /// [`crate::avatar::DEFAULT_AVATAR_API`]. `LIMEN_AVATAR_URL` wins.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+
+    /// The files host avatars and frames are served from. Absent =
+    /// [`crate::avatar::DEFAULT_ASSET_BASE`]. `LIMEN_AVATAR_ASSET_BASE` wins.
+    #[serde(default)]
+    pub avatar_asset_base: Option<String>,
 }
 
 impl Default for Config {
@@ -106,6 +116,8 @@ impl Default for Config {
             platform_url: None,
             platform_client_id: None,
             account: None,
+            avatar_url: None,
+            avatar_asset_base: None,
         }
     }
 }

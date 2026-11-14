@@ -10,6 +10,7 @@
 //! and `~/.limen/settings.json` only holds what the user changes.
 
 pub mod account;
+pub mod avatar;
 pub mod config;
 pub mod engine;
 pub mod net;
