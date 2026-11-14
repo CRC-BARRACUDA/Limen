@@ -279,7 +279,9 @@ fn the_platform_comes_from_the_settings_and_needs_a_client() {
     if std::env::var("LIMEN_PLATFORM_CLIENT_ID").is_ok() || std::env::var("LIMEN_PLATFORM_URL").is_ok() {
         return;
     }
-    assert_eq!(Platform::from_config(&cfg), None, "no client id: signing in is off");
+    // No client id set: this build's platform's own, if it has one built in.
+    let built_in = limen_core::environment::current().client_id;
+    assert_eq!(Platform::from_config(&cfg).map(|p| p.client_id), built_in.map(str::to_string));
     cfg.platform_client_id = Some(" abc ".into());
     let p = Platform::from_config(&cfg).unwrap();
     assert_eq!(
@@ -289,6 +291,15 @@ fn the_platform_comes_from_the_settings_and_needs_a_client() {
     );
     cfg.platform_url = Some("https://auth.example/api/".into());
     assert_eq!(Platform::from_config(&cfg).unwrap().api_url, "https://auth.example/api");
+
+    // Production's id is built in, and only for production.
+    cfg.platform_client_id = None;
+    cfg.platform_url = Some("https://auth.barracuda-team.tech/api/".into());
+    assert_eq!(Platform::from_config(&cfg).unwrap().client_id, "szkyo06i69uinrmr");
+    cfg.platform_url = Some("https://auth.example/api".into());
+    assert_eq!(Platform::from_config(&cfg), None, "another platform needs its own id");
+    cfg.platform_url = Some(limen_core::environment::LOCAL.auth_api.into());
+    assert_eq!(Platform::from_config(&cfg), None, "a local platform's id is the developer's");
 }
 
 #[test]
