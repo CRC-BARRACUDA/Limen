@@ -239,6 +239,70 @@ pub struct DetailTab {
     pub busy: bool,
 }
 
+/// The next step of a polling chain: what it will call, when, and for which
+/// tab.
+#[derive(Debug, Clone)]
+pub struct PendingStep {
+    /// The tab that was on screen when the chain asked for this step.
+    pub tab: Option<Tab>,
+    pub invoke: ui::Invoke,
+    pub when: std::time::Instant,
+}
+
+/// What to do about a pending step, now.
+#[derive(Debug)]
+pub enum Due {
+    /// Nothing is waiting.
+    Idle,
+    /// Not yet: ask to be drawn again after this long.
+    Wait(std::time::Duration),
+    /// Take it.
+    Run(ui::Invoke),
+    /// Its tab is not the one on screen, so it was let go.
+    Dropped,
+}
+
+/// Take the pending step if it is due — and only for the tab that asked for it.
+///
+/// A step is sent the way a click is: routed by the tab on screen, with that
+/// tab's fields. Taken while another tab is showing, a host panel's "ask again"
+/// would answer into a module's own page and replace it. So a step whose tab is
+/// not on screen is dropped, not delayed; the loop picks itself up when its tab
+/// is shown again, from the `auto` its last screen still carries.
+pub fn take_due(
+    pending: &mut Option<PendingStep>,
+    now: std::time::Instant,
+    active: Option<&Tab>,
+) -> Due {
+    let Some(step) = pending.as_ref() else {
+        return Due::Idle;
+    };
+    if step.tab.as_ref() != active {
+        *pending = None;
+        return Due::Dropped;
+    }
+    let left = step.when.saturating_duration_since(now);
+    if !left.is_zero() {
+        return Due::Wait(left);
+    }
+    match pending.take() {
+        Some(step) => Due::Run(step.invoke),
+        None => Due::Idle,
+    }
+}
+
+/// The tabs of their own whose screens say how to ask for them again, and how.
+///
+/// For a language change: those are asked, and the rest keep what they show.
+pub fn redraws(tabs: &HashMap<u64, DetailTab>) -> Vec<(u64, ui::AutoAction)> {
+    let mut out: Vec<(u64, ui::AutoAction)> = tabs
+        .iter()
+        .filter_map(|(id, tab)| Some((*id, tab.view.as_ref()?.redraw.clone()?)))
+        .collect();
+    out.sort_by_key(|(id, _)| *id);
+    out
+}
+
 /// When the page now on screen arrived, remembering it in `shown`.
 ///
 /// A page plays its arrival from the moment it *became* the page on screen, not

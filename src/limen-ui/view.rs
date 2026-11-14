@@ -16,6 +16,16 @@ pub struct View {
     /// one.
     #[serde(default)]
     pub auto: Option<AutoAction>,
+    /// How to ask for this screen again as it stands — called when the language
+    /// changes, so that a screen in a tab of its own is drawn in the new one
+    /// rather than left in the old.
+    ///
+    /// Declared by the module rather than guessed by the host. The call that
+    /// produced a screen may have been an action — a refresh, a delete — and
+    /// repeating it to redraw would repeat what it did. A screen that does not
+    /// say keeps what it shows.
+    #[serde(default)]
+    pub redraw: Option<AutoAction>,
     /// A passing notice to raise when this view arrives — the module reporting
     /// what just happened, rather than finding room for it on the screen.
     ///

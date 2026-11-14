@@ -516,3 +516,85 @@ fn a_page_entrance_starts_on_arrival_and_not_again() {
     assert_eq!(page_arrived(&mut shown, None, 14.0), 14.0);
     assert_eq!(page_arrived(&mut shown, None, 15.0), 15.0);
 }
+
+fn step(method: &str) -> ui::Invoke {
+    ui::Invoke {
+        action: ui::Action {
+            capability: "crowdstrike.panel".into(),
+            method: method.into(),
+        },
+        args: serde_json::Map::new(),
+        open_in_tab: false,
+        dismiss: false,
+        confirm: None,
+    }
+}
+
+/// A polling step belongs to the tab that asked for it. Taken while another
+/// tab is on screen, it would be routed by that tab — and a host panel's
+/// "ask again" would answer into a module's own page and replace it.
+#[test]
+fn a_waiting_step_is_only_taken_for_the_tab_that_asked() {
+    let panel = Tab::Detail { id: 7 };
+    let now = std::time::Instant::now();
+    let later = now + std::time::Duration::from_millis(700);
+    let pending = |when| {
+        Some(PendingStep {
+            tab: Some(panel.clone()),
+            invoke: step("section"),
+            when,
+        })
+    };
+
+    // Its own tab on screen, not yet due: wait for it.
+    let mut p = pending(later);
+    assert!(matches!(take_due(&mut p, now, Some(&panel)), Due::Wait(_)));
+    assert!(p.is_some(), "and it is still waiting");
+
+    // Its own tab on screen, due: take it.
+    let mut p = pending(now);
+    match take_due(&mut p, now, Some(&panel)) {
+        Due::Run(invoke) => assert_eq!(invoke.action.method, "section"),
+        other => panic!("expected to run it, got {other:?}"),
+    }
+    assert!(p.is_none(), "taken once");
+
+    // Another tab on screen when it falls due: let go, not sent there.
+    let mut p = pending(now);
+    let elsewhere = Tab::Module("search".into());
+    assert!(matches!(take_due(&mut p, now, Some(&elsewhere)), Due::Dropped));
+    assert!(p.is_none(), "and not left to fire on the next frame either");
+
+    let mut nothing = None;
+    assert!(matches!(take_due(&mut nothing, now, Some(&panel)), Due::Idle));
+}
+
+/// On a language change, a tab of its own is asked for its screen again only
+/// if the screen said how. Repeating whatever call produced it could repeat an
+/// action; a screen that says nothing keeps what it shows.
+#[test]
+fn only_a_screen_that_says_how_is_asked_for_again() {
+    let view = |json: &str| Some(serde_json::from_str::<ui::View>(json).unwrap());
+    let mut tabs = HashMap::new();
+    tabs.insert(1, DetailTab {
+        view: view(r#"{"title":"WS-017","widgets":[],
+            "redraw":{"capability":"crowdstrike.panel","method":"section",
+                      "args":{"id":"aaa","key":"system"}}}"#),
+        ..Default::default()
+    });
+    // Polling, but silent about how to redraw: an `auto` is not a redraw.
+    tabs.insert(2, DetailTab {
+        view: view(r#"{"title":"Scan","widgets":[],
+            "auto":{"capability":"c","method":"poll","args":{}}}"#),
+        ..Default::default()
+    });
+    // Still loading: nothing to redraw.
+    tabs.insert(3, DetailTab::default());
+
+    let asked = redraws(&tabs);
+    assert_eq!(asked.len(), 1, "only the screen that said how");
+    let (id, r) = &asked[0];
+    assert_eq!(*id, 1);
+    assert_eq!(r.method, "section");
+    assert_eq!(r.args.get("key"), Some(&serde_json::json!("system")), "as it stands");
+}

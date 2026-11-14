@@ -101,7 +101,9 @@ pub struct LimenApp {
     /// building and parsing a screen instead of drawing one or noticing a
     /// click. A module that knows its job is long says how often it wants to
     /// be asked; see [`ui::AutoAction::every_ms`].
-    pub(crate) due_auto: Option<(ui::Invoke, std::time::Instant)>,
+    ///
+    /// It belongs to the tab that asked; see [`take_due`].
+    pub(crate) due_auto: Option<PendingStep>,
     /// A module action waiting on the question its button carried, and the one
     /// still fading out — the same pair as the consent dialog, for the same
     /// reason: an answered question has to keep drawing while it leaves.
@@ -444,6 +446,20 @@ impl LimenApp {
                 self.restore_page(&name);
                 self.resume_page();
             }
+            // A tab of its own that was polling something picks its loop up
+            // again, as a module tab does: its step was let go when it was left.
+            Some(Tab::Detail { id }) => {
+                self.restore_page("");
+                if let Some(a) = self
+                    .detail_tabs
+                    .get(&id)
+                    .and_then(|t| t.view.as_ref())
+                    .and_then(|v| v.auto.clone())
+                    && resumes(&a)
+                {
+                    self.chain(a);
+                }
+            }
             // Not a module tab: leave the fields empty rather than showing the
             // last module's view behind a Settings page.
             _ => self.restore_page(""),
@@ -598,23 +614,25 @@ impl LimenApp {
             self.dispatch(invoke);
             return;
         }
-        self.due_auto = Some((
+        self.due_auto = Some(PendingStep {
+            tab: self.active_tab(),
             invoke,
-            std::time::Instant::now() + std::time::Duration::from_millis(wait),
-        ));
+            when: std::time::Instant::now() + std::time::Duration::from_millis(wait),
+        });
     }
 
     /// Whatever the chain is waiting to do, once it is time. Returns how long
     /// is left to wait, so the frame can ask to be drawn again then.
     pub(crate) fn due_now(&mut self) -> Option<std::time::Duration> {
-        let (_, when) = self.due_auto.as_ref()?;
-        let left = when.saturating_duration_since(std::time::Instant::now());
-        if !left.is_zero() {
-            return Some(left);
+        let active = self.active_tab();
+        match take_due(&mut self.due_auto, std::time::Instant::now(), active.as_ref()) {
+            Due::Wait(left) => Some(left),
+            Due::Run(invoke) => {
+                self.dispatch(invoke);
+                None
+            }
+            Due::Idle | Due::Dropped => None,
         }
-        let (invoke, _) = self.due_auto.take()?;
-        self.dispatch(invoke);
-        None
     }
 
     /// Pick up a chain the tab was in the middle of.
@@ -750,6 +768,22 @@ impl LimenApp {
         // Tabs that are not on screen: drop what they were showing, so each is
         // rebuilt in the new language when it is next opened.
         self.module_pages.clear();
+
+        // Tabs of their own keep the screen they were given — unless it says how
+        // to ask for it again, in which case it is asked, in the new language.
+        // One that does not say is left as it is: it may be the answer to an
+        // action, and asking again would repeat the action.
+        for (id, redraw) in redraws(&self.detail_tabs) {
+            if let Some(tab) = self.detail_tabs.get_mut(&id) {
+                tab.busy = true;
+            }
+            self.worker.send(Command::Run {
+                tag: RunTag::Detail { id },
+                capability: redraw.capability,
+                method: redraw.method,
+                params: serde_json::Value::Object(redraw.args),
+            });
+        }
 
         // The tab on screen: ask its module for its view again. `ui` is a
         // module's landing screen, so this returns the user to it — a language
@@ -1047,6 +1081,10 @@ impl LimenApp {
                         self.status = "done".to_string();
                     }
                     RunTag::Detail { id } => {
+                        // The step a screen in this tab asks to be taken next.
+                        let mut next: Option<ui::AutoAction> = None;
+                        // Whether a screen (not a pop-up) landed in the tab.
+                        let mut landed = false;
                         // Fill the detail tab, if it's still open.
                         let Some(tab) = self.detail_tabs.get_mut(&id) else {
                             return;
@@ -1083,6 +1121,8 @@ impl LimenApp {
                                         if !view.title.is_empty() {
                                             tab.title = view.title.clone();
                                         }
+                                        next = view.auto.clone();
+                                        landed = true;
                                         tab.view = Some(view);
                                     }
                                 }
@@ -1096,6 +1136,27 @@ impl LimenApp {
                                 // detail tab keeps its own message.
                                 self.note_panic(&e);
                             }
+                        }
+                        // A screen in a tab of its own polls like any other:
+                        // without this, one that said "reading…, ask me again"
+                        // was never asked, and sat there until clicked. Only
+                        // while its tab is on screen — off screen, the loop
+                        // resumes when the tab is shown (see `show_tab`).
+                        let here = self.active_tab() == Some(Tab::Detail { id });
+                        // A screen arriving in the tab on screen closes the
+                        // pop-ups standing over it, as it does on a module's own
+                        // page (see `accept_view`): the pop-up was a form, and
+                        // this is its answer. Left open, a Save that worked
+                        // would leave the form it saved still on screen.
+                        if landed && here {
+                            for v in std::mem::take(&mut self.modal_stack) {
+                                self.forget_inputs(&v);
+                            }
+                        }
+                        if let Some(a) = next
+                            && here
+                        {
+                            self.chain(a);
                         }
                     }
                 },
