@@ -33,6 +33,7 @@ class Text(Widget):
         multiline: bool = ...,
         default: str = ...,
         password: bool = ...,
+        locked_by: str = ...,
     ) -> None: ...
 
 class File(Widget):

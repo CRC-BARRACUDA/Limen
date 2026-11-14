@@ -271,6 +271,15 @@ pub enum Widget {
         /// cheaply: redraw its form, and nothing more.
         #[serde(default)]
         on_change: Option<AutoAction>,
+        /// The id of a checkbox on the same screen that, while ticked, makes this
+        /// field read-only — "get the address from DHCP" over the address box.
+        ///
+        /// Decided here rather than by the module, so the field locks and frees
+        /// as the box is clicked, with no round trip and no screen redrawn in
+        /// between. The field still shows its value, greyed; what to do with it
+        /// while locked is the module's to decide when the form is sent.
+        #[serde(default)]
+        locked_by: String,
     },
     /// A date, typed or picked off a calendar. Its value reaches the module in
     /// one canonical form whichever way it was given.
@@ -787,24 +796,32 @@ pub fn render_widget(
             default,
             password,
             on_change,
+            locked_by,
         } => {
             if !label.is_empty() {
                 ui.label(styled(label, LabelStyle::Weak));
             }
+            // Read before this field's own entry is borrowed: the box that
+            // locks it lives in the same map.
+            let locked = !locked_by.is_empty()
+                && inputs.get(locked_by).is_some_and(|v| v == "true");
             let value = field_value(ui, id, default, inputs);
             let before = value.clone();
-            if *multiline {
-                ui.add(
-                    egui::TextEdit::multiline(value)
-                        .desired_rows(4)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(placeholder.as_str()),
-                );
-            } else {
-                // Single-line fields — including password/secret ones — get the
-                // animated focus border.
-                text_field(ui, value, placeholder.as_str(), f32::INFINITY, *password);
-            }
+            // A locked field is drawn as it is, greyed, and takes no input.
+            ui.add_enabled_ui(!locked, |ui| {
+                if *multiline {
+                    ui.add(
+                        egui::TextEdit::multiline(value)
+                            .desired_rows(4)
+                            .desired_width(f32::INFINITY)
+                            .hint_text(placeholder.as_str()),
+                    );
+                } else {
+                    // Single-line fields — including password/secret ones — get
+                    // the animated focus border.
+                    text_field(ui, value, placeholder.as_str(), f32::INFINITY, *password);
+                }
+            });
             // A field that tells the module as it is typed, so a form can act
             // on what is in it rather than waiting for a button — a button
             // whose own state depends on the field cannot wait for itself.

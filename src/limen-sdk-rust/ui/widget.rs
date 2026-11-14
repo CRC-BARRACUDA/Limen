@@ -80,6 +80,12 @@ impl Widget {
     pub fn password(self) -> Self {
         self.set("password", json!(true))
     }
+    /// Make this text field read-only while the checkbox `checkbox` (its id) is
+    /// ticked — "get the address from DHCP" over the address box. Limen locks
+    /// and frees it as the box is clicked, without asking the module.
+    pub fn locked_by(self, checkbox: impl Into<String>) -> Self {
+        self.set("locked_by", json!(checkbox.into()))
+    }
 
     /// Draw the button, but do not let it be pressed.
     ///

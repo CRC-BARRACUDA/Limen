@@ -60,19 +60,28 @@ class Label(Widget):
 class Text(Widget):
     """A text input keyed by `id` (its value comes back in the method params).
     `multiline` makes it a box, `password` masks it. Single-line fields get an
-    animated focus border on the host."""
+    animated focus border on the host.
 
-    def __init__(self, id, label="", placeholder="", multiline=False, default="", password=False):
+    `locked_by` names a Checkbox on the same screen: while it is ticked, this
+    field is read-only — "get the address from DHCP" over the address box. The
+    host locks and frees it as the box is clicked, without calling the module."""
+
+    def __init__(self, id, label="", placeholder="", multiline=False, default="", password=False,
+                 locked_by=""):
         self.id, self.label = id, label
         self.placeholder, self.multiline, self.default = placeholder, multiline, default
         self.password = password
+        self.locked_by = locked_by
 
     def to_spec(self):
-        return {
+        spec = {
             "kind": "text", "id": self.id, "label": self.label,
             "placeholder": self.placeholder, "multiline": self.multiline,
             "default": self.default, "password": self.password,
         }
+        if self.locked_by:
+            spec["locked_by"] = self.locked_by
+        return spec
 
 
 class File(Widget):

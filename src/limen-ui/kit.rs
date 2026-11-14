@@ -68,6 +68,11 @@ pub fn demo_view() -> Value {
                 .default("alpha")
                 .on_change("ui.kit", "changed"),
             checkbox("demo.check", "checkbox").checked(),
+            checkbox("demo.lock", "checkbox — ticked, it locks the field under it").checked(),
+            text("demo.locked")
+                .label("text — locked_by the box above: read-only while it is ticked")
+                .default("192.168.1.20/24")
+                .locked_by("demo.lock"),
             separator(),
             label("step — every state").strong(),
             step("pending", "pending"),
