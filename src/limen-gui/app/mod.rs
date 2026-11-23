@@ -245,6 +245,9 @@ pub struct LimenApp {
     pub(crate) update: Option<limen_core::UpdateInfo>,
     /// True while an update download/install is in flight.
     pub(crate) updating: bool,
+    /// The update was held back as not signed by the team: by an unknown key
+    /// (Some(Some(key))) or by none (Some(None)). The Update page asks.
+    pub(crate) update_unsigned: Option<Option<String>>,
     /// Signing in to the platform, and who is signed in.
     pub(crate) account: account::AccountUi,
     /// Limen's vault: secrets for Limen and its modules.
@@ -419,6 +422,7 @@ impl LimenApp {
             removing: HashMap::new(),
             update: None,
             updating: false,
+            update_unsigned: None,
             account: account::AccountUi::new(&cc.egui_ctx),
             vault: vault::VaultUi::new(&cc.egui_ctx),
             installing_runtime: None,
@@ -1207,6 +1211,7 @@ impl LimenApp {
                     // A failed update leaves the Update button spinning — stop it.
                     if msg.starts_with("update failed") {
                         self.updating = false;
+                        self.update_unsigned = None;
                     }
                     self.push_log(format!("[status] {msg}"));
                     self.status = msg;
@@ -1215,6 +1220,13 @@ impl LimenApp {
                 Event::UpdateAvailable(info) => {
                     self.push_log(format!("[update] v{} available", info.latest));
                     self.update = Some(info);
+                    self.update_unsigned = None;
+                }
+                Event::UpdateUnsigned { unknown_key } => {
+                    self.updating = false;
+                    self.busy = false;
+                    self.push_log("[update] held back: not signed by the Limen team".to_string());
+                    self.update_unsigned = Some(unknown_key);
                 }
                 Event::Fatal(e) => {
                     self.push_log(format!("[fatal] {e}"));

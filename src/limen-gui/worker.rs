@@ -68,7 +68,8 @@ pub enum Command {
     /// Uninstall a registry-installed module.
     RemoveModule(String),
     /// Download and apply an available app update, then restart.
-    ApplyUpdate(UpdateInfo),
+    /// `accept_unsigned`: the user said to install a build the team did not sign.
+    ApplyUpdate { info: UpdateInfo, accept_unsigned: bool },
     /// Re-run the app-update check (e.g. after dev mode changed the source).
     CheckUpdate,
     /// Shut modules down and exit the worker.
@@ -119,6 +120,9 @@ pub enum Event {
     Log(String),
     /// A newer app version is available.
     UpdateAvailable(UpdateInfo),
+    /// The update was not applied: it is not signed by the team (or by a key
+    /// that is not the team's — which). The user may install it all the same.
+    UpdateUnsigned { unknown_key: Option<String> },
     /// Installed git modules that have a newer release: name → latest version.
     ModuleUpdates(HashMap<String, String>),
     /// A portable interpreter is being installed (`Some(name)`), or done (`None`).
@@ -499,11 +503,17 @@ fn run(
                     return;
                 }
             }
-            Command::ApplyUpdate(info) => {
+            Command::ApplyUpdate { info, accept_unsigned } => {
                 let _ = evt_tx.send(Event::Status("downloading update…".into()));
                 // On success this restarts the process and never returns.
-                if let Err(e) = apply_update(&info) {
-                    let _ = evt_tx.send(Event::Status(format!("update failed: {e}")));
+                match apply_update(&info, accept_unsigned) {
+                    Ok(()) => {}
+                    Err(limen_core::UpdateError::Unsigned { unknown_key }) => {
+                        let _ = evt_tx.send(Event::UpdateUnsigned { unknown_key });
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(Event::Status(format!("update failed: {e}")));
+                    }
                 }
             }
             Command::CheckUpdate => {

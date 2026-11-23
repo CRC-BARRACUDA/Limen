@@ -707,6 +707,9 @@ impl eframe::App for LimenApp {
         let mut create_category: Option<String> = None;
         let mut delete_category: Option<String> = None;
         let mut do_update = false;
+        // "Install anyway", to an update the team did not sign.
+        let mut do_update_unsigned = false;
+        let update_unsigned = self.update_unsigned.clone();
         let active_tab = self.active_tab();
         let update_info = self.update.clone();
         let updating = self.updating;
@@ -956,7 +959,9 @@ impl eframe::App for LimenApp {
                                 ui,
                                 update_info.as_ref(),
                                 updating,
+                                update_unsigned.as_ref(),
                                 &mut do_update,
+                                &mut do_update_unsigned,
                                 &mut open_changes,
                             )
                         }
@@ -967,9 +972,12 @@ impl eframe::App for LimenApp {
             self.content_rect = Some(content.response.rect);
         }
 
-        if do_update && let Some(info) = self.update.clone() {
+        if (do_update || do_update_unsigned)
+            && let Some(info) = self.update.clone()
+        {
             self.updating = true;
-            self.worker.send(Command::ApplyUpdate(info));
+            self.update_unsigned = None;
+            self.worker.send(Command::ApplyUpdate { info, accept_unsigned: do_update_unsigned });
         }
 
         // Apply tab intents.

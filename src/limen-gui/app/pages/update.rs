@@ -7,7 +7,10 @@ pub(crate) fn update_view(
     ui: &mut egui::Ui,
     info: Option<&limen_core::UpdateInfo>,
     updating: bool,
+    // Held back as not signed by the team: by an unknown key, or by none.
+    unsigned: Option<&Option<String>>,
     do_update: &mut bool,
+    do_update_unsigned: &mut bool,
     show_changes: &mut bool,
 ) {
     ui.add_space(4.0);
@@ -34,6 +37,22 @@ pub(crate) fn update_view(
         ui.hyperlink_to(i18n::t("update.release_notes"), &info.url);
     }
     ui.add_space(14.0);
+    if let Some(unknown_key) = unsigned {
+        // Not the team's, as far as Limen can tell: say so, and let the user
+        // decide — the one thing here that is theirs to.
+        let what = match unknown_key {
+            Some(key) => i18n::t("update.unknown_signer").replace("{key}", key),
+            None => i18n::t("update.unsigned"),
+        };
+        ui.label(egui::RichText::new(what).color(ui::color::WARNING));
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(i18n::t("update.unsigned_hint")).small().color(ui::color::TEXT_MUTED));
+        ui.add_space(8.0);
+        if ui::outline_button(ui, &i18n::t("update.install_anyway"), egui::Vec2::ZERO).clicked() {
+            *do_update_unsigned = true;
+        }
+        ui.add_space(10.0);
+    }
     ui.horizontal(|ui| {
         let clicked = ui
             .add_enabled_ui(!updating, |ui| {

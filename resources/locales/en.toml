@@ -114,6 +114,10 @@ no_binary = "no prebuilt binary for this platform — see release notes"
 changes = "View changes"
 changes_title = "What changed in v{version}"
 no_changes = "The release notes are no longer available."
+unsigned = "This update is not signed by the Limen team, so Limen cannot tell that it is genuine. It was not installed."
+unknown_signer = "This update is signed by a key that is not the Limen team's ({key}). It was not installed."
+unsigned_hint = "Install it only if you know where it came from — a build you made yourself, say."
+install_anyway = "Install anyway"
 
 [license]
 # The pop-up has no title bar text; this heading names the licence.
