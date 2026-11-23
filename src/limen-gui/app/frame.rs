@@ -38,6 +38,10 @@ const STRIP_H: f32 = 26.0 + 2.0 * STRIP_PAD_Y;
 /// workspace growing into its place — or to unfold when one opens.
 const STRIP_SECS: f32 = 0.22;
 
+/// How long the title bar takes to change between showing everything and its
+/// compact form: what it held fades away as the menu button slides in.
+const BAR_SECS: f32 = 0.2;
+
 /// How wide the left panel is: what the title bar held, then the tabs.
 const DRAWER_W: f32 = 248.0;
 
@@ -224,13 +228,31 @@ impl eframe::App for LimenApp {
                 if !compact {
                     self.nav_drawer = false;
                 }
+                // 0 everything shown, 1 compact. On the way between, what the
+                // bar held fades out (or in) while the menu button slides in
+                // (or out) from the left and the brand makes room for it.
+                let t = ui::smoothstep(ui::anim_bool_ctx(
+                    ui.ctx(),
+                    egui::Id::new("titlebar_compact"),
+                    compact,
+                    BAR_SECS,
+                ));
                 ui.horizontal(|ui| {
                     let row_left = ui.cursor().min.x;
-                    if compact {
-                        if menu_button(ui, self.nav_drawer).on_hover_text(i18n::t("nav.menu")).clicked() {
+                    let row_right = ui.max_rect().right();
+                    if t > 0.0 {
+                        const SLOT: f32 = 36.0;
+                        let (slot, _) = ui.allocate_exact_size(egui::vec2(SLOT * t, 24.0), egui::Sense::hover());
+                        let at = egui::Rect::from_min_size(
+                            egui::pos2(slot.min.x - SLOT * (1.0 - t), slot.min.y),
+                            egui::vec2(30.0, 24.0),
+                        );
+                        let mut button = ui.child_ui(at, egui::Layout::left_to_right(egui::Align::Center), None);
+                        button.set_clip_rect(slot.intersect(ui.clip_rect()));
+                        button.set_opacity(t);
+                        if menu_button(&mut button, self.nav_drawer).on_hover_text(i18n::t("nav.menu")).clicked() {
                             self.nav_drawer = !self.nav_drawer;
                         }
-                        ui.add_space(6.0);
                     }
                     // App icon (the ◈ brand mark) in place of the wordmark.
                     let (rect, _) =
@@ -238,47 +260,57 @@ impl eframe::App for LimenApp {
                     draw_brand(ui.painter(), rect, 1.0);
                     ui.add_space(12.0);
                     let active = self.active_tab();
-                    if !compact {
-                        if ui::chip(ui, &i18n::t("nav.about"), active == Some(Tab::About)).clicked() {
-                            open_tab = Some(Tab::About);
-                        }
-                        if ui::chip(ui, &i18n::t("nav.modules"), active == Some(Tab::Modules)).clicked()
-                        {
-                            open_tab = Some(Tab::Modules);
-                        }
-                        if ui::chip(
-                            ui,
-                            &i18n::t("nav.categories"),
-                            active == Some(Tab::Categories),
-                        )
-                        .clicked()
-                        {
-                            open_tab = Some(Tab::Categories);
-                        }
-                        if ui::chip(ui, &i18n::t("nav.vault"), active == Some(Tab::Vault)).clicked() {
-                            open_tab = Some(Tab::Vault);
-                        }
-                        // "Update available" pill, next to Modules.
-                        if self.update.is_some() {
-                            ui.add_space(6.0);
-                            if ui::pill(ui, &i18n::t("nav.update_available"), ui::color::ORANGE)
-                                .on_hover_text(i18n::t("nav.update_available_hint"))
-                                .clicked()
-                            {
-                                open_tab = Some(Tab::Update);
+                    if t < 1.0 {
+                        ui.scope(|ui| {
+                            ui.set_opacity(1.0 - t);
+                            if t > 0.0 {
+                                // Too narrow for it by now: cut where the right-hand
+                                // group begins rather than fade across it.
+                                let mut clip = ui.clip_rect();
+                                clip.max.x = clip.max.x.min(row_right - self.bar_right_w - 8.0);
+                                ui.set_clip_rect(clip);
                             }
-                        }
-                        // Portable-interpreter install indicator (spinner + label),
-                        // shown while a runtime like Python is being bundled.
-                        if let Some(rt) = &self.installing_runtime {
-                            ui.add_space(8.0);
-                            ui.spinner();
-                            ui.label(
-                                egui::RichText::new(format!("{} {rt}…", i18n::t("nav.installing")))
-                                    .small()
-                                    .color(ui::color::TEXT_MUTED),
-                            );
-                        }
+                                if ui::chip(ui, &i18n::t("nav.about"), active == Some(Tab::About)).clicked() {
+                                    open_tab = Some(Tab::About);
+                                }
+                                if ui::chip(ui, &i18n::t("nav.modules"), active == Some(Tab::Modules)).clicked()
+                                {
+                                    open_tab = Some(Tab::Modules);
+                                }
+                                if ui::chip(
+                                    ui,
+                                    &i18n::t("nav.categories"),
+                                    active == Some(Tab::Categories),
+                                )
+                                .clicked()
+                                {
+                                    open_tab = Some(Tab::Categories);
+                                }
+                                if ui::chip(ui, &i18n::t("nav.vault"), active == Some(Tab::Vault)).clicked() {
+                                    open_tab = Some(Tab::Vault);
+                                }
+                                // "Update available" pill, next to Modules.
+                                if self.update.is_some() {
+                                    ui.add_space(6.0);
+                                    if ui::pill(ui, &i18n::t("nav.update_available"), ui::color::ORANGE)
+                                        .on_hover_text(i18n::t("nav.update_available_hint"))
+                                        .clicked()
+                                    {
+                                        open_tab = Some(Tab::Update);
+                                    }
+                                }
+                                // Portable-interpreter install indicator (spinner + label),
+                                // shown while a runtime like Python is being bundled.
+                                if let Some(rt) = &self.installing_runtime {
+                                    ui.add_space(8.0);
+                                    ui.spinner();
+                                    ui.label(
+                                        egui::RichText::new(format!("{} {rt}…", i18n::t("nav.installing")))
+                                            .small()
+                                            .color(ui::color::TEXT_MUTED),
+                                    );
+                                }
+                        });
                     }
                     let left_w = ui.cursor().min.x - row_left;
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -312,37 +344,44 @@ impl eframe::App for LimenApp {
                                     .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         }
-                        if !compact {
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.add_space(6.0);
-                            if ui::chip(ui, "🛠", active == Some(Tab::Developer))
-                                .on_hover_text(i18n::t("nav.developer"))
-                                .clicked()
-                            {
-                                open_tab = Some(Tab::Developer);
-                            }
-                            if ui::chip(ui, "⚙", active == Some(Tab::Settings))
-                                .on_hover_text(i18n::t("nav.settings"))
-                                .clicked()
-                            {
-                                open_tab = Some(Tab::Settings);
-                            }
-                            // The vault's padlock, beside the gear: shut or open.
-                            self.vault.padlock(ui);
-                            // The account, left of the gear: as the website's header.
-                            if !matches!(
-                                self.account.state,
-                                account::AccountState::Off | account::AccountState::Restoring { who: None }
-                            ) {
-                                ui.add_space(6.0);
-                                ui.separator();
-                                ui.add_space(6.0);
-                                account::account_chip(ui, &self.account, &mut account_action);
-                            }
+                        if t < 1.0 {
+                            ui.scope(|ui| {
+                                ui.set_opacity(1.0 - t);
+                                    ui.add_space(6.0);
+                                    ui.separator();
+                                    ui.add_space(6.0);
+                                    if ui::chip(ui, "🛠", active == Some(Tab::Developer))
+                                        .on_hover_text(i18n::t("nav.developer"))
+                                        .clicked()
+                                    {
+                                        open_tab = Some(Tab::Developer);
+                                    }
+                                    if ui::chip(ui, "⚙", active == Some(Tab::Settings))
+                                        .on_hover_text(i18n::t("nav.settings"))
+                                        .clicked()
+                                    {
+                                        open_tab = Some(Tab::Settings);
+                                    }
+                                    // The vault's padlock, beside the gear: shut or open.
+                                    self.vault.padlock(ui);
+                                    // The account, left of the gear: as the website's header.
+                                    if !matches!(
+                                        self.account.state,
+                                        account::AccountState::Off | account::AccountState::Restoring { who: None }
+                                    ) {
+                                        ui.add_space(6.0);
+                                        ui.separator();
+                                        ui.add_space(6.0);
+                                        account::account_chip(ui, &self.account, &mut account_action);
+                                    }
+                            });
+                        }
+                        if t <= 0.0 {
                             // What the row needs to show all of this: what is
-                            // left of the gap, and what is right of it.
-                            self.bar_needs = left_w + ui.min_rect().width() + 16.0;
+                            // left of the gap, and what is right of it. Taken
+                            // only while all of it is plainly shown.
+                            self.bar_right_w = ui.min_rect().width();
+                            self.bar_needs = left_w + self.bar_right_w + 16.0;
                         }
                     });
                 });

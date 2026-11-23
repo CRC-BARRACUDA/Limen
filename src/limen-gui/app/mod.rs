@@ -275,6 +275,9 @@ pub struct LimenApp {
     /// The width the title bar's row needs to show everything, as last
     /// measured while it did (0: not measured yet).
     pub(crate) bar_needs: f32,
+    /// How much of that is the right-hand group (settings, account, the
+    /// window's buttons).
+    pub(crate) bar_right_w: f32,
     /// The left panel is open (it only exists while the bar is compact).
     pub(crate) nav_drawer: bool,
 }
@@ -429,6 +432,7 @@ impl LimenApp {
             tab_scroll_to: None,
             bar_compact: false,
             bar_needs: 0.0,
+            bar_right_w: 0.0,
             nav_drawer: false,
         }
     }
