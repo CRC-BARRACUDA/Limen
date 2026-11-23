@@ -118,6 +118,11 @@ pub struct Config {
     /// 0 = never.
     #[serde(default)]
     pub vault_lock_minutes: Option<u32>,
+
+    /// Where the vault's key file was last, when it needs one — offered again
+    /// at the next unlock. The path only: the file itself is never copied.
+    #[serde(default)]
+    pub vault_keyfile: Option<String>,
 }
 
 impl Default for Config {
@@ -139,6 +144,7 @@ impl Default for Config {
             avatar_url: None,
             avatar_asset_base: None,
             vault_lock_minutes: None,
+            vault_keyfile: None,
         }
     }
 }
