@@ -58,7 +58,7 @@ pub struct LimenApp {
     /// Names of installed modules that came from a git install (vs. manual).
     pub(crate) git_installed: HashSet<String>,
     /// name → (branch, short commit) for git-installed modules.
-    pub(crate) git_meta: HashMap<String, (String, String)>,
+    pub(crate) git_meta: HashMap<String, (String, String, String)>,
     /// Installed git modules with a newer release available: name → latest version.
     pub(crate) available_updates: HashMap<String, String>,
     /// Modules that failed to start: name → error (shown in the module's tab).
@@ -119,6 +119,10 @@ pub struct LimenApp {
     /// deletes the module's directory — including anything it had fetched into
     /// `tools/` — so it is not something to do on a stray click.
     pub(crate) pending_remove: Option<String>,
+    /// An install held back as not signed by the team, waiting for the user's
+    /// answer: what to send again, and what the dialog says of it.
+    pub(crate) pending_unsigned: Option<crate::worker::HeldInstall>,
+    pub(crate) unsigned_subject: Option<String>,
     /// The name shown in the confirmation, kept while it animates closed.
     pub(crate) confirm_subject: Option<String>,
 
@@ -357,6 +361,8 @@ impl LimenApp {
             vault_revealed_at: None,
             pending_action: None,
             pending_remove: None,
+            pending_unsigned: None,
+            unsigned_subject: None,
             confirm_subject: None,
             detail_tabs: HashMap::new(),
             next_detail_id: 0,
@@ -930,6 +936,30 @@ impl LimenApp {
         }
     }
 
+    /// Draw the question about modules the team did not sign, and report what
+    /// to install once the user says to go on. Called every frame, as the
+    /// removal's is, so that it can fade out.
+    pub(crate) fn confirmed_unsigned(&mut self, ctx: &egui::Context) -> Option<crate::worker::HeldInstall> {
+        let answer = ui::confirm_dialog(
+            ctx,
+            "unsigned_modules",
+            self.pending_unsigned.is_some(),
+            &i18n::t("confirm.unsigned_title"),
+            self.unsigned_subject.as_deref(),
+            &i18n::t("confirm.unsigned_yes"),
+            &i18n::t("confirm.cancel"),
+            self.content_rect,
+        );
+        match answer {
+            Some(true) => self.pending_unsigned.take(),
+            Some(false) => {
+                self.pending_unsigned = None;
+                None
+            }
+            None => None,
+        }
+    }
+
     /// Recompute which sensitive modules the user has granted (trusted at their
     /// current digest). Cheap enough to run on module load / after a grant.
     /// The module that provides `capability`, if any.
@@ -990,6 +1020,19 @@ impl LimenApp {
                     // A reload follows a completed install/remove — clear the spinner.
                     self.installing = None;
                     self.status = format!("{} module(s) loaded", self.modules.len());
+                }
+                Event::ModulesUnsigned { what, modules } => {
+                    // One line per module: which, and what is wrong with it.
+                    let lines: Vec<String> = modules
+                        .iter()
+                        .map(|m| match &m.unknown_key {
+                            Some(key) => format!("{} {} — {}", m.name, m.version, i18n::t("confirm.unsigned_unknown").replace("{key}", key)),
+                            None => format!("{} {} — {}", m.name, m.version, i18n::t("confirm.unsigned_none")),
+                        })
+                        .collect();
+                    self.push_log(format!("[modules] held back, not signed by the Limen team: {}", lines.join("; ")));
+                    self.unsigned_subject = Some(format!("{}\n\n{}", lines.join("\n"), i18n::t("confirm.unsigned_hint")));
+                    self.pending_unsigned = Some(what);
                 }
                 Event::ModuleUpdates(map) => {
                     self.available_updates = map;

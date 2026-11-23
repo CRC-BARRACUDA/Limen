@@ -39,6 +39,8 @@ no_tabs = "No open tabs — use the buttons above."
 [about]
 branch = "branch"
 commit = "commit"
+signed_by = "signed by"
+unsigned = "not signed"
 tagline = "A modular tool for security, analysis and audit."
 view_license = "View license"
 github = "GitHub ↗"
@@ -175,6 +177,11 @@ remove_yes = "Remove"
 # host does not know.
 go = "Continue"
 cancel = "Cancel"
+unsigned_title = "Not signed by the Limen team. Install anyway?"
+unsigned_yes = "Install anyway"
+unsigned_none = "no signature"
+unsigned_unknown = "signed by an unknown key ({key})"
+unsigned_hint = "Limen cannot tell that these are genuine. Install them only if you know where they came from."
 
 [cal]
 month_1 = "January"

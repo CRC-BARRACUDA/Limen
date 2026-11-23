@@ -1155,11 +1155,26 @@ impl eframe::App for LimenApp {
         if let Some(name) = delete_category {
             self.delete_category(&name);
         }
+        // "Install anyway", to modules the team did not sign: the same install
+        // or update again, this time accepted.
+        let mut accept_unsigned = false;
+        let (mut add_module, mut update_module) = (add_module, update_module);
+        match self.confirmed_unsigned(ctx) {
+            Some(crate::worker::HeldInstall::Add(reference)) => {
+                add_module = Some(reference);
+                accept_unsigned = true;
+            }
+            Some(crate::worker::HeldInstall::Update(name)) => {
+                update_module = Some(name);
+                accept_unsigned = true;
+            }
+            None => {}
+        }
         if let Some(reference) = add_module {
             self.busy = true;
             self.installing = Some(reference.clone());
             self.status = format!("installing {reference}…");
-            self.worker.send(Command::AddModule(reference));
+            self.worker.send(Command::AddModule { reference, accept_unsigned });
         }
         if let Some(name) = update_module {
             // Close its tab first — its loaded UI is about to be replaced.
@@ -1173,7 +1188,7 @@ impl eframe::App for LimenApp {
             self.busy = true;
             self.installing = Some(name.clone());
             self.status = format!("updating {name}…");
-            self.worker.send(Command::UpdateModule(name));
+            self.worker.send(Command::UpdateModule { name, accept_unsigned });
         }
         if reload {
             // Re-scan the module directories from disk: pick up newly-added

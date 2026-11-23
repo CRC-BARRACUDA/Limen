@@ -22,7 +22,7 @@ pub(crate) fn modules_page(
     modules: &[ModuleSpec],
     inactive: &HashMap<String, Inactive>,
     git_installed: &HashSet<String>,
-    git_meta: &HashMap<String, (String, String)>,
+    git_meta: &HashMap<String, (String, String, String)>,
     available_updates: &HashMap<String, String>,
     remote: &[RemoteModule],
     remote_loading: bool,
@@ -271,7 +271,7 @@ pub(crate) fn module_card(
     // opening it means every module looks the same until you try one.
     inactive: Option<&Inactive>,
     from_git: bool,
-    git_meta: Option<&(String, String)>,
+    git_meta: Option<&(String, String, String)>,
     latest: Option<&str>,
     installing: &Option<String>,
     installing_runtime: &Option<String>,
@@ -377,7 +377,7 @@ pub(crate) fn module_card(
                         }
                         // Git revision this module was installed from — branch on
                         // top, commit below.
-                        if let Some((branch, commit)) = git_meta {
+                        if let Some((branch, commit, signed_by)) = git_meta {
                             let mut lines: Vec<String> = Vec::new();
                             if !branch.is_empty() {
                                 lines.push(format!("{} - {branch}", i18n::t("about.branch")));
@@ -385,6 +385,13 @@ pub(crate) fn module_card(
                             if !commit.is_empty() {
                                 lines.push(format!("{} - {commit}", i18n::t("about.commit")));
                             }
+                            // Whose signature it was installed under, or that
+                            // it had none of the team's.
+                            lines.push(if signed_by.is_empty() {
+                                i18n::t("about.unsigned")
+                            } else {
+                                format!("{} - {signed_by}", i18n::t("about.signed_by"))
+                            });
                             if !lines.is_empty() {
                                 ui.add_space(4.0);
                                 for line in lines {

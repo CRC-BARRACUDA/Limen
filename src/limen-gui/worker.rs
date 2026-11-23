@@ -28,13 +28,21 @@ pub struct ModuleSnapshot {
     pub specs: Vec<ModuleSpec>,
     pub git_installed: Vec<String>,
     /// name → (branch, short commit) for git-installed modules.
-    pub git_meta: std::collections::HashMap<String, (String, String)>,
+    /// And which of the team's keys signed it (empty: none did).
+    pub git_meta: std::collections::HashMap<String, (String, String, String)>,
     /// name → error, for modules that failed to start (shown in their tab).
     pub failed: HashMap<String, String>,
     /// Sensitive modules whose current on-disk digest matches the trust store.
     /// Computed here (worker thread) because digesting a module dir hashes all
     /// its files — some large — and must never run on the UI thread.
     pub trusted: Vec<String>,
+}
+
+/// An install or update that was held back, to be sent again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldInstall {
+    Add(String),
+    Update(String),
 }
 
 /// How many available-module metadata fetches run concurrently.
@@ -57,9 +65,10 @@ pub enum Command {
         params: Value,
     },
     /// Install a module (and deps) from `owner/repo[@ver]` or a local path.
-    AddModule(String),
+    /// `accept_unsigned`: the user said to install what the team did not sign.
+    AddModule { reference: String, accept_unsigned: bool },
     /// Re-install an installed module from its locked source (update in place).
-    UpdateModule(String),
+    UpdateModule { name: String, accept_unsigned: bool },
     /// Internal: a threaded module download finished — report it, then reload
     /// (engine work must happen back on the worker thread).
     FinishAdd { status: String, ok: bool },
@@ -105,6 +114,10 @@ pub enum Event {
     Ready(ModuleSnapshot),
     /// Updated installed set (after `Refresh` / install / remove).
     Modules(ModuleSnapshot),
+    /// An install or update was held back: these modules are not signed by the
+    /// team. Nothing was installed; `what` is what to send again if the user
+    /// says to go on.
+    ModulesUnsigned { what: HeldInstall, modules: Vec<limen_registry::UnsignedModule> },
     /// One available module resolved (streamed as it's fetched, in parallel).
     RemoteFound(RemoteModule),
     /// The available-module listing finished (`Ok`) or the org list failed.
@@ -214,6 +227,18 @@ fn start_engine(dirs: &[PathBuf], evt_tx: &Sender<Event>) -> Result<Engine, Stri
     Ok(engine)
 }
 
+/// What to say of an install that did not go through. Held back as not signed
+/// by the team: the GUI is told, to ask the user; anything else is a failure.
+fn held_or_failed(e: anyhow::Error, what: HeldInstall, failed: &str, evt: &Sender<Event>) -> String {
+    match e.downcast_ref::<limen_registry::UnsignedModules>() {
+        Some(held) => {
+            let _ = evt.send(Event::ModulesUnsigned { what, modules: held.modules.clone() });
+            "not installed: not signed by the Limen team".to_string()
+        }
+        None => format!("{failed}: {e:#}"),
+    }
+}
+
 /// Snapshot the installed modules and read the lockfile to mark which came from
 /// a git install (vs. manually placed).
 fn snapshot(engine: &Engine) -> ModuleSnapshot {
@@ -221,9 +246,7 @@ fn snapshot(engine: &Engine) -> ModuleSnapshot {
     let mut git_meta = std::collections::HashMap::new();
     if let Ok(lock) = Lockfile::load(&paths::home().join("limen.lock")) {
         for e in lock.modules.into_iter().filter(|e| e.source == "git") {
-            if !e.branch.is_empty() || !e.commit.is_empty() {
-                git_meta.insert(e.name.clone(), (e.branch, e.commit));
-            }
+            git_meta.insert(e.name.clone(), (e.branch, e.commit, e.signed_by));
             git_installed.push(e.name);
         }
     }
@@ -435,33 +458,35 @@ fn run(
                     .map_err(|e| format!("{e:#}"));
                 let _ = evt_tx.send(Event::RunDone { tag, result });
             }
-            Command::AddModule(reference) => {
+            Command::AddModule { reference, accept_unsigned } => {
                 // Download on its own thread so the worker keeps serving other
                 // commands (e.g. running another module's UI). The reload — which
                 // needs the live engine — is marshaled back via `FinishAdd`.
                 let cmd_tx = cmd_tx.clone();
+                let evt = evt_tx.clone();
                 thread::spawn(move || {
-                    let (status, ok) = match Registry::new(paths::home()).accept_unsigned(true).add(&reference) {
+                    let (status, ok) = match Registry::new(paths::home()).accept_unsigned(accept_unsigned).add(&reference) {
                         Ok(report) => (
                             format!("installed {} module(s)", report.installed.len()),
                             true,
                         ),
-                        Err(e) => (format!("install failed: {e:#}"), false),
+                        Err(e) => (held_or_failed(e, HeldInstall::Add(reference), "install failed", &evt), false),
                     };
                     let _ = cmd_tx.send(Command::FinishAdd { status, ok });
                 });
             }
-            Command::UpdateModule(name) => {
+            Command::UpdateModule { name, accept_unsigned } => {
                 // Same off-thread pattern as install: re-fetch from the locked
                 // source, then reload on the worker via FinishAdd.
                 let cmd_tx = cmd_tx.clone();
+                let evt = evt_tx.clone();
                 thread::spawn(move || {
-                    let (status, ok) = match Registry::new(paths::home()).accept_unsigned(true).update(Some(&name)) {
+                    let (status, ok) = match Registry::new(paths::home()).accept_unsigned(accept_unsigned).update(Some(&name)) {
                         Ok(report) => (
                             format!("updated {} module(s)", report.installed.len()),
                             true,
                         ),
-                        Err(e) => (format!("module update failed: {e:#}"), false),
+                        Err(e) => (held_or_failed(e, HeldInstall::Update(name), "module update failed", &evt), false),
                     };
                     let _ = cmd_tx.send(Command::FinishAdd { status, ok });
                 });
