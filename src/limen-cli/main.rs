@@ -99,6 +99,14 @@ enum Command {
     Untrust { name: String },
     /// Verify installed modules against the lockfile digests (tamper check).
     Verify,
+    /// Print the line the team signs for the module in DIR: its name, version
+    /// and the digest of its files. For releasing a module (see
+    /// scripts/sign-module.sh): DIR has to hold the files exactly as the
+    /// repository has them — an export of the commit, not a working copy.
+    ModuleStatement { dir: PathBuf },
+    /// Check FILE against a detached signature with the team's keys built into
+    /// this Limen, and say whose it is. Fails unless it is the team's.
+    VerifySignature { file: PathBuf, signature: PathBuf },
     /// Run the built-in cross-language, cross-transport demo.
     Demo,
 }
@@ -186,6 +194,26 @@ fn main() -> Result<()> {
                 println!("removed {name}");
             } else {
                 println!("{name} was not installed");
+            }
+        }
+        Command::ModuleStatement { dir } => {
+            let manifest = limen_proto::Manifest::from_dir(dir).with_context(|| format!("reading the manifest in {}", dir.display()))?;
+            let digest = digest_dir(dir)?;
+            // Exactly the bytes that are signed: the line, and its newline.
+            print!("{}", limen_registry::statement(&manifest.module.name, &manifest.module.version, &digest));
+        }
+        Command::VerifySignature { file, signature } => {
+            use limen_sign::Verdict;
+            let content = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+            let sig = std::fs::read(signature).with_context(|| format!("reading {}", signature.display()))?;
+            match limen_sign::verify(&content, Some(&sig)) {
+                Verdict::Valid(signer) => {
+                    let retired = if signer.retired { " (a retired key)" } else { "" };
+                    println!("valid: signed by {}{retired}, {}", signer.name, signer.fingerprint);
+                }
+                Verdict::UnknownSigner { key } => bail!("not the team's: signed by an unknown key, {key}"),
+                Verdict::Unsigned => bail!("not signed"),
+                Verdict::Bad(why) => bail!("refused: {why}"),
             }
         }
         Command::Permissions => {

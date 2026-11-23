@@ -2925,7 +2925,9 @@ dependencies = [
  "anyhow",
  "clap",
  "limen-core",
+ "limen-proto",
  "limen-registry",
+ "limen-sign",
  "serde_json",
 ]
 
