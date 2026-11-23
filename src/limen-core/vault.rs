@@ -6,7 +6,18 @@
 //! * the secrets — one compartment per owner (`limen`, `module:<name>`) —
 //!   encrypted with a random 256-bit **data key** (XChaCha20-Poly1305);
 //! * the data key, encrypted with a key derived from the **master password**
-//!   (Argon2id), so the vault opens on any machine that knows the password.
+//!   (Argon2id), so the vault opens on any machine that knows the password —
+//!   and, if the vault was set up with them, has its other factors:
+//!
+//! **Factors.** Besides the password — never instead of it — a vault can need
+//! a **key file** and a **security key** answering HMAC-SHA1
+//! challenge-response (a YubiKey's OTP slot). The key derived from the
+//! password is then mixed (SHA-256) with the key file's SHA-256 and with the
+//! security key's answer to a random challenge kept in the file; that is what
+//! wraps the data key. Which factors a vault needs, and its challenge, are part
+//! of the header — so taking one out of the file makes nothing open, rather
+//! than the vault opening with less. A new challenge is drawn whenever the
+//! factors or the password change.
 //!
 //! "Remember on this machine" keeps the data key in the OS keychain as well,
 //! so that machine opens the vault at start without asking. A copy of the
@@ -30,7 +41,12 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 const FORMAT: &str = "limen-vault";
-const VERSION: u32 = 1;
+/// 2 added factors. A version-1 file opens as it always did, and is written as
+/// version 2 the next time its password or factors change.
+const VERSION: u32 = 2;
+/// The size of the challenge a security key is given: the most HMAC-SHA1
+/// challenge-response takes.
+const CHALLENGE_LEN: usize = 64;
 /// Limen's own compartment.
 pub const LIMEN: &str = "limen";
 
@@ -47,6 +63,14 @@ pub enum VaultError {
     /// The vault is locked: unlock it first.
     Locked,
     WrongPassword,
+    /// The password, the key file or the security key is wrong — said when
+    /// the vault needs more than a password, since which one cannot be told.
+    WrongKey,
+    /// A factor the vault needs was not given: the key file, the security key.
+    NeedsFactor(Factor),
+    /// The security key could not be asked: not plugged in, not answering,
+    /// not touched in time.
+    SecurityKey(String),
     /// The file is damaged or was tampered with.
     Corrupt(String),
     Io(String),
@@ -60,6 +84,10 @@ impl std::fmt::Display for VaultError {
             VaultError::Missing => write!(f, "there is no vault yet"),
             VaultError::Locked => write!(f, "the vault is locked"),
             VaultError::WrongPassword => write!(f, "wrong master password"),
+            VaultError::WrongKey => write!(f, "wrong master password, key file or security key"),
+            VaultError::NeedsFactor(Factor::KeyFile) => write!(f, "this vault needs its key file"),
+            VaultError::NeedsFactor(Factor::SecurityKey) => write!(f, "this vault needs its security key"),
+            VaultError::SecurityKey(why) => write!(f, "the security key: {why}"),
             VaultError::Corrupt(why) => write!(f, "the vault file is damaged: {why}"),
             VaultError::Io(why) => write!(f, "the vault file: {why}"),
             VaultError::Keychain(why) => write!(f, "the system keychain: {why}"),
@@ -91,6 +119,90 @@ impl Kdf {
     pub const TEST: Kdf = Kdf { m_kib: 64, t: 1, p: 1 };
 }
 
+/// One of the things, besides the password, a vault can need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Factor {
+    KeyFile,
+    SecurityKey,
+}
+
+/// A security key that answers HMAC-SHA1 challenge-response: a YubiKey's OTP
+/// slot, or a stand-in in tests. Asking may wait for a touch.
+pub trait ChallengeResponse {
+    /// HMAC-SHA1 of `challenge` under the secret kept in `slot` (1 or 2).
+    fn respond(&self, slot: u8, challenge: &[u8]) -> R<Zeroizing<[u8; 20]>>;
+}
+
+/// What opens the vault: the master password, and its other factors when it
+/// has them. A bare `&str` is a password alone.
+#[derive(Clone, Copy)]
+pub struct Credentials<'a> {
+    pub password: &'a str,
+    /// The key file's contents.
+    pub keyfile: Option<&'a [u8]>,
+    /// The security key, and the slot to use. Opening asks the slot the vault
+    /// was set up with; the slot here is the one a new key is set up on.
+    pub security_key: Option<(&'a dyn ChallengeResponse, u8)>,
+}
+
+impl<'a> Credentials<'a> {
+    pub fn password(password: &'a str) -> Self {
+        Self { password, keyfile: None, security_key: None }
+    }
+}
+
+impl<'a> From<&'a str> for Credentials<'a> {
+    fn from(password: &'a str) -> Self {
+        Self::password(password)
+    }
+}
+
+impl<'a> From<&'a String> for Credentials<'a> {
+    fn from(password: &'a String) -> Self {
+        Self::password(password)
+    }
+}
+
+/// The factors a vault needs besides its password: public, kept in the
+/// header, and bound to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Factors {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keyfile: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_key: Option<SecurityKeyFactor>,
+}
+
+/// The security key a vault needs: which slot, and the challenge it is given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityKeyFactor {
+    pub slot: u8,
+    /// Hex. Not a secret: what makes it worth anything is the key's answer.
+    pub challenge: String,
+}
+
+impl Factors {
+    pub fn is_empty(&self) -> bool {
+        !self.keyfile && self.security_key.is_none()
+    }
+
+    /// As the header binds them: changing any of it changes the seal.
+    fn bound(&self) -> String {
+        let sk = match &self.security_key {
+            Some(k) => format!("{}:{}", k.slot, k.challenge),
+            None => "-".into(),
+        };
+        format!("keyfile={}|security_key={sk}", self.keyfile as u8)
+    }
+}
+
+/// A new key file's contents: 32 random bytes, as hex. Any file can be a key
+/// file — it is its SHA-256 that counts — but one made here is plainly random.
+pub fn new_keyfile() -> R<Zeroizing<Vec<u8>>> {
+    let bytes = Zeroizing::new(random::<32>()?);
+    Ok(Zeroizing::new(format!("{}\n", hex(bytes.as_ref())).into_bytes()))
+}
+
 /// A sealed box: a nonce and what was encrypted with it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Sealed {
@@ -107,7 +219,10 @@ struct Envelope {
     id: String,
     kdf: Kdf,
     salt: String,
-    /// The data key, under the password-derived key.
+    /// What, besides the password, opens it (version 2).
+    #[serde(default, skip_serializing_if = "Factors::is_empty")]
+    factors: Factors,
+    /// The data key, under the key the password — and the factors — make.
     key: Sealed,
     /// The secrets, under the data key.
     data: Sealed,
@@ -117,11 +232,51 @@ impl Envelope {
     /// The associated data of both encryptions: everything that says how to
     /// open the rest.
     fn aad(&self) -> Vec<u8> {
-        format!(
+        let mut aad = format!(
             "{}|{}|{}|{}|{}|{}|{}",
             self.format, self.version, self.id, self.kdf.m_kib, self.kdf.t, self.kdf.p, self.salt
-        )
-        .into_bytes()
+        );
+        // Version 1 sealed exactly the above; from 2 on, the factors too.
+        if self.version >= 2 {
+            aad.push('|');
+            aad.push_str(&self.factors.bound());
+        }
+        aad.into_bytes()
+    }
+
+    /// The key that wraps the data key: the password's, mixed with the
+    /// factors' when there are any.
+    fn wrapping_key(&self, c: &Credentials) -> R<Zeroizing<[u8; 32]>> {
+        use sha2::{Digest, Sha256};
+        let pk = derive(c.password, &unhex(&self.salt)?, self.kdf)?;
+        if self.factors.is_empty() {
+            return Ok(pk);
+        }
+        let mut h = Sha256::new();
+        h.update(b"limen-vault/factors/1");
+        h.update(pk.as_ref());
+        if self.factors.keyfile {
+            let file = c.keyfile.ok_or(VaultError::NeedsFactor(Factor::KeyFile))?;
+            h.update(b"|keyfile|");
+            h.update(Sha256::digest(file));
+        }
+        if let Some(k) = &self.factors.security_key {
+            let (device, _) = c.security_key.ok_or(VaultError::NeedsFactor(Factor::SecurityKey))?;
+            let answer = device.respond(k.slot, &unhex(&k.challenge)?)?;
+            h.update(b"|security_key|");
+            h.update(answer.as_ref());
+        }
+        Ok(Zeroizing::new(h.finalize().into()))
+    }
+
+    /// What a wrong set of credentials is called: a wrong password, or — when
+    /// there is more than a password — a wrong key.
+    fn wrong(&self) -> VaultError {
+        if self.factors.is_empty() {
+            VaultError::WrongPassword
+        } else {
+            VaultError::WrongKey
+        }
     }
 }
 
@@ -237,7 +392,7 @@ impl Vault {
         let envelope = match std::fs::read_to_string(path) {
             Ok(text) => {
                 let e: Envelope = serde_json::from_str(&text).map_err(|e| VaultError::Corrupt(e.to_string()))?;
-                if e.format != FORMAT || e.version != VERSION {
+                if e.format != FORMAT || !(1..=VERSION).contains(&e.version) {
                     return Err(VaultError::Corrupt(format!("unknown format {} v{}", e.format, e.version)));
                 }
                 Some(e)
@@ -261,23 +416,34 @@ impl Vault {
         self.open.is_some()
     }
 
-    /// Make a new, empty vault with this master password, and open it.
-    pub fn create(&mut self, password: &str, kdf: Kdf) -> R<()> {
+    /// What, besides the password, this vault needs to open — for the GUI
+    /// to ask for it. None when there is no vault.
+    pub fn factors(&self) -> Option<&Factors> {
+        self.envelope.as_ref().map(|e| &e.factors)
+    }
+
+    /// Make a new, empty vault with these credentials — the password, and
+    /// whichever factors are given — and open it.
+    pub fn create<'a>(&mut self, credentials: impl Into<Credentials<'a>>, kdf: Kdf) -> R<()> {
         // Over a file that is there — even one this vault could not read — never.
         if self.exists() || self.path.exists() {
             return Err(VaultError::Io("a vault already exists".into()));
         }
         let key = Zeroizing::new(random::<32>()?);
         self.open = Some(Open { key, secrets: Secrets::new() });
-        self.write_with_password(password, kdf, hex(&random::<16>()?))
+        let written = self.write_with_key(&credentials.into(), kdf, hex(&random::<16>()?));
+        if written.is_err() {
+            self.open = None;
+        }
+        written
     }
 
-    /// Open it with the master password.
-    pub fn unlock(&mut self, password: &str) -> R<()> {
+    /// Open it with the master password, and its factors if it has them.
+    pub fn unlock<'a>(&mut self, credentials: impl Into<Credentials<'a>>) -> R<()> {
         let e = self.envelope.as_ref().ok_or(VaultError::Missing)?;
-        let pk = derive(password, &unhex(&e.salt)?, e.kdf)?;
-        let Some(key) = open(&pk, &e.key, &e.aad())? else {
-            return Err(VaultError::WrongPassword);
+        let wk = e.wrapping_key(&credentials.into())?;
+        let Some(key) = open(&wk, &e.key, &e.aad())? else {
+            return Err(e.wrong());
         };
         let key: [u8; 32] = key.as_slice().try_into().map_err(|_| VaultError::Corrupt("key size".into()))?;
         // The password opened the key; if the key does not open the secrets,
@@ -288,12 +454,12 @@ impl Vault {
         })
     }
 
-    /// Whether `password` is the master password — without opening, closing
-    /// or changing anything. For asking again before showing a secret.
-    pub fn check_password(&self, password: &str) -> R<bool> {
+    /// Whether these credentials open it — without opening, closing or
+    /// changing anything. For asking again before showing a secret.
+    pub fn check_password<'a>(&self, credentials: impl Into<Credentials<'a>>) -> R<bool> {
         let e = self.envelope.as_ref().ok_or(VaultError::Missing)?;
-        let pk = derive(password, &unhex(&e.salt)?, e.kdf)?;
-        Ok(open(&pk, &e.key, &e.aad())?.is_some())
+        let wk = e.wrapping_key(&credentials.into())?;
+        Ok(open(&wk, &e.key, &e.aad())?.is_some())
     }
 
     /// Open it with the key this machine remembers, if it remembers one.
@@ -398,20 +564,28 @@ impl Vault {
         Ok(gone)
     }
 
-    /// A new master password. The data key stays, so a key remembered on
-    /// this machine keeps working; a copy of the old file elsewhere still
-    /// opens with the old password — that copy is not this file.
+    /// A new master password, keeping no other factors. See [`Vault::change_key`].
     pub fn change_password(&mut self, old: &str, new: &str) -> R<()> {
+        self.change_key(&Credentials::password(old), &Credentials::password(new))
+    }
+
+    /// New credentials: a new password, and the factors `new` gives — a key
+    /// file, a security key — in place of the ones `old` opened it with. A new
+    /// challenge is drawn. The data key stays, so a key remembered on this
+    /// machine keeps working; a copy of the old file elsewhere still opens the
+    /// old way — that copy is not this file.
+    pub fn change_key(&mut self, old: &Credentials, new: &Credentials) -> R<()> {
         let e = self.envelope.as_ref().ok_or(VaultError::Missing)?;
-        let pk = derive(old, &unhex(&e.salt)?, e.kdf)?;
-        if open(&pk, &e.key, &e.aad())?.is_none() {
-            return Err(VaultError::WrongPassword);
-        }
         let (kdf, id) = (e.kdf, e.id.clone());
+        // The old credentials are asked for even while it is open. Checked
+        // once: unlocking checks them, so a locked vault is just unlocked —
+        // one Argon2, one touch of a security key.
         if self.open.is_none() {
-            self.unlock(old)?;
+            self.unlock(*old)?;
+        } else if open(&*e.wrapping_key(old)?, &e.key, &e.aad())?.is_none() {
+            return Err(e.wrong());
         }
-        self.write_with_password(new, kdf, id)
+        self.write_with_key(new, kdf, id)
     }
 
     /// Re-encrypt the secrets under the data key, keeping the wrapped key.
@@ -423,21 +597,27 @@ impl Vault {
         self.save(e)
     }
 
-    /// Wrap the data key under `password` with a fresh salt, then write all.
-    fn write_with_password(&mut self, password: &str, kdf: Kdf, id: String) -> R<()> {
+    /// Wrap the data key under `credentials` with a fresh salt — and, for a
+    /// security key, a fresh challenge — then write all.
+    fn write_with_key(&mut self, credentials: &Credentials, kdf: Kdf, id: String) -> R<()> {
         let o = self.open.as_ref().ok_or(VaultError::Locked)?;
         let salt = random::<16>()?;
+        let security_key = match credentials.security_key {
+            Some((_, slot)) => Some(SecurityKeyFactor { slot, challenge: hex(&random::<CHALLENGE_LEN>()?) }),
+            None => None,
+        };
         let mut e = Envelope {
             format: FORMAT.into(),
             version: VERSION,
             id,
             kdf,
             salt: hex(&salt),
+            factors: Factors { keyfile: credentials.keyfile.is_some(), security_key },
             key: Sealed { nonce: String::new(), ct: String::new() },
             data: Sealed { nonce: String::new(), ct: String::new() },
         };
-        let pk = derive(password, &salt, kdf)?;
-        e.key = seal(&pk, o.key.as_ref(), &e.aad())?;
+        let wk = e.wrapping_key(credentials)?;
+        e.key = seal(&wk, o.key.as_ref(), &e.aad())?;
         let plain = Zeroizing::new(serde_json::to_vec(&o.secrets).map_err(|e| VaultError::Io(e.to_string()))?);
         e.data = seal(&o.key, &plain, &e.aad())?;
         self.save(e)

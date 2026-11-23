@@ -16,6 +16,7 @@ pub mod engine;
 pub mod environment;
 pub mod net;
 pub mod paths;
+pub mod security_key;
 pub mod setup;
 pub mod update;
 pub mod vault;

@@ -39,6 +39,10 @@ keyring = "4"
 argon2 = "0.6"
 chacha20poly1305 = "0.11"
 zeroize = "1"
+# A YubiKey's challenge-response for the vault (limen-core/security_key.rs):
+# HID feature reports, in Rust on Linux and Windows — no libusb, nothing
+# detached from the system.
+hidapi = { version = "2.6", default-features = false, features = ["linux-native-basic-udev", "windows-native"] }
 eframe = "0.28"
 limen-proto = { path = "src/limen-proto" }
 limen-host = { path = "src/limen-host" }
