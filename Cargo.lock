@@ -2996,6 +2996,7 @@ version = "0.33.0"
 dependencies = [
  "anyhow",
  "limen-proto",
+ "limen-sign",
  "serde",
  "serde_json",
  "sha2 0.10.9",

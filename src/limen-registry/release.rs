@@ -169,13 +169,16 @@ pub(crate) fn has_checksum(lib: &str, assets: &[(String, String)]) -> bool {
 }
 
 /// List `repo`'s release files, pick the one for this platform, and download it
-/// into `dest_dir` named as the host expects. Returns the filename on success.
+/// into `dest_dir` named as the host expects. Returns what was fetched, and
+/// what its signature — the file beside it in the release — says of it: the
+/// download is checked as it came, before anything is unpacked from it.
 pub(crate) fn fetch_native_asset(
     repo: &str,
     entry: &str,
     version: Option<&str>,
     dest_dir: &Path,
-) -> Result<String> {
+    keys: &limen_sign::Keyring,
+) -> Result<(String, limen_sign::Verdict)> {
     let slug = github_slug(repo);
     let assets = release_assets(slug, version)?;
     if assets.is_empty() {
@@ -191,12 +194,26 @@ pub(crate) fn fetch_native_asset(
 
     let filename = native_lib_filename(entry);
     let dest = dest_dir.join(&filename);
+    let signature = match crate::signing::asset_signature(&assets, name) {
+        Some(url) => Some(crate::signing::fetch(url).ok_or_else(|| anyhow::anyhow!("downloading the signature of {name} failed"))?),
+        None => None,
+    };
+    let judge = |file: &Path| -> Result<limen_sign::Verdict> {
+        let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+        Ok(keys.verify(&bytes, signature.as_deref()))
+    };
 
     if is_archive(&name.to_lowercase()) {
         // Download the archive, extract, and move the library into place.
         let staged = dest_dir.join(".native-download");
         let _ = std::fs::remove_file(&staged);
         crate::http::download(url, &staged)?;
+        let verdict = judge(&staged)?;
+        if verdict.refuses() {
+            // Not unpacked at all.
+            let _ = std::fs::remove_file(&staged);
+            return Ok((name.clone(), verdict));
+        }
         let lib = extract_lib(&staged, name, dest_dir).inspect_err(|_| {
             let _ = std::fs::remove_file(&staged);
         })?;
@@ -204,10 +221,14 @@ pub(crate) fn fetch_native_asset(
         std::fs::rename(&lib, &dest).context("installing extracted native library")?;
         let _ = std::fs::remove_file(&staged);
         let _ = std::fs::remove_dir_all(dest_dir.join(".native-extract"));
-        Ok(format!("{name} → {filename} (extracted)"))
+        Ok((format!("{name} → {filename} (extracted)"), verdict))
     } else {
         crate::http::download(url, &dest)?;
-        Ok(format!("{name} → {filename}"))
+        let verdict = judge(&dest)?;
+        if verdict.refuses() {
+            let _ = std::fs::remove_file(&dest);
+        }
+        Ok((format!("{name} → {filename}"), verdict))
     }
 }
 

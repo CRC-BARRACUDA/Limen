@@ -76,11 +76,19 @@ enum Command {
     Add {
         /// e.g. `owner/repo`, `owner/repo@1.2.0`, `./path/to/module`, `file:/abs`.
         reference: String,
+        /// Install it even if it is not signed by the Limen team.
+        #[arg(long)]
+        allow_unsigned: bool,
     },
     /// List installed modules from the lockfile.
     List,
     /// Re-fetch and reinstall installed modules (all, or one by name).
-    Update { name: Option<String> },
+    Update {
+        name: Option<String>,
+        /// Update even to a version that is not signed by the Limen team.
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
     /// Uninstall a module by name.
     Remove { name: String },
     /// Show each module's declared permissions and trust status.
@@ -134,9 +142,9 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&out)?);
             engine.shutdown();
         }
-        Command::Add { reference } => {
-            let reg = Registry::new(paths::home());
-            let report = reg.add(reference).context("installing module")?;
+        Command::Add { reference, allow_unsigned } => {
+            let reg = Registry::new(paths::home()).accept_unsigned(*allow_unsigned);
+            let report = reg.add(reference).map_err(explain_unsigned).context("installing module")?;
             println!(
                 "installed {} module(s) into {}",
                 report.installed.len(),
@@ -164,9 +172,9 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Update { name } => {
-            let reg = Registry::new(paths::home());
-            let report = reg.update(name.as_deref())?;
+        Command::Update { name, allow_unsigned } => {
+            let reg = Registry::new(paths::home()).accept_unsigned(*allow_unsigned);
+            let report = reg.update(name.as_deref()).map_err(explain_unsigned)?;
             println!("updated {} module(s)", report.installed.len());
             for e in &report.installed {
                 println!("  {} v{} {}", e.name, e.version, short_digest(&e.digest));
@@ -342,4 +350,21 @@ fn run_demo(dirs: &[PathBuf]) -> Result<()> {
 
     engine.shutdown();
     Ok(())
+}
+
+/// An install held back as not signed by the team: say which modules, and how
+/// to install them all the same.
+fn explain_unsigned(e: anyhow::Error) -> anyhow::Error {
+    let Some(held) = e.downcast_ref::<limen_registry::UnsignedModules>() else {
+        return e;
+    };
+    let mut lines = vec!["nothing was installed: not signed by the Limen team —".to_string()];
+    for m in &held.modules {
+        lines.push(match &m.unknown_key {
+            Some(key) => format!("  {} {} (signed by an unknown key, {key})", m.name, m.version),
+            None => format!("  {} {} (no signature)", m.name, m.version),
+        });
+    }
+    lines.push("Limen cannot tell that these are genuine. To install them anyway, add --allow-unsigned.".to_string());
+    anyhow::anyhow!(lines.join("\n"))
 }

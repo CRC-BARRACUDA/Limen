@@ -22,6 +22,10 @@ pub struct LockEntry {
     /// Git short commit the module was installed from (empty for path installs).
     #[serde(default)]
     pub commit: String,
+    /// Which of the team's keys signed what was installed ("CRC-BARRACUDA");
+    /// empty when none did — unsigned, a stranger's, or a local path.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signed_by: String,
 }
 
 /// The whole lockfile.

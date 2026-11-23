@@ -441,7 +441,7 @@ fn run(
                 // needs the live engine — is marshaled back via `FinishAdd`.
                 let cmd_tx = cmd_tx.clone();
                 thread::spawn(move || {
-                    let (status, ok) = match Registry::new(paths::home()).add(&reference) {
+                    let (status, ok) = match Registry::new(paths::home()).accept_unsigned(true).add(&reference) {
                         Ok(report) => (
                             format!("installed {} module(s)", report.installed.len()),
                             true,
@@ -456,7 +456,7 @@ fn run(
                 // source, then reload on the worker via FinishAdd.
                 let cmd_tx = cmd_tx.clone();
                 thread::spawn(move || {
-                    let (status, ok) = match Registry::new(paths::home()).update(Some(&name)) {
+                    let (status, ok) = match Registry::new(paths::home()).accept_unsigned(true).update(Some(&name)) {
                         Ok(report) => (
                             format!("updated {} module(s)", report.installed.len()),
                             true,
