@@ -499,15 +499,16 @@ _CURRENT_CAPABILITY = [""]
 # Host bridge — call other modules, emit/subscribe events, log.
 # --------------------------------------------------------------------------- #
 
-# Limen's vault answers with these while it cannot: locked, or not made yet.
+# Limen's vault answers with these when it stayed shut: locked, or not made.
 VAULT_LOCKED = -32006
 VAULT_MISSING = -32007
 
 
 class VaultLocked(RuntimeError):
-    """Limen's vault is locked, or there is none yet. The user is being asked to
-    unlock (or create) it; the call can be made again once they have. A
-    RuntimeError, so code that catches those still does."""
+    """Limen's vault stayed locked, or none was made. A call that finds it shut
+    waits while Limen asks the user for the password, and goes on once it is
+    given; this is raised only when they turn that down (or do not answer in
+    time). A RuntimeError, so code that catches those still does."""
 
 
 class Host:
@@ -603,8 +604,9 @@ class Host:
         self._m._request("host.log", str(message))
 
     # Limen's vault: this module's own compartment. Needs the `secrets`
-    # permission. While the vault is locked (or not made yet) these raise
-    # VaultLocked — the user is being asked to unlock it; try again after.
+    # permission. While the vault is locked (or not made yet) these wait: Limen
+    # asks the user for the password and the call goes on once it is given.
+    # Turned down, they raise VaultLocked.
 
     def secret_get(self, name):
         """A secret by name, or None when there is none."""

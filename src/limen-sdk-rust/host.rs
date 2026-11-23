@@ -90,9 +90,9 @@ impl Host {
 
     /// A secret from this module's compartment of Limen's vault: `Ok(None)`
     /// when there is none by that name. Needs the `secrets` permission. While
-    /// the vault is locked (or not made yet) this is an error with code
-    /// [`rpc::VAULT_LOCKED`] (or [`rpc::VAULT_MISSING`]): the user is asked to
-    /// unlock it, and the call can be made again after.
+    /// the vault is locked (or not made yet) it waits: Limen asks the user for
+    /// the password, and the call goes on once it is given. Turned down, this
+    /// is an error with code [`rpc::VAULT_LOCKED`] (or [`rpc::VAULT_MISSING`]).
     pub fn secret_get(&self, name: &str) -> Result<Option<String>, RpcError> {
         let v = self.raw("host.secret_get", json!({ "name": name }))?;
         Ok(v.as_str().map(String::from))

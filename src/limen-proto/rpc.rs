@@ -32,10 +32,10 @@ pub const NO_PROVIDER: i64 = -32004;
 /// the host. The module is still loaded, but its state is whatever the panic
 /// left behind — the UI reads this as "stop calling it and say so".
 pub const MODULE_PANIC: i64 = -32005;
-/// Limen's vault is locked. The user is being asked to unlock it; try again
-/// after they have.
+/// Limen's vault is locked, and stayed so: the user was asked for the password
+/// and turned it down (or did not answer in time).
 pub const VAULT_LOCKED: i64 = -32006;
-/// Limen has no vault yet. The user is being asked to create one.
+/// Limen has no vault: the user was asked to create one and did not.
 pub const VAULT_MISSING: i64 = -32007;
 
 /// A request. `id` is absent for a fire-and-forget notification.

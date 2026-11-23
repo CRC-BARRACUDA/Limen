@@ -6,10 +6,12 @@
 //! `secrets` permission, which the user saw when they trusted it.
 //!
 //! The vault itself lives above the host (in limen-core, opened by the GUI);
-//! it is plugged in here with [`set_secret_store`]. Until it is, or while it
-//! is locked, the calls answer with an error a module can tell apart —
-//! [`rpc::VAULT_LOCKED`] / [`rpc::VAULT_MISSING`] — and try again once the
-//! user has unlocked it.
+//! it is plugged in here with [`set_secret_store`]. Until it is, the calls
+//! answer [`rpc::VAULT_MISSING`]. A store may wait for the user: the GUI's,
+//! finding the vault locked (or not made yet), asks for the password and holds
+//! the call until it is given, then answers it. Only when the user turns that
+//! down does a call fail — with an error a module can tell apart,
+//! [`rpc::VAULT_LOCKED`] / [`rpc::VAULT_MISSING`].
 
 use std::sync::{Arc, RwLock};
 
@@ -21,9 +23,9 @@ use crate::Logger;
 /// Why a secret could not be read or kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretError {
-    /// The vault is locked; the user is being asked to unlock it.
+    /// The vault is locked, and the user did not unlock it.
     Locked,
-    /// There is no vault yet; the user is being asked to create one.
+    /// There is no vault, and the user did not create one.
     NoVault,
     Failed(String),
 }
@@ -61,9 +63,9 @@ fn name_of(params: &Value) -> Result<String, RpcError> {
 
 fn rpc_error(e: SecretError) -> RpcError {
     match e {
-        SecretError::Locked => RpcError::new(rpc::VAULT_LOCKED, "Limen's vault is locked: unlock it, then try again"),
+        SecretError::Locked => RpcError::new(rpc::VAULT_LOCKED, "Limen's vault stayed locked: it was not unlocked"),
         SecretError::NoVault => {
-            RpcError::new(rpc::VAULT_MISSING, "Limen has no vault yet: create one, then try again")
+            RpcError::new(rpc::VAULT_MISSING, "Limen has no vault: none was created")
         }
         SecretError::Failed(why) => RpcError::new(rpc::INTERNAL_ERROR, why),
     }

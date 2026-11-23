@@ -218,7 +218,7 @@ VAULT_LOCKED: int
 VAULT_MISSING: int
 
 class VaultLocked(RuntimeError):
-    """Limen's vault is locked, or there is none yet: try again once unlocked."""
+    """Limen's vault stayed locked (or none was made): the user turned it down."""
 
 class Host:
     def call(

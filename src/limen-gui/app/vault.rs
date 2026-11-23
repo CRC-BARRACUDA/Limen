@@ -5,9 +5,16 @@
 //!
 //! The vault is behind one mutex. Everything slow — Argon2 (half a second on
 //! purpose), the keychain — runs on a thread; the window shows a spinner.
+//!
+//! A module that finds the vault locked (or not made yet) does not fail at
+//! once: the window opens and its call waits. Unlocked (or made), the call
+//! goes on as if it had been open all along, so the action the user tapped is
+//! done without tapping it again. A wrong password leaves the window up and
+//! the call waiting; turning the window down — or [`WAIT_FOR`] passing —
+//! fails it, as locked.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -27,6 +34,10 @@ const SHAKE_S: f64 = 0.4;
 const REVEAL_FOR: Duration = Duration::from_secs(30);
 /// A master password's least length.
 const MIN_PASSWORD: usize = 8;
+/// How long a module's call waits for the vault to be opened before it fails.
+const WAIT_FOR: Duration = Duration::from_secs(5 * 60);
+/// How often a waiting call looks again, should a wake-up have been missed.
+const RECHECK: Duration = Duration::from_millis(250);
 
 /// What the GUI and the host share.
 struct Shared {
@@ -38,6 +49,13 @@ struct Shared {
     last_used: Mutex<Instant>,
     /// A module found it locked (or missing): who, for the window to say.
     asked_by: Mutex<Option<String>>,
+    /// How many times the user turned the window down. A call waiting for the
+    /// vault gives up when this moves.
+    declined: Mutex<u64>,
+    /// Woken when the vault may have opened, or the window was turned down.
+    woken: Condvar,
+    /// How long a call waits: [`WAIT_FOR`], shorter in tests.
+    wait_for: Duration,
     ctx: egui::Context,
 }
 
@@ -54,6 +72,41 @@ impl Shared {
         *self.asked_by.lock().unwrap_or_else(|e| e.into_inner()) = Some(who.to_string());
         self.ctx.request_repaint();
     }
+
+    fn declines(&self) -> u64 {
+        *self.declined.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The user turned the window down: every waiting call fails.
+    fn decline(&self) {
+        *self.declined.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.woken.notify_all();
+    }
+
+    /// The vault may have opened: waiting calls look again.
+    fn wake(&self) {
+        self.woken.notify_all();
+    }
+
+    /// Wait until the vault is open: true; or until the user turns the window
+    /// down after `declined` was read, or `wait_for` passes: false. Never
+    /// holds the vault while waiting — the unlock needs it.
+    fn wait_open(&self, declined: u64) -> bool {
+        let until = Instant::now() + self.wait_for;
+        loop {
+            if self.vault().is_open() {
+                return true;
+            }
+            let seen = self.declined.lock().unwrap_or_else(|e| e.into_inner());
+            if *seen != declined {
+                return false;
+            }
+            let Some(left) = until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else {
+                return false;
+            };
+            let _ = self.woken.wait_timeout(seen, left.min(RECHECK));
+        }
+    }
 }
 
 /// The vault as the host sees it: one compartment per module, opened quietly
@@ -61,23 +114,29 @@ impl Shared {
 struct VaultStore(Arc<Shared>);
 
 impl VaultStore {
-    /// The vault, open — or why not, with the user asked.
+    /// The vault, open — or why not. Locked or not made yet, the user is asked
+    /// and the call waits for their answer: opened, it goes on.
     fn with<T>(&self, module: &str, f: impl FnOnce(&mut Vault) -> Result<T, VaultError>) -> Result<T, SecretError> {
         if let Some(why) = &self.0.damaged {
             return Err(SecretError::Failed(format!("Limen's vault is damaged: {why}")));
         }
         let mut v = self.0.vault();
-        if !v.exists() {
-            drop(v);
-            self.0.ask(module);
-            return Err(SecretError::NoVault);
-        }
         // Locked after a while idle, but this machine remembers the key: open
         // again without asking — the lock wiped the key from memory, no more.
-        if !v.is_open() && !v.unlock_remembered().unwrap_or(false) {
+        if !v.is_open() && !(v.exists() && v.unlock_remembered().unwrap_or(false)) {
+            let missing = !v.exists();
             drop(v);
+            // Read before asking, so a "no" given at once is not missed.
+            let declined = self.0.declines();
             self.0.ask(module);
-            return Err(SecretError::Locked);
+            if !self.0.wait_open(declined) {
+                return Err(if missing { SecretError::NoVault } else { SecretError::Locked });
+            }
+            v = self.0.vault();
+            if !v.is_open() {
+                // Locked again in the moment between: as good as a no.
+                return Err(SecretError::Locked);
+            }
         }
         self.0.touch();
         f(&mut v).map_err(|e| match e {
@@ -190,6 +249,9 @@ impl VaultUi {
             damaged,
             last_used: Mutex::new(Instant::now()),
             asked_by: Mutex::new(None),
+            declined: Mutex::new(0),
+            woken: Condvar::new(),
+            wait_for: WAIT_FOR,
             ctx: ctx.clone(),
         });
         limen_host::set_secret_store(Some(Arc::new(VaultStore(shared.clone()))));
@@ -235,6 +297,8 @@ impl VaultUi {
             let done = work(&mut shared.vault());
             working.store(false, Ordering::Relaxed);
             let _ = tx.send(done);
+            // Made or unlocked: the calls waiting for it go on now.
+            shared.wake();
             shared.ctx.request_repaint();
         });
     }
@@ -576,6 +640,10 @@ impl VaultUi {
             // Faded out as it stands, then let go.
             self.closing = true;
             self.zero_fields();
+            // Not opened: the modules' calls waiting for it fail now.
+            if matches!(self.mode, Some(Mode::Unlock | Mode::Create)) {
+                self.shared.decline();
+            }
         }
         if out.closed && self.closing {
             self.closing = false;
@@ -829,6 +897,11 @@ mod tests {
     }
 
     fn store(name: &str, keys: &MemKeys) -> (VaultStore, Arc<Shared>) {
+        waiting_store(name, keys, Duration::from_millis(50))
+    }
+
+    /// A store whose calls wait `wait_for` for the vault to be opened.
+    fn waiting_store(name: &str, keys: &MemKeys, wait_for: Duration) -> (VaultStore, Arc<Shared>) {
         let dir = std::env::temp_dir().join(format!("limen-gui-vault-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -838,6 +911,9 @@ mod tests {
             damaged: None,
             last_used: Mutex::new(Instant::now()),
             asked_by: Mutex::new(None),
+            declined: Mutex::new(0),
+            woken: Condvar::new(),
+            wait_for,
             ctx: egui::Context::default(),
         });
         (VaultStore(shared.clone()), shared)
@@ -859,6 +935,89 @@ mod tests {
         shared.vault().lock();
         assert_eq!(st.get("crowdstrike", "client_secret"), Err(SecretError::Locked));
         assert_eq!(asked(&shared).as_deref(), Some("crowdstrike"), "locked, nothing remembered: asked");
+    }
+
+    /// What the window does, from another thread, once a module has asked:
+    /// waits until the ask arrives, then answers with `answer`.
+    fn the_user(shared: &Arc<Shared>, answer: impl FnOnce(&Shared) + Send + 'static) -> std::thread::JoinHandle<()> {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            while asked(&shared).is_none() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            answer(&shared);
+        })
+    }
+
+    /// A vault with one secret in it, locked: a call to it has to wait.
+    fn locked(name: &str, wait_for: Duration) -> (VaultStore, Arc<Shared>) {
+        let keys = MemKeys::default();
+        let (st, shared) = waiting_store(name, &keys, wait_for);
+        shared.vault().create("correct horse", Kdf::TEST).unwrap();
+        st.set("crowdstrike", "client_secret", "s").unwrap();
+        shared.vault().lock();
+        (st, shared)
+    }
+
+    #[test]
+    fn a_call_to_a_locked_vault_goes_on_once_it_is_unlocked() {
+        let (st, shared) = locked("goes-on", Duration::from_secs(30));
+        let user = the_user(&shared, |s| {
+            // A wrong password first: the window stays up, the call waits on.
+            assert!(s.vault().unlock("wrong horse").is_err());
+            s.wake();
+            std::thread::sleep(Duration::from_millis(100));
+            s.vault().unlock("correct horse").unwrap();
+            s.wake();
+        });
+        assert_eq!(st.get("crowdstrike", "client_secret").unwrap().as_deref(), Some("s"), "answered, not refused");
+        user.join().unwrap();
+        // Writing waits the same way.
+        shared.vault().lock();
+        let user = the_user(&shared, |s| {
+            s.vault().unlock("correct horse").unwrap();
+            s.wake();
+        });
+        st.set("crowdstrike", "client_id", "id").unwrap();
+        user.join().unwrap();
+        assert_eq!(st.get("crowdstrike", "client_id").unwrap().as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn turning_the_window_down_fails_the_waiting_call_at_once() {
+        let (st, shared) = locked("declined", Duration::from_secs(30));
+        let user = the_user(&shared, |s| s.decline());
+        let started = Instant::now();
+        assert_eq!(st.get("crowdstrike", "client_secret"), Err(SecretError::Locked));
+        assert!(started.elapsed() < Duration::from_secs(5), "not left to time out: {:?}", started.elapsed());
+        user.join().unwrap();
+    }
+
+    #[test]
+    fn a_call_gives_up_when_nobody_answers() {
+        let (st, _shared) = locked("timeout", Duration::from_millis(100));
+        let started = Instant::now();
+        assert_eq!(st.get("crowdstrike", "client_secret"), Err(SecretError::Locked));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_call_meeting_no_vault_goes_on_once_one_is_made() {
+        let keys = MemKeys::default();
+        let (st, shared) = waiting_store("made", &keys, Duration::from_secs(30));
+        let user = the_user(&shared, |s| {
+            s.vault().create("correct horse", Kdf::TEST).unwrap();
+            s.wake();
+        });
+        st.set("crowdstrike", "client_secret", "new").unwrap();
+        user.join().unwrap();
+        assert_eq!(st.get("crowdstrike", "client_secret").unwrap().as_deref(), Some("new"));
+
+        // And made not: no vault, as before.
+        let (st, shared) = waiting_store("not-made", &MemKeys::default(), Duration::from_secs(30));
+        let user = the_user(&shared, |s| s.decline());
+        assert_eq!(st.get("crowdstrike", "client_secret"), Err(SecretError::NoVault));
+        user.join().unwrap();
     }
 
     #[test]
