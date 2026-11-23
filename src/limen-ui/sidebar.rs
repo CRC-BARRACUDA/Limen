@@ -11,6 +11,12 @@
 //! the body changes — and the body is drawn the way a screen is, so what arrives
 //! and leaves in it animates like anything else.
 //!
+//! In a narrow window there is no room for a list beside the section: below
+//! [`STACK_BELOW`] the list goes across the top instead, as a row of tabs that
+//! wraps onto more lines as it has to, and the section takes the full width
+//! under it. Nothing is folded there — there is nothing beside the section to
+//! fold — and the fold is as it was when the window is wide again.
+//!
 //! Folding the list away is the host's alone: no call is made, nothing waits
 //! on the module, and the fold is remembered by the sidebar's `id`, so it stays
 //! folded while the sections change underneath it.
@@ -28,6 +34,9 @@ const TOGGLE_H: f32 = 24.0;
 /// How long folding takes. As short as a menu: it is the body's width that is
 /// being asked for, and waiting for it is waiting for nothing.
 const FOLD_SECS: f32 = 0.22;
+/// Narrower than this, the list goes across the top: an open list and its gap
+/// would leave the section less than twice the list's own width.
+const STACK_BELOW: f32 = 600.0;
 
 /// Where whether a sidebar is folded is kept.
 ///
@@ -59,6 +68,9 @@ pub(crate) fn render(
         return;
     };
     let fold_id = sidebar_folded_id(id);
+    if ui.available_width() < STACK_BELOW {
+        return render_stacked(ui, widget, inputs, busy, clicked);
+    }
     let folded: bool = ui.ctx().data(|d| d.get_temp(fold_id)).unwrap_or(false);
     // 1 open, 0 folded. Eased at both ends: it is reversible motion, and a
     // fold that set off at full speed would read as the list being snatched.
@@ -74,36 +86,7 @@ pub(crate) fn render(
         egui::pos2(origin.x + width + GAP, origin.y),
         egui::vec2((room_w - width - GAP).max(80.0), room_h),
     );
-    // Each section is its own page. Keyed by the section, so that two of them
-    // are never taken for one screen that changed: the flow would read the new
-    // section's heading as the old heading with new words, and leave it in
-    // place — and morph one section's table into another's.
-    let mut section = ui.child_ui_with_id_source(
-        body_rect,
-        egui::Layout::top_down(egui::Align::Min),
-        ("limen_sidebar_body", id.as_str(), selected.as_str()),
-        None,
-    );
-    // And it enters from when it was picked, which keying alone does not give:
-    // a section visited before is already known to the flow, and would come
-    // back without an entrance at all.
-    let now = ui.input(|i| i.time);
-    let entered_id = fold_id.with("entered");
-    let entered_at = match ui.ctx().data(|d| d.get_temp::<(String, f64)>(entered_id)) {
-        Some((key, at)) if key == *selected => at,
-        _ => {
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(entered_id, (selected.clone(), now)));
-            now
-        }
-    };
-    // On first sight the section joins the screen's entrance rather than
-    // snapping in while everything around the sidebar fades up.
-    let screen = ui.data(|d| d.get_temp::<f64>(view_reveal_id())).unwrap_or(0.0);
-    if let Some(invoke) = render_list(&mut section, body, inputs, busy, screen.max(entered_at)) {
-        *clicked = Some(invoke);
-    }
-    let body_h = section.min_rect().height();
+    let body_h = draw_section(ui, body_rect, id, selected, body, inputs, busy, clicked);
 
     let list_rect = egui::Rect::from_min_size(origin, egui::vec2(width, room_h));
     let mut list = ui.child_ui_with_id_source(
@@ -151,6 +134,128 @@ pub(crate) fn render(
         origin,
         egui::vec2(room_w, height),
     ));
+}
+
+/// The open section, in `rect`. How tall it came out.
+#[allow(clippy::too_many_arguments)]
+fn draw_section(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: &str,
+    selected: &str,
+    body: &[Widget],
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+    clicked: &mut Option<Invoke>,
+) -> f32 {
+    // Each section is its own page. Keyed by the section, so that two of them
+    // are never taken for one screen that changed: the flow would read the new
+    // section's heading as the old heading with new words, and leave it in
+    // place — and morph one section's table into another's.
+    let mut section = ui.child_ui_with_id_source(
+        rect,
+        egui::Layout::top_down(egui::Align::Min),
+        ("limen_sidebar_body", id, selected),
+        None,
+    );
+    // And it enters from when it was picked, which keying alone does not give:
+    // a section visited before is already known to the flow, and would come
+    // back without an entrance at all.
+    let now = ui.input(|i| i.time);
+    let entered_id = sidebar_folded_id(id).with("entered");
+    let entered_at = match ui.ctx().data(|d| d.get_temp::<(String, f64)>(entered_id)) {
+        Some((key, at)) if key == selected => at,
+        _ => {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(entered_id, (selected.to_string(), now)));
+            now
+        }
+    };
+    // On first sight the section joins the screen's entrance rather than
+    // snapping in while everything around the sidebar fades up.
+    let screen = ui.data(|d| d.get_temp::<f64>(view_reveal_id())).unwrap_or(0.0);
+    if let Some(invoke) = render_list(&mut section, body, inputs, busy, screen.max(entered_at)) {
+        *clicked = Some(invoke);
+    }
+    section.min_rect().height()
+}
+
+/// The sidebar in a narrow window: the sections across the top, wrapping, and
+/// the open one under them at full width.
+fn render_stacked(
+    ui: &mut egui::Ui,
+    widget: &Widget,
+    inputs: &mut HashMap<String, String>,
+    busy: Option<&Action>,
+    clicked: &mut Option<Invoke>,
+) {
+    let Widget::Sidebar { id, items, selected, action, args, body } = widget else {
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+        for item in items {
+            if section_tab(ui, item, item.key == *selected).clicked() {
+                let mut args = args.clone();
+                args.insert("key".into(), Value::String(item.key.clone()));
+                *clicked = Some(Invoke {
+                    action: action.clone(),
+                    args,
+                    open_in_tab: false,
+                    dismiss: false,
+                    confirm: None,
+                });
+            }
+        }
+    });
+    // The rule that was down the side, now under the tabs.
+    let origin = ui.available_rect_before_wrap().min;
+    let room_w = ui.available_width();
+    ui.painter().hline(
+        origin.x..=origin.x + room_w,
+        origin.y + GAP * 0.5,
+        egui::Stroke::new(1.0_f32, color::BORDER),
+    );
+    let top = origin + egui::vec2(0.0, GAP);
+    let rect = egui::Rect::from_min_size(top, egui::vec2(room_w, (ui.available_height() - GAP).max(0.0)));
+    let body_h = draw_section(ui, rect, id, selected, body, inputs, busy, clicked);
+    ui.advance_cursor_after_rect(egui::Rect::from_min_size(origin, egui::vec2(room_w, GAP + body_h)));
+}
+
+/// One section as a tab across the top: as wide as its name (to a limit), the
+/// bar that says it is open under it rather than beside it.
+fn section_tab(ui: &mut egui::Ui, item: &SidebarItem, selected: bool) -> egui::Response {
+    let base = if item.muted { color::TEXT_MUTED } else { color::TEXT };
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        item.text.clone(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        base,
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: OPEN - 24.0,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(galley.size().x + 24.0, ITEM_H), egui::Sense::click());
+    let a = interact(ui, &resp);
+    let sel = anim_bool(ui, resp.id.with("sel"), selected, 0.14);
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::Rounding::ZERO,
+        with_alpha(color::BG_WIDGET, a.hover.max(sel * 0.6)),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - 2.0), rect.max),
+        egui::Rounding::ZERO,
+        with_alpha(color::ACCENT, sel),
+    );
+    let at = egui::pos2(rect.min.x + 12.0, rect.center().y - galley.size().y * 0.5);
+    painter.galley_with_override_text_color(at, galley, lerp_color(base, color::ACCENT, sel));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The button that folds the list away and brings it back.

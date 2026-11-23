@@ -41,6 +41,8 @@ struct Screen {
     ctx: egui::Context,
     time: f64,
     inputs: HashMap<String, String>,
+    /// The window's width.
+    width: f32,
 }
 
 impl Screen {
@@ -48,7 +50,7 @@ impl Screen {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         set_animations(true);
-        Self { ctx, time: 0.0, inputs: HashMap::new() }
+        Self { ctx, time: 0.0, inputs: HashMap::new(), width: 1000.0 }
     }
 
     /// Draw `view` for one frame, with `events`; what it painted, and what it
@@ -57,12 +59,13 @@ impl Screen {
         self.time += 1.0 / 60.0;
         let mut clicked = None;
         let inputs = &mut self.inputs;
+        let width = self.width;
         let out = self.ctx.run(
             egui::RawInput {
                 time: Some(self.time),
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(1000.0, 700.0),
+                    egui::vec2(width, 700.0),
                 )),
                 events,
                 ..Default::default()
@@ -243,4 +246,35 @@ fn a_field_inside_a_section_is_still_a_field_on_the_screen() {
     let mut sent = serde_json::Map::new();
     collect_ids(&view.widgets, &inputs, &mut sent);
     assert_eq!(sent.get("panel.filter"), Some(&json!("gateway")));
+}
+
+/// In a narrow window the list goes across the top, the section under it at
+/// full width — and picking a section there is the same call.
+#[test]
+fn in_a_narrow_window_the_list_goes_across_the_top() {
+    let mut s = Screen::new();
+    let view = panel("overview", "Overview body");
+    let wide = s.settle(&view);
+    let (item_w, body_w) = (find(&wide, "Overview").unwrap().at, find(&wide, "Overview body").unwrap().at);
+    assert!(body_w.x - item_w.x > 150.0, "wide: the section is beside the list");
+
+    s.width = 520.0;
+    let narrow = s.settle(&view);
+    let overview = find(&narrow, "Overview").expect("the sections are still listed").at;
+    let network = find(&narrow, "Network").expect("all of them").at;
+    let body = find(&narrow, "Overview body").expect("the section is drawn").at;
+    assert!((network.y - overview.y).abs() < 1.0, "in a row: {overview:?}, {network:?}");
+    assert!(network.x > overview.x + 40.0, "one after the other");
+    assert!(body.y > overview.y + 20.0, "the section is under them: {body:?}");
+    assert!(body.x - overview.x < 30.0, "from the left edge, not beside a list: {body:?}");
+
+    let invoke = s.click(&view, network + egui::vec2(4.0, 6.0)).expect("a tab picks its section");
+    assert_eq!(invoke.args.get("key"), Some(&json!("network")));
+    assert_eq!(invoke.args.get("id"), Some(&json!("aaa")));
+
+    // Wide again: back down the left.
+    s.width = 1000.0;
+    let back = s.settle(&view);
+    let (item, body) = (find(&back, "Overview").unwrap().at, find(&back, "Overview body").unwrap().at);
+    assert!(body.x - item.x > 150.0 && (body.y - item.y).abs() < 60.0);
 }
