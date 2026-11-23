@@ -106,3 +106,33 @@ fn a_drag_that_wanders_to_the_edge_resizes_nothing() {
         assert!(!format!("{cursor:?}").starts_with("Resize"), "at {x}: {cursor:?}");
     }
 }
+
+/// A resize takes the pointer away: the release never arrives, and egui goes
+/// on thinking the button is held. The edges have to work all the same — the
+/// cursor turning, and the next press resizing.
+#[test]
+fn after_a_resize_whose_release_never_came_the_edges_still_answer() {
+    use egui::{CursorIcon as Cur, ResizeDirection as Dir};
+    let mut w = Win::new();
+    let east = egui::pos2(997.0, 300.0);
+    w.frame(vec![egui::Event::PointerMoved(east)]);
+    assert_eq!(w.frame(vec![press(east)]).0, Some(Dir::East));
+    // No release. The pointer comes back, to the page and then to an edge.
+    w.frame(vec![egui::Event::PointerMoved(egui::pos2(500.0, 300.0))]);
+    let south = egui::pos2(500.0, 697.0);
+    assert_eq!(w.frame(vec![egui::Event::PointerMoved(south)]).1, Cur::ResizeSouth, "the cursor still turns");
+    assert_eq!(w.frame(vec![egui::Event::PointerMoved(east)]).1, Cur::ResizeEast);
+    assert_eq!(w.frame(vec![press(east)]).0, Some(Dir::East), "and a press still resizes");
+}
+
+/// Moving the window by its title bar loses the release the same way.
+#[test]
+fn after_the_window_was_moved_the_edges_still_answer() {
+    let mut w = Win::new();
+    let bar = egui::pos2(500.0, 300.0);
+    w.frame(vec![egui::Event::PointerMoved(bar)]);
+    w.frame(vec![press(bar)]);
+    window_took_pointer(&w.ctx);
+    let east = egui::pos2(997.0, 300.0);
+    assert_eq!(w.frame(vec![egui::Event::PointerMoved(east)]).1, egui::CursorIcon::ResizeEast);
+}

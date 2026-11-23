@@ -214,6 +214,8 @@ impl eframe::App for LimenApp {
                 }
                 if bar.drag_started_by(egui::PointerButton::Primary) {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    // The release goes to the window system, not to us.
+                    ui::window_took_pointer(ui.ctx());
                 }
                 // Too narrow for all the bar holds: a menu button, the brand and
                 // the window's own buttons stay; the rest is in the left panel.

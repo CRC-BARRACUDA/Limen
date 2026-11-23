@@ -630,6 +630,17 @@ pub fn window_button(ui: &mut egui::Ui, kind: WinBtn) -> egui::Response {
     resp
 }
 
+fn pointer_taken_id() -> egui::Id {
+    egui::Id::new("limen_pointer_taken_by_window_system")
+}
+
+/// Say that the window system has just been handed the pointer — the window is
+/// being moved by its title bar, say. The button's release will not come back,
+/// and [`window_resize_grips`] has to know not to take the button for held.
+pub fn window_took_pointer(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(pointer_taken_id(), true));
+}
+
 /// Invisible edge/corner drag strips that resize the window, since turning off OS
 /// decorations also removes the native resize borders. No-op while maximized.
 ///
@@ -658,6 +669,22 @@ pub fn window_resize_grips(ctx: &egui::Context) {
         );
     }
     ctx.data_mut(|d| d.remove::<Cur>(wanted_id));
+
+    // Once a resize starts the window system has the pointer, and the
+    // button's release never comes here: egui goes on believing it is held.
+    // Remembered, so that belief is not taken for a drag — until a button
+    // really is pressed or let go again.
+    let resizing_id = pointer_taken_id();
+    let (pressed, down, released) =
+        ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.any_released()));
+    if pressed || released {
+        ctx.data_mut(|d| d.remove::<bool>(resizing_id));
+    }
+    let stale_hold = ctx.data(|d| d.get_temp::<bool>(resizing_id).unwrap_or(false));
+    if stale_hold {
+        // And nothing is being dragged: the rest of the window hovers again.
+        ctx.stop_dragging();
+    }
 
     if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
         return;
@@ -699,13 +726,13 @@ pub fn window_resize_grips(ctx: &egui::Context) {
     // The grip under the pointer: the last that holds it, so a corner wins.
     let hit = grips.iter().rev().find(|(_, rect, ..)| rect.contains(p)).map(|(_, _, dir, cursor)| (*dir, *cursor));
     // Not while something else is being dragged through the edge.
-    let (pressed, down) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down()));
     if let Some((dir, cursor)) = hit
-        && (pressed || !down)
+        && (pressed || !down || stale_hold)
     {
         ctx.data_mut(|d| d.insert_temp(wanted_id, cursor));
         if pressed {
             ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+            ctx.data_mut(|d| d.insert_temp(resizing_id, true));
         }
     }
     for (id, rect, ..) in grips {
