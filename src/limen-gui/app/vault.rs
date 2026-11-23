@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use limen_core::security_key::{self, YubiKey};
-use limen_core::vault::{self, ChallengeResponse, Credentials, Factor, Factors, Kdf, Vault, VaultError, LIMEN};
+use limen_core::vault::{
+    self, ChallengeResponse, Credentials, Enrolled, Factor, Factors, Kdf, NewKey, Vault, VaultError, LIMEN,
+};
 use zeroize::Zeroizing;
 use limen_host::{SecretError, SecretStore};
 use limen_ui as ui;
@@ -178,37 +180,46 @@ enum Mode {
 const KEYFILE_MAX: u64 = 16 * 1024 * 1024;
 
 /// What the window's fields stand for, gathered off the GUI thread: the key
-/// file read, the YubiKey looked for.
+/// file read, the YubiKeys plugged in looked for.
 struct Gathered {
     password: Zeroizing<String>,
     keyfile: Option<Zeroizing<Vec<u8>>>,
-    key: Option<(YubiKey, u8)>,
+    keys: Vec<YubiKey>,
 }
 
 impl Gathered {
-    /// `keyfile`: the file to read, if one is needed. `slot`: the YubiKey's,
-    /// if one is needed.
-    fn get(password: String, keyfile: Option<&str>, slot: Option<u8>) -> Result<Self, String> {
+    /// `keyfile`: the file to read, if one is needed. `keys`: whether the
+    /// YubiKeys plugged in are needed.
+    fn get(password: String, keyfile: Option<&str>, keys: bool) -> Result<Self, String> {
         let keyfile = match keyfile {
             Some(path) => Some(read_keyfile(path)?),
             None => None,
         };
-        let key = match slot {
-            Some(slot) => match security_key::find() {
-                Ok(Some(k)) => Some((k, slot)),
-                Ok(None) => return Err(i18n::t("vault.plug_in")),
+        let keys = if keys {
+            match security_key::find_all() {
+                Ok(k) if k.is_empty() => return Err(i18n::t("vault.plug_in")),
+                Ok(k) => k,
                 Err(e) => return Err(said(e)),
-            },
-            None => None,
+            }
+        } else {
+            Vec::new()
         };
-        Ok(Self { password: Zeroizing::new(password), keyfile, key })
+        Ok(Self { password: Zeroizing::new(password), keyfile, keys })
     }
 
-    fn credentials(&self) -> Credentials<'_> {
-        Credentials {
+    /// Run `f` with these as credentials to open the vault with.
+    fn opening<T>(&self, f: impl FnOnce(Credentials) -> T) -> T {
+        let keys: Vec<&dyn ChallengeResponse> = self.keys.iter().map(|k| k as &dyn ChallengeResponse).collect();
+        f(Credentials { password: &self.password, keyfile: self.keyfile.as_ref().map(|k| k.as_slice()), security_keys: &keys })
+    }
+
+    /// These as a new key: keeping the vault's YubiKeys or not, adding `add`.
+    fn new_key<'a>(&'a self, keep: bool, add: &'a [Enrolled]) -> NewKey<'a> {
+        NewKey {
             password: &self.password,
             keyfile: self.keyfile.as_ref().map(|k| k.as_slice()),
-            security_key: self.key.as_ref().map(|(k, slot)| (k as &dyn ChallengeResponse, *slot)),
+            keep_security_keys: keep,
+            add,
         }
     }
 }
@@ -234,6 +245,7 @@ fn said(e: VaultError) -> String {
         VaultError::NeedsFactor(Factor::KeyFile) => i18n::t("vault.no_keyfile"),
         VaultError::NeedsFactor(Factor::SecurityKey) => i18n::t("vault.plug_in"),
         VaultError::SecurityKey(why) => i18n::t("vault.key_failed").replace("{why}", &why),
+        VaultError::UnknownSecurityKey => i18n::t("vault.unknown_key"),
         e => e.to_string(),
     }
 }
@@ -252,10 +264,18 @@ fn unlocks_with(f: &Factors) -> String {
     if f.keyfile {
         parts.push(i18n::t("vault.f_keyfile"));
     }
-    if let Some(k) = &f.security_key {
-        parts.push(i18n::t("vault.f_key").replace("{slot}", &k.slot.to_string()));
+    match f.security_keys.len() {
+        0 => {}
+        1 => parts.push(i18n::t("vault.f_key")),
+        n => parts.push(i18n::t("vault.f_keys").replace("{n}", &n.to_string())),
     }
     i18n::t("vault.unlocks_with").replace("{what}", &parts.join(" · "))
+}
+
+/// How an enrolled YubiKey shows: its name, or its slot when it has none.
+fn key_label(k: &vault::SecurityKeyFactor) -> String {
+    let name = if k.name.is_empty() { "YubiKey".to_string() } else { k.name.clone() };
+    format!("{name} ({} {})", i18n::t("vault.slot").to_lowercase(), k.slot)
 }
 
 /// Which key-file field a file dialog fills.
@@ -317,6 +337,8 @@ enum Done {
     Failed(String),
     /// Whether this machine remembers the key now.
     Remembered(bool),
+    /// A YubiKey added in the window — or why not.
+    Enrolled(Result<Enrolled, String>),
 }
 
 /// The vault's GUI.
@@ -353,8 +375,14 @@ pub(crate) struct VaultUi {
     old_keyfile: String,
     /// Create and change: require a key file, a YubiKey, and the YubiKey's slot.
     use_keyfile: bool,
-    use_key: bool,
+    /// Change: keep the YubiKeys the vault has.
+    keep_keys: bool,
+    /// YubiKeys added in this window, each asked its own challenge; and the
+    /// slot the next one is added on.
+    enrolled: Vec<Enrolled>,
     key_slot: u8,
+    /// A YubiKey is being added.
+    enrolling: bool,
     /// What the vault needs besides the password, as when the window opened.
     factors: Factors,
     /// File dialogs' answers.
@@ -425,8 +453,10 @@ impl VaultUi {
             keyfile: String::new(),
             old_keyfile: String::new(),
             use_keyfile: false,
-            use_key: false,
+            keep_keys: false,
+            enrolled: Vec::new(),
             key_slot: 2,
+            enrolling: false,
             factors: Factors::default(),
             picks: mpsc::channel(),
             succeeded_at: None,
@@ -494,8 +524,10 @@ impl VaultUi {
         self.keyfile = last.clone();
         self.old_keyfile = last;
         self.use_keyfile = self.factors.keyfile;
-        self.use_key = self.factors.security_key.is_some();
-        self.key_slot = self.factors.security_key.as_ref().map_or(2, |k| k.slot);
+        self.keep_keys = !self.factors.security_keys.is_empty();
+        self.enrolled.clear();
+        self.enrolling = false;
+        self.key_slot = self.factors.security_keys.first().map_or(2, |k| k.slot);
         self.mode = Some(mode);
     }
 
@@ -576,6 +608,13 @@ impl VaultUi {
                     self.remembered = on;
                     just_opened |= self.is_open();
                 }
+                Done::Enrolled(answer) => {
+                    self.enrolling = false;
+                    match answer {
+                        Ok(key) => self.enrolled.push(key),
+                        Err(why) => self.error = Some(why),
+                    }
+                }
             }
         }
         if let Some(at) = self.succeeded_at
@@ -629,23 +668,51 @@ impl VaultUi {
         self.password.zeroize();
         self.new_password.zeroize();
         self.confirm.zeroize();
+        // The keys added here hold their answers: wiped as they go.
+        self.enrolled.clear();
     }
 
-    /// The credentials the vault needs now: its key file if it has one, its
-    /// YubiKey's slot if it has one.
-    fn needed(&self) -> (Option<String>, Option<u8>) {
-        (
-            self.factors.keyfile.then(|| self.keyfile.clone()),
-            self.factors.security_key.as_ref().map(|k| k.slot),
-        )
+    /// What the vault needs now: its key file if it has one, and whether its
+    /// YubiKeys.
+    fn needed(&self) -> (Option<String>, bool) {
+        (self.factors.keyfile.then(|| self.keyfile.clone()), !self.factors.security_keys.is_empty())
     }
 
-    /// The factors a new key will have: the key file to use, the slot to use.
-    fn chosen(&self) -> Result<(Option<String>, Option<u8>), String> {
+    /// The key file a new key will need, if any.
+    fn chosen_keyfile(&self) -> Result<Option<String>, String> {
         if self.use_keyfile && self.keyfile.trim().is_empty() {
             return Err(i18n::t("vault.no_keyfile"));
         }
-        Ok((self.use_keyfile.then(|| self.keyfile.clone()), self.use_key.then_some(self.key_slot)))
+        Ok(self.use_keyfile.then(|| self.keyfile.clone()))
+    }
+
+    /// Add the YubiKey plugged in: ask it a new challenge, on its own thread
+    /// — it may wait for a touch. One already added (or kept) is passed over,
+    /// so the backup is added by swapping it in and asking again.
+    fn add_key(&mut self) {
+        let taken: Vec<u32> = self
+            .enrolled
+            .iter()
+            .filter_map(|e| e.serial)
+            .chain(self.keep_keys.then(|| self.factors.security_keys.iter().filter_map(|k| k.serial)).into_iter().flatten())
+            .collect();
+        let slot = self.key_slot;
+        let tx = self.tx.clone();
+        let ctx = self.shared.ctx.clone();
+        self.enrolling = true;
+        self.error = None;
+        std::thread::spawn(move || {
+            let answer = match security_key::find_all() {
+                Err(e) => Err(said(e)),
+                Ok(keys) if keys.is_empty() => Err(i18n::t("vault.plug_in")),
+                Ok(keys) => match keys.into_iter().find(|k| k.serial.is_none_or(|s| !taken.contains(&s))) {
+                    None => Err(i18n::t("vault.key_added_already")),
+                    Some(key) => vault::enroll(&key, slot).map_err(said),
+                },
+            };
+            let _ = tx.send(Done::Enrolled(answer));
+            ctx.request_repaint();
+        });
     }
 
     fn submit(&mut self) {
@@ -675,16 +742,17 @@ impl VaultUi {
             Mode::Create => {
                 self.new_password = pw;
                 let Some(pw) = new_password(self, None) else { return };
-                let (keyfile, slot) = match self.chosen() {
-                    Ok(c) => c,
+                let keyfile = match self.chosen_keyfile() {
+                    Ok(k) => k,
                     Err(why) => return self.error = Some(why),
                 };
+                let add = self.enrolled.clone();
                 self.spawn(move |v| {
-                    let g = match Gathered::get(pw, keyfile.as_deref(), slot) {
+                    let g = match Gathered::get(pw, keyfile.as_deref(), false) {
                         Ok(g) => g,
                         Err(why) => return Done::Failed(why),
                     };
-                    match v.create(g.credentials(), Kdf::DEFAULT).and_then(|_| v.remember(remember)) {
+                    match v.create(g.new_key(false, &add), Kdf::DEFAULT).and_then(|_| v.remember(remember)) {
                         Ok(()) => {
                             remember_keyfile(keyfile.as_deref());
                             Done::Opened
@@ -694,13 +762,13 @@ impl VaultUi {
                 });
             }
             Mode::Unlock => {
-                let (keyfile, slot) = self.needed();
+                let (keyfile, keys) = self.needed();
                 self.spawn(move |v| {
-                    let g = match Gathered::get(pw, keyfile.as_deref(), slot) {
+                    let g = match Gathered::get(pw, keyfile.as_deref(), keys) {
                         Ok(g) => g,
                         Err(why) => return Done::Failed(why),
                     };
-                    match v.unlock(g.credentials()) {
+                    match g.opening(|c| v.unlock(c)) {
                         Ok(()) => {
                             let _ = v.remember(remember);
                             if keyfile.is_some() {
@@ -714,22 +782,23 @@ impl VaultUi {
             }
             Mode::ChangePassword => {
                 let Some(new) = new_password(self, Some(&pw)) else { return };
-                let (new_keyfile, new_slot) = match self.chosen() {
-                    Ok(c) => c,
+                let new_keyfile = match self.chosen_keyfile() {
+                    Ok(k) => k,
                     Err(why) => return self.error = Some(why),
                 };
                 let old_keyfile = self.factors.keyfile.then(|| self.old_keyfile.clone());
-                let old_slot = self.factors.security_key.as_ref().map(|k| k.slot);
+                let old_keys = !self.factors.security_keys.is_empty();
+                let (keep, add) = (self.keep_keys, self.enrolled.clone());
                 self.spawn(move |v| {
-                    let old = match Gathered::get(pw, old_keyfile.as_deref(), old_slot) {
+                    let old = match Gathered::get(pw, old_keyfile.as_deref(), old_keys) {
                         Ok(g) => g,
                         Err(why) => return Done::Failed(why),
                     };
-                    let new = match Gathered::get(new, new_keyfile.as_deref(), new_slot) {
+                    let new = match Gathered::get(new, new_keyfile.as_deref(), false) {
                         Ok(g) => g,
                         Err(why) => return Done::Failed(why),
                     };
-                    match v.change_key(&old.credentials(), &new.credentials()) {
+                    match old.opening(|c| v.change_key(&c, &new.new_key(keep, &add))) {
                         Ok(()) => {
                             remember_keyfile(new_keyfile.as_deref());
                             Done::Opened
@@ -739,21 +808,20 @@ impl VaultUi {
                 });
             }
             Mode::Reveal { ns, name } => {
-                let (keyfile, slot) = self.needed();
+                let (keyfile, keys) = self.needed();
+                let wrong = if self.factors.is_empty() { VaultError::WrongPassword } else { VaultError::WrongKey };
                 self.spawn(move |v| {
-                    let g = match Gathered::get(pw, keyfile.as_deref(), slot) {
+                    let g = match Gathered::get(pw, keyfile.as_deref(), keys) {
                         Ok(g) => g,
                         Err(why) => return Done::Failed(why),
                     };
-                    match v.check_password(g.credentials()) {
+                    match g.opening(|c| v.check_password(c)) {
                         Ok(true) => match v.get(&ns, &name) {
                             Ok(Some(value)) => Done::Revealed { ns, name, value },
                             Ok(None) => Done::Failed(i18n::t("vault.gone")),
                             Err(e) => Done::Failed(said(e)),
                         },
-                        Ok(false) => Done::Failed(said(v.factors().map_or(VaultError::WrongPassword, |f| {
-                            if f.is_empty() { VaultError::WrongPassword } else { VaultError::WrongKey }
-                        }))),
+                        Ok(false) => Done::Failed(said(wrong)),
                         Err(e) => Done::Failed(said(e)),
                     }
                 });
@@ -776,6 +844,8 @@ impl VaultUi {
         let mut cancel = false;
         // A file dialog asked for: which field, and whether to make a new file.
         let mut want_pick: Option<(KeyField, bool)> = None;
+        // "Add the plugged-in YubiKey" was pressed.
+        let mut want_key = false;
         let now = ctx.input(|i| i.time);
         let succeeded = self.succeeded_at.map(|at| now - at);
         let shake = self.shake_at.map(|at| now - at).filter(|d| *d < SHAKE_S);
@@ -873,10 +943,9 @@ impl VaultUi {
                 want_pick =
                     want_pick.or(keyfile_row(ui, &i18n::t("vault.current_keyfile"), &mut self.old_keyfile, KeyField::Current, false));
             }
-            if let Some(k) = &self.factors.security_key
-                && matches!(mode, Mode::Unlock | Mode::Reveal { .. } | Mode::ChangePassword)
-            {
-                note(ui, i18n::t("vault.uses_key").replace("{slot}", &k.slot.to_string()));
+            if !self.factors.security_keys.is_empty() && matches!(mode, Mode::Unlock | Mode::Reveal { .. } | Mode::ChangePassword) {
+                let names: Vec<String> = self.factors.security_keys.iter().map(key_label).collect();
+                note(ui, i18n::t("vault.uses_key").replace("{keys}", &names.join(", ")));
                 ui.add_space(6.0);
             }
             if mode == Mode::ChangePassword {
@@ -894,27 +963,57 @@ impl VaultUi {
                     note(ui, i18n::t("vault.keyfile_hint"));
                 }
                 ui.add_space(6.0);
-                ui::toggle(ui, &mut self.use_key, &i18n::t("vault.require_key"));
-                if self.use_key {
+                // YubiKeys: any one of them will open it.
+                ui.label(egui::RichText::new(i18n::t("vault.keys")).small());
+                if mode == Mode::ChangePassword && !self.factors.security_keys.is_empty() {
+                    let n = self.factors.security_keys.len();
+                    ui::toggle(ui, &mut self.keep_keys, &i18n::t("vault.keep_keys").replace("{n}", &n.to_string()));
+                    if !self.keep_keys {
+                        note(ui, i18n::t("vault.keys_removed"));
+                    }
+                }
+                let mut drop_at = None;
+                for (i, key) in self.enrolled.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.add_space(6.0);
-                        ui.label(egui::RichText::new(i18n::t("vault.slot")).small());
-                        for slot in [1u8, 2] {
-                            if ui::chip(ui, &slot.to_string(), self.key_slot == slot).clicked() {
-                                self.key_slot = slot;
-                            }
+                        ui.label(format!("{} · {} {}", key.name, i18n::t("vault.slot"), key.slot));
+                        if ui::outline_button(ui, "✕", egui::Vec2::ZERO).clicked() {
+                            drop_at = Some(i);
                         }
                     });
+                }
+                if let Some(i) = drop_at {
+                    self.enrolled.remove(i);
+                }
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(i18n::t("vault.slot")).small());
+                    for slot in [1u8, 2] {
+                        if ui::chip(ui, &slot.to_string(), self.key_slot == slot).clicked() {
+                            self.key_slot = slot;
+                        }
+                    }
+                    let add = ui
+                        .add_enabled_ui(!self.enrolling && !busy, |ui| ui::outline_button(ui, &i18n::t("vault.add_key"), egui::Vec2::ZERO))
+                        .inner;
+                    if add.clicked() {
+                        want_key = true;
+                    }
+                    if self.enrolling {
+                        ui.spinner();
+                    }
+                });
+                if self.enrolling {
+                    ui.label(egui::RichText::new(i18n::t("vault.touch")).color(ui::color::ACCENT_BRIGHT));
+                }
+                if !self.enrolled.is_empty() || (self.keep_keys && !self.factors.security_keys.is_empty()) {
                     note(ui, i18n::t("vault.key_hint"));
                 }
                 ui.add_space(6.0);
             }
             // A YubiKey is being asked: it may be waiting for a touch.
-            let asking_key = match &mode {
-                Mode::Create => self.use_key,
-                Mode::ChangePassword => self.use_key || self.factors.security_key.is_some(),
-                _ => self.factors.security_key.is_some(),
-            };
+            // Only opening asks a key now: those being added were asked already.
+            let asking_key = !matches!(mode, Mode::Create) && !self.factors.security_keys.is_empty();
             if busy && asking_key {
                 ui.label(egui::RichText::new(i18n::t("vault.touch")).color(ui::color::ACCENT_BRIGHT));
                 ui.add_space(4.0);
@@ -948,6 +1047,9 @@ impl VaultUi {
                 }
             });
         });
+        if want_key {
+            self.add_key();
+        }
         if let Some((which, make)) = want_pick {
             let start = match which {
                 KeyField::New => self.keyfile.clone(),

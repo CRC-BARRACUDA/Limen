@@ -198,18 +198,22 @@ fn the_default_cost_is_a_real_one() {
     assert!(took.as_millis() >= 20, "Argon2id at 64 MiB is not free: {took:?}");
 }
 
-// ---- factors: a key file, a security key -------------------------------- //
+// ---- factors: a key file, security keys --------------------------------- //
 
 /// A security key in a test: answers with a digest of its secret, the slot and
 /// the challenge — standing in for HMAC-SHA1 — and notes what it was asked.
 struct FakeKey {
     secret: &'static str,
+    serial: Option<u32>,
     asked: Mutex<Vec<(u8, Vec<u8>)>>,
 }
 
 impl FakeKey {
-    fn new(secret: &'static str) -> Self {
-        Self { secret, asked: Mutex::new(Vec::new()) }
+    fn new(secret: &'static str, serial: Option<u32>) -> Self {
+        Self { secret, serial, asked: Mutex::new(Vec::new()) }
+    }
+    fn times_asked(&self) -> usize {
+        self.asked.lock().unwrap().len()
     }
 }
 
@@ -220,6 +224,12 @@ impl ChallengeResponse for FakeKey {
         let d = Sha256::new().chain_update(self.secret).chain_update([slot]).chain_update(challenge).finalize();
         Ok(zeroize::Zeroizing::new(d[..20].try_into().unwrap()))
     }
+    fn serial(&self) -> Option<u32> {
+        self.serial
+    }
+    fn name(&self) -> String {
+        format!("fake {}", self.secret)
+    }
 }
 
 fn header(path: &std::path::Path) -> serde_json::Value {
@@ -228,6 +238,20 @@ fn header(path: &std::path::Path) -> serde_json::Value {
 
 fn reload(path: &std::path::Path) -> Vault {
     Vault::load(path, Box::new(MemKeys::default())).unwrap()
+}
+
+fn with<'a>(keys: &'a [&'a dyn ChallengeResponse]) -> Credentials<'a> {
+    Credentials { security_keys: keys, ..Credentials::password("correct horse") }
+}
+
+/// A vault on the password and two security keys: a primary and a backup.
+fn two_keys(name: &str, primary: &FakeKey, backup: &FakeKey) -> PathBuf {
+    let path = place(name);
+    let enrolled = [enroll(primary, 2).unwrap(), enroll(backup, 1).unwrap()];
+    let mut v = Vault::load(&path, Box::new(MemKeys::default())).unwrap();
+    v.create(NewKey { add: &enrolled, ..NewKey::password("correct horse") }, Kdf::TEST).unwrap();
+    v.set("a", "x", "kept").unwrap();
+    path
 }
 
 #[test]
@@ -248,7 +272,7 @@ fn a_vault_made_by_version_1_still_opens_and_moves_to_2_with_a_new_key() {
     reload(&path).unlock("correct horse").unwrap();
 
     // A new key writes it anew, as version 2.
-    v.change_key(&"correct horse".into(), &Credentials { keyfile: Some(b"a key file"), ..Credentials::password("battery staple") }).unwrap();
+    v.change_key(&"correct horse".into(), &NewKey { keyfile: Some(b"a key file"), ..NewKey::password("battery staple") }).unwrap();
     assert_eq!(header(&path)["version"], 2);
     let mut again = reload(&path);
     again.unlock(Credentials { keyfile: Some(b"a key file"), ..Credentials::password("battery staple") }).unwrap();
@@ -258,71 +282,150 @@ fn a_vault_made_by_version_1_still_opens_and_moves_to_2_with_a_new_key() {
 #[test]
 fn a_key_file_is_needed_and_has_to_be_the_one() {
     let path = place("keyfile");
-    let with = |file: &'static [u8]| Credentials { keyfile: Some(file), ..Credentials::password("correct horse") };
+    let open_with = |file: &'static [u8]| Credentials { keyfile: Some(file), ..Credentials::password("correct horse") };
     let mut v = Vault::load(&path, Box::new(MemKeys::default())).unwrap();
-    v.create(with(b"the key file"), Kdf::TEST).unwrap();
+    v.create(NewKey { keyfile: Some(b"the key file"), ..NewKey::password("correct horse") }, Kdf::TEST).unwrap();
     v.set("a", "x", "1").unwrap();
     assert_eq!(header(&path)["factors"]["keyfile"], true);
 
     let mut v = reload(&path);
     assert!(v.factors().unwrap().keyfile);
     assert_eq!(v.unlock("correct horse"), Err(VaultError::NeedsFactor(Factor::KeyFile)), "the password alone is not enough");
-    assert_eq!(v.unlock(with(b"another file")), Err(VaultError::WrongKey));
-    assert_eq!(v.unlock(Credentials { password: "wrong horse", ..with(b"the key file") }), Err(VaultError::WrongKey));
-    assert_eq!(v.check_password(with(b"the key file")), Ok(true));
-    assert_eq!(v.check_password(with(b"another file")), Ok(false));
+    assert_eq!(v.unlock(open_with(b"another file")), Err(VaultError::WrongKey));
+    assert_eq!(v.unlock(Credentials { password: "wrong horse", ..open_with(b"the key file") }), Err(VaultError::WrongKey));
+    assert_eq!(v.check_password(open_with(b"the key file")), Ok(true));
+    assert_eq!(v.check_password(open_with(b"another file")), Ok(false));
     assert!(!v.is_open());
-    v.unlock(with(b"the key file")).unwrap();
+    v.unlock(open_with(b"the key file")).unwrap();
     assert_eq!(v.get("a", "x").unwrap().as_deref(), Some("1"));
 }
 
 #[test]
-fn a_security_key_answers_the_vaults_own_challenge() {
-    let path = place("security-key");
-    let mine = FakeKey::new("mine");
-    let mut v = Vault::load(&path, Box::new(MemKeys::default())).unwrap();
-    v.create(Credentials { security_key: Some((&mine, 2)), ..Credentials::password("correct horse") }, Kdf::TEST).unwrap();
-    v.set("a", "x", "1").unwrap();
-    let challenge = header(&path)["factors"]["security_key"]["challenge"].as_str().unwrap().to_string();
-    assert_eq!(header(&path)["factors"]["security_key"]["slot"], 2);
-    assert_eq!(challenge.len(), 128, "64 random bytes");
-    assert_eq!(mine.asked.lock().unwrap().last().unwrap().0, 2, "asked on the slot it was set up on");
+fn either_of_two_security_keys_opens_it_alone() {
+    let (primary, backup) = (FakeKey::new("primary", Some(111)), FakeKey::new("backup", Some(222)));
+    let path = two_keys("two-keys", &primary, &backup);
+    let keys = header(&path)["factors"]["security_keys"].as_array().unwrap().clone();
+    assert_eq!(keys.len(), 2);
+    assert_eq!((keys[0]["serial"].clone(), keys[0]["slot"].clone()), (111.into(), 2.into()));
+    assert_eq!((keys[1]["serial"].clone(), keys[1]["slot"].clone()), (222.into(), 1.into()));
+    assert_ne!(keys[0]["challenge"], keys[1]["challenge"], "each its own question");
 
+    for key in [&primary as &dyn ChallengeResponse, &backup] {
+        let mut v = reload(&path);
+        assert_eq!(v.unlock("correct horse"), Err(VaultError::NeedsFactor(Factor::SecurityKey)));
+        v.unlock(with(&[key])).unwrap();
+        assert_eq!(v.get("a", "x").unwrap().as_deref(), Some("kept"));
+    }
+    let stranger = FakeKey::new("someone else's", Some(333));
+    assert_eq!(reload(&path).unlock(with(&[&stranger])), Err(VaultError::UnknownSecurityKey));
     let mut v = reload(&path);
-    assert_eq!(v.unlock("correct horse"), Err(VaultError::NeedsFactor(Factor::SecurityKey)));
-    let other = FakeKey::new("someone else's");
-    assert_eq!(v.unlock(Credentials { security_key: Some((&other, 2)), ..Credentials::password("correct horse") }), Err(VaultError::WrongKey));
-    // The slot asked is the vault's, whatever the caller says.
-    mine.asked.lock().unwrap().clear();
-    v.unlock(Credentials { security_key: Some((&mine, 1)), ..Credentials::password("correct horse") }).unwrap();
-    let asked = mine.asked.lock().unwrap().clone();
-    assert_eq!(asked.len(), 1, "one question, so one touch");
-    assert_eq!(asked[0].0, 2);
-    assert_eq!(asked[0].1.len(), 64);
-    assert_eq!(v.get("a", "x").unwrap().as_deref(), Some("1"));
+    assert_eq!(v.unlock(Credentials { password: "wrong horse", ..with(&[&primary]) }), Err(VaultError::WrongKey));
+    assert_eq!(v.check_password(with(&[&backup])), Ok(true));
+    assert_eq!(v.check_password(with(&[&stranger])), Ok(false));
+}
+
+#[test]
+fn a_key_that_tells_its_serial_is_asked_only_its_own_question() {
+    let (primary, backup) = (FakeKey::new("primary", Some(111)), FakeKey::new("backup", Some(222)));
+    let path = two_keys("one-question", &primary, &backup);
+    let before = backup.times_asked();
+    reload(&path).unlock(with(&[&backup])).unwrap();
+    assert_eq!(backup.times_asked() - before, 1, "one question, so one touch");
+    assert_eq!(backup.asked.lock().unwrap().last().unwrap().0, 1, "on the slot it was enrolled on");
+
+    // One that does not tell is tried against each — and still opens it.
+    let quiet = FakeKey { serial: None, ..FakeKey::new("backup", None) };
+    reload(&path).unlock(with(&[&quiet])).unwrap();
+    // With both plugged in, either does.
+    reload(&path).unlock(with(&[&FakeKey::new("someone else's", Some(9)), &primary])).unwrap();
+}
+
+#[test]
+fn a_new_password_or_key_file_keeps_both_keys_working_with_one_plugged_in() {
+    let (primary, backup) = (FakeKey::new("primary", Some(111)), FakeKey::new("backup", Some(222)));
+    let path = two_keys("keep", &primary, &backup);
+    let entries = header(&path)["factors"]["security_keys"].clone();
+    let mut v = reload(&path);
+    let new = NewKey { keyfile: Some(b"file"), keep_security_keys: true, ..NewKey::password("battery staple") };
+    v.change_key(&with(&[&primary]), &new).unwrap();
+    assert_eq!(header(&path)["factors"]["security_keys"], entries, "the keys' entries are as they were");
+    for key in [&primary as &dyn ChallengeResponse, &backup] {
+        reload(&path)
+            .unlock(Credentials { password: "battery staple", keyfile: Some(b"file"), security_keys: &[key] })
+            .unwrap();
+    }
+}
+
+#[test]
+fn a_backup_key_can_be_added_later() {
+    let path = place("add-later");
+    let (primary, backup) = (FakeKey::new("primary", Some(111)), FakeKey::new("backup", Some(222)));
+    let first = [enroll(&primary, 2).unwrap()];
+    let mut v = Vault::load(&path, Box::new(MemKeys::default())).unwrap();
+    v.create(NewKey { add: &first, ..NewKey::password("correct horse") }, Kdf::TEST).unwrap();
+    assert_eq!(reload(&path).unlock(with(&[&backup])), Err(VaultError::UnknownSecurityKey));
+
+    let added = [enroll(&backup, 2).unwrap()];
+    v.change_key(&with(&[&primary]), &NewKey { keep_security_keys: true, add: &added, ..NewKey::password("correct horse") })
+        .unwrap();
+    reload(&path).unlock(with(&[&backup])).unwrap();
+    reload(&path).unlock(with(&[&primary])).unwrap();
+    // The same key twice is refused.
+    let again = [enroll(&backup, 2).unwrap()];
+    assert!(matches!(
+        v.change_key(&with(&[&primary]), &NewKey { keep_security_keys: true, add: &again, ..NewKey::password("correct horse") }),
+        Err(VaultError::SecurityKey(_))
+    ));
+}
+
+#[test]
+fn a_removed_key_opens_nothing_even_with_an_old_copy_of_the_file() {
+    let (primary, lost) = (FakeKey::new("primary", Some(111)), FakeKey::new("lost", Some(222)));
+    let path = two_keys("remove", &primary, &lost);
+    let old_copy = std::fs::read_to_string(&path).unwrap();
+    // Down to the primary: re-enrolled, so the secret is new.
+    let kept = [enroll(&primary, 2).unwrap()];
+    let mut v = reload(&path);
+    v.change_key(&with(&[&primary]), &NewKey { add: &kept, ..NewKey::password("correct horse") }).unwrap();
+    assert_eq!(header(&path)["factors"]["security_keys"].as_array().unwrap().len(), 1);
+    reload(&path).unlock(with(&[&primary])).unwrap();
+    assert_eq!(reload(&path).unlock(with(&[&lost])), Err(VaultError::UnknownSecurityKey));
+
+    // The lost key's entry, taken from the old copy and put back in the new
+    // file, still opens nothing: its secret is the old one, and the header
+    // is bound besides.
+    let mut now: serde_json::Value = header(&path);
+    let old: serde_json::Value = serde_json::from_str(&old_copy).unwrap();
+    now["factors"]["security_keys"].as_array_mut().unwrap().push(old["factors"]["security_keys"][1].clone());
+    std::fs::write(&path, serde_json::to_string(&now).unwrap()).unwrap();
+    assert!(reload(&path).unlock(with(&[&lost])).is_err());
 }
 
 #[test]
 fn all_three_together() {
     let path = place("all-three");
-    let key = FakeKey::new("k");
-    let full = Credentials { password: "correct horse", keyfile: Some(b"file"), security_key: Some((&key, 1)) };
+    let key = FakeKey::new("k", Some(1));
+    let enrolled = [enroll(&key, 1).unwrap()];
     let mut v = Vault::load(&path, Box::new(MemKeys::default())).unwrap();
-    v.create(full, Kdf::TEST).unwrap();
+    v.create(NewKey { keyfile: Some(b"file"), add: &enrolled, ..NewKey::password("correct horse") }, Kdf::TEST).unwrap();
+    let full = Credentials { password: "correct horse", keyfile: Some(b"file"), security_keys: &[&key] };
     let mut v = reload(&path);
     assert_eq!(v.unlock(Credentials { keyfile: None, ..full }), Err(VaultError::NeedsFactor(Factor::KeyFile)));
-    assert_eq!(v.unlock(Credentials { security_key: None, ..full }), Err(VaultError::NeedsFactor(Factor::SecurityKey)));
+    assert_eq!(v.unlock(Credentials { security_keys: &[], ..full }), Err(VaultError::NeedsFactor(Factor::SecurityKey)));
     v.unlock(full).unwrap();
 }
 
 #[test]
 fn taking_a_factor_out_of_the_file_opens_nothing() {
+    let (primary, backup) = (FakeKey::new("primary", Some(111)), FakeKey::new("backup", Some(222)));
     let path = place("stripped");
-    let key = FakeKey::new("k");
-    let creds = Credentials { keyfile: Some(b"file"), security_key: Some((&key, 2)), ..Credentials::password("correct horse") };
-    Vault::load(&path, Box::new(MemKeys::default())).unwrap().create(creds, Kdf::TEST).unwrap();
+    let enrolled = [enroll(&primary, 2).unwrap(), enroll(&backup, 2).unwrap()];
+    Vault::load(&path, Box::new(MemKeys::default()))
+        .unwrap()
+        .create(NewKey { keyfile: Some(b"file"), add: &enrolled, ..NewKey::password("correct horse") }, Kdf::TEST)
+        .unwrap();
     let original = std::fs::read_to_string(&path).unwrap();
-
+    let creds = Credentials { password: "correct horse", keyfile: Some(b"file"), security_keys: &[&primary] };
     let edit = |f: &dyn Fn(&mut serde_json::Value)| {
         let mut e: serde_json::Value = serde_json::from_str(&original).unwrap();
         f(&mut e);
@@ -330,46 +433,40 @@ fn taking_a_factor_out_of_the_file_opens_nothing() {
         reload(&path)
     };
     // No factors at all: only the password is asked for — and it opens nothing.
-    let mut v = edit(&|e| { e.as_object_mut().unwrap().remove("factors"); });
+    let mut v = edit(&|e| {
+        e.as_object_mut().unwrap().remove("factors");
+    });
     assert!(v.unlock("correct horse").is_err());
     assert!(!v.is_open());
-    // The key file dropped, the security key kept.
-    let mut v = edit(&|e| { e["factors"].as_object_mut().unwrap().remove("keyfile"); });
-    assert!(v.unlock(Credentials { keyfile: None, ..creds }).is_err());
-    // Another slot, or another challenge.
-    let mut v = edit(&|e| e["factors"]["security_key"]["slot"] = 1.into());
-    assert!(v.unlock(creds).is_err());
-    let mut v = edit(&|e| e["factors"]["security_key"]["challenge"] = "00".repeat(64).into());
-    assert!(v.unlock(creds).is_err());
+    // The key file dropped; the backup's entry dropped; another slot; another challenge.
+    assert!(edit(&|e| { e["factors"].as_object_mut().unwrap().remove("keyfile"); }).unlock(Credentials { keyfile: None, ..creds }).is_err());
+    assert!(edit(&|e| { e["factors"]["security_keys"].as_array_mut().unwrap().remove(1); }).unlock(creds).is_err());
+    assert!(edit(&|e| e["factors"]["security_keys"][0]["slot"] = 1.into()).unlock(creds).is_err());
+    assert!(edit(&|e| e["factors"]["security_keys"][0]["challenge"] = "00".repeat(64).into()).unlock(creds).is_err());
     // As written, it opens.
-    let mut v = edit(&|_| {});
-    v.unlock(creds).unwrap();
+    edit(&|_| {}).unlock(creds).unwrap();
 }
 
 #[test]
-fn a_new_key_draws_a_new_challenge_and_keeps_what_is_remembered() {
+fn what_is_remembered_survives_any_change_of_key() {
     let keys = MemKeys::default();
-    let path = place("new-challenge");
-    let key = FakeKey::new("k");
-    let with_key = Credentials { security_key: Some((&key, 2)), ..Credentials::password("correct horse") };
+    let path = place("remembered");
+    let (primary, backup) = (FakeKey::new("primary", Some(111)), FakeKey::new("backup", Some(222)));
+    let enrolled = [enroll(&primary, 2).unwrap(), enroll(&backup, 2).unwrap()];
     let mut v = Vault::load(&path, Box::new(keys.clone())).unwrap();
-    v.create(with_key, Kdf::TEST).unwrap();
+    v.create(NewKey { add: &enrolled, ..NewKey::password("correct horse") }, Kdf::TEST).unwrap();
     v.remember(true).unwrap();
-    let first = header(&path)["factors"]["security_key"]["challenge"].clone();
-
-    assert_eq!(v.change_key(&"correct horse".into(), &with_key), Err(VaultError::NeedsFactor(Factor::SecurityKey)), "the old key is asked for too");
-    v.change_key(&with_key, &with_key).unwrap();
-    assert_ne!(header(&path)["factors"]["security_key"]["challenge"], first, "a new challenge");
-    reload(&path).unlock(with_key).unwrap();
-
+    assert_eq!(
+        v.change_key(&"correct horse".into(), &NewKey::password("x")),
+        Err(VaultError::NeedsFactor(Factor::SecurityKey)),
+        "the old key is asked for, open or not"
+    );
     // Down to a password alone: the factors leave the header.
-    v.change_key(&with_key, &"correct horse".into()).unwrap();
+    v.change_key(&with(&[&backup]), &NewKey::password("correct horse")).unwrap();
     assert!(header(&path).get("factors").is_none());
     reload(&path).unlock("correct horse").unwrap();
-
-    // Remembered on this machine all along: the data key never changed.
     let mut here = Vault::load(&path, Box::new(keys.clone())).unwrap();
-    assert_eq!(here.unlock_remembered(), Ok(true));
+    assert_eq!(here.unlock_remembered(), Ok(true), "the data key never changed");
 }
 
 #[test]
@@ -380,21 +477,23 @@ fn a_new_key_file_is_random() {
     assert!(a[..64].iter().all(u8::is_ascii_hexdigit));
 }
 
-/// A real vault, locked with a real YubiKey: made, closed, read back from the
-/// disk and opened again. Needs one plugged in with `LIMEN_YUBIKEY_SLOT` set
-/// up for challenge-response.
+/// A real vault, locked with a real YubiKey: enrolled, made, closed, read back
+/// from the disk and opened again. Needs one plugged in with
+/// `LIMEN_YUBIKEY_SLOT` set up for challenge-response.
 #[test]
 #[ignore = "needs a YubiKey plugged in; set LIMEN_YUBIKEY_SLOT"]
 fn a_vault_locked_with_a_real_yubikey_opens_with_it() {
     let slot: u8 = std::env::var("LIMEN_YUBIKEY_SLOT").expect("LIMEN_YUBIKEY_SLOT").parse().unwrap();
     let key = limen_core::security_key::find().unwrap().expect("no YubiKey plugged in");
     let path = place("real-yubikey");
-    let creds = Credentials { password: "correct horse", keyfile: Some(b"file"), security_key: Some((&key, slot)) };
+    let enrolled = [enroll(&key, slot).unwrap()];
     let mut v = Vault::load(&path, Box::new(MemKeys::default())).unwrap();
-    v.create(creds, Kdf::TEST).unwrap();
+    v.create(NewKey { keyfile: Some(b"file"), add: &enrolled, ..NewKey::password("correct horse") }, Kdf::TEST).unwrap();
     v.set("a", "x", "kept").unwrap();
+    assert_eq!(header(&path)["factors"]["security_keys"][0]["serial"], key.serial.unwrap());
+    let full = Credentials { password: "correct horse", keyfile: Some(b"file"), security_keys: &[&key] };
     let mut v = reload(&path);
-    assert_eq!(v.unlock(Credentials { security_key: None, ..creds }), Err(VaultError::NeedsFactor(Factor::SecurityKey)));
-    v.unlock(creds).unwrap();
+    assert_eq!(v.unlock(Credentials { security_keys: &[], ..full }), Err(VaultError::NeedsFactor(Factor::SecurityKey)));
+    v.unlock(full).unwrap();
     assert_eq!(v.get("a", "x").unwrap().as_deref(), Some("kept"));
 }

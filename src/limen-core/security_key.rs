@@ -24,6 +24,8 @@ const PRODUCTS: &[u16] = &[0x0010, 0x0110, 0x0111, 0x0114, 0x0116, 0x0401, 0x040
 
 /// The challenge-response commands, slot 1 and slot 2.
 const CHAL_HMAC: [u8; 2] = [0x30, 0x38];
+/// "What is your serial number?" — answered without a touch.
+const DEVICE_SERIAL: u8 = 0x10;
 const PAYLOAD: usize = 64;
 const FRAME: usize = PAYLOAD + 1 + 2 + 3;
 /// The answer: 20 bytes of HMAC, its CRC, and what the reports pad it with.
@@ -63,8 +65,7 @@ fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-/// The frame for asking `slot` about `challenge`: the challenge padded to 64
-/// bytes, the command, the challenge's CRC (little-endian), and filler.
+/// The frame for asking `slot` about `challenge`.
 fn frame(slot: u8, challenge: &[u8]) -> Result<[u8; FRAME], VaultError> {
     let command = match slot {
         1 | 2 => CHAL_HMAC[slot as usize - 1],
@@ -73,12 +74,18 @@ fn frame(slot: u8, challenge: &[u8]) -> Result<[u8; FRAME], VaultError> {
     if challenge.len() > PAYLOAD {
         return Err(err("the challenge is longer than 64 bytes"));
     }
+    Ok(command_frame(command, challenge))
+}
+
+/// A command's frame: the payload padded to 64 bytes, the command, the
+/// payload's CRC (little-endian), and filler.
+fn command_frame(command: u8, payload: &[u8]) -> [u8; FRAME] {
     let mut f = [0u8; FRAME];
-    f[..challenge.len()].copy_from_slice(challenge);
+    f[..payload.len()].copy_from_slice(payload);
     f[PAYLOAD] = command;
     let crc = crc16(&f[..PAYLOAD]).to_le_bytes();
     f[PAYLOAD + 1..PAYLOAD + 3].copy_from_slice(&crc);
-    Ok(f)
+    f
 }
 
 /// The reports a frame is sent as: 7 bytes each, numbered, the all-zero ones
@@ -104,21 +111,39 @@ pub struct YubiKey {
     path: std::ffi::CString,
     /// What it calls itself: "YubiKey OTP+FIDO+CCID", say.
     pub name: String,
+    /// Its serial number, if it tells (a YubiKey can be set not to).
+    pub serial: Option<u32>,
+}
+
+fn is_otp(d: &hidapi::DeviceInfo) -> bool {
+    d.vendor_id() == YUBICO
+        && PRODUCTS.contains(&d.product_id())
+        // The OTP interface: a keyboard, interface 0.
+        && (d.interface_number() == 0 || (d.usage_page() == 0x01 && d.usage() == 0x06))
+}
+
+/// Every YubiKey plugged in — a primary and its backup may both be.
+pub fn find_all() -> Result<Vec<YubiKey>, VaultError> {
+    let api = hidapi::HidApi::new().map_err(|e| err(format!("USB devices could not be listed: {e}")))?;
+    let mut keys: Vec<YubiKey> = Vec::new();
+    for d in api.device_list().filter(|d| is_otp(d)) {
+        let mut key = YubiKey {
+            path: d.path().to_owned(),
+            name: d.product_string().unwrap_or("YubiKey").to_string(),
+            serial: None,
+        };
+        key.serial = key.read_serial().ok();
+        // One key can show more than one OTP-like interface.
+        if !keys.iter().any(|k| k.path == key.path || (key.serial.is_some() && k.serial == key.serial)) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
 }
 
 /// The first YubiKey plugged in, or None.
 pub fn find() -> Result<Option<YubiKey>, VaultError> {
-    let api = hidapi::HidApi::new().map_err(|e| err(format!("USB devices could not be listed: {e}")))?;
-    let found = api.device_list().find(|d| {
-        d.vendor_id() == YUBICO
-            && PRODUCTS.contains(&d.product_id())
-            // The OTP interface: a keyboard, interface 0.
-            && (d.interface_number() == 0 || (d.usage_page() == 0x01 && d.usage() == 0x06))
-    });
-    Ok(found.map(|d| YubiKey {
-        path: d.path().to_owned(),
-        name: d.product_string().unwrap_or("YubiKey").to_string(),
-    }))
+    Ok(find_all()?.into_iter().next())
 }
 
 impl YubiKey {
@@ -127,6 +152,15 @@ impl YubiKey {
         api.open_path(&self.path).map_err(|e| {
             err(format!("the YubiKey could not be opened ({e}) — is it still plugged in, and may Limen use it?"))
         })
+    }
+
+    fn read_serial(&self) -> Result<u32, VaultError> {
+        let dev = self.open()?;
+        let (answer, at) = ask(&dev, &command_frame(DEVICE_SERIAL, &[]), "")?;
+        if at < 6 || crc16(&answer[..6]) != CRC_OK {
+            return Err(err("the YubiKey's serial number was garbled"));
+        }
+        Ok(u32::from_be_bytes([answer[0], answer[1], answer[2], answer[3]]))
     }
 }
 
@@ -159,63 +193,76 @@ fn wait_writable(dev: &hidapi::HidDevice) -> Result<(), VaultError> {
     Ok(())
 }
 
+/// Send a frame, and read the key's answer: as soon as it has one, or once it
+/// is touched. `slot_hint` names the slot in the error for a key that never
+/// answers. Returns the answer and how much of it came.
+fn ask(dev: &hidapi::HidDevice, f: &[u8; FRAME], slot_hint: &str) -> Result<(Zeroizing<[u8; ANSWER]>, usize), VaultError> {
+    for r in reports(f) {
+        wait_writable(dev)?;
+        send(dev, &r)?;
+    }
+    let started = Instant::now();
+    let mut report = loop {
+        let s = status(dev)?;
+        if s[7] & PENDING != 0 {
+            break s;
+        }
+        let waited = started.elapsed();
+        if s[7] & AWAITING_TOUCH != 0 {
+            if waited > TOUCH_WAIT {
+                let _ = send(dev, &[0, 0, 0, 0, 0, 0, 0, RESET]);
+                return Err(err("the YubiKey was not touched in time"));
+            }
+        } else if waited > NO_ANSWER {
+            return Err(err(format!("the YubiKey did not answer{slot_hint}")));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut answer = Zeroizing::new([0u8; ANSWER]);
+    let mut at = 0;
+    loop {
+        let take = (ANSWER - at).min(7);
+        answer[at..at + take].copy_from_slice(&report[..take]);
+        at += take;
+        if at >= ANSWER {
+            break;
+        }
+        report = status(dev)?;
+        let flags = report[7];
+        // Done when the key stops marking reports pending, or starts over.
+        if flags & PENDING == 0 || (flags & 0x1f) == 0 {
+            break;
+        }
+    }
+    report.iter_mut().for_each(|b| *b = 0);
+    send(dev, &[0, 0, 0, 0, 0, 0, 0, RESET])?;
+    let _ = wait_writable(dev);
+    Ok((answer, at))
+}
+
 impl ChallengeResponse for YubiKey {
     fn respond(&self, slot: u8, challenge: &[u8]) -> Result<Zeroizing<[u8; 20]>, VaultError> {
         let f = frame(slot, challenge)?;
         let dev = self.open()?;
-        for r in reports(&f) {
-            wait_writable(&dev)?;
-            send(&dev, &r)?;
-        }
-
-        // The answer is pending once the key has worked it out — at once, or
-        // once it is touched.
-        let started = Instant::now();
-        let mut first = loop {
-            let s = status(&dev)?;
-            if s[7] & PENDING != 0 {
-                break s;
-            }
-            let waited = started.elapsed();
-            if s[7] & AWAITING_TOUCH != 0 {
-                if waited > TOUCH_WAIT {
-                    let _ = send(&dev, &[0, 0, 0, 0, 0, 0, 0, RESET]);
-                    return Err(err("the YubiKey was not touched in time"));
-                }
-            } else if waited > NO_ANSWER {
-                return Err(err(format!(
-                    "the YubiKey did not answer — is its slot {slot} set up for HMAC-SHA1 challenge-response?"
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-
-        let mut answer = Zeroizing::new([0u8; ANSWER]);
-        let mut at = 0;
-        loop {
-            let take = (ANSWER - at).min(7);
-            answer[at..at + take].copy_from_slice(&first[..take]);
-            at += take;
-            if at >= ANSWER {
-                break;
-            }
-            first = status(&dev)?;
-            let flags = first[7];
-            // Done when the key stops marking reports pending, or starts over.
-            if flags & PENDING == 0 || (flags & 0x1f) == 0 {
-                break;
-            }
-        }
-        first.iter_mut().for_each(|b| *b = 0);
-        send(&dev, &[0, 0, 0, 0, 0, 0, 0, RESET])?;
-        let _ = wait_writable(&dev);
-
+        let hint = format!(" — is its slot {slot} set up for HMAC-SHA1 challenge-response?");
+        let (answer, at) = ask(&dev, &f, &hint)?;
         if at < 22 || crc16(&answer[..22]) != CRC_OK {
             return Err(err("the YubiKey's answer was garbled"));
         }
         let mut hmac = Zeroizing::new([0u8; 20]);
         hmac.copy_from_slice(&answer[..20]);
         Ok(hmac)
+    }
+
+    fn serial(&self) -> Option<u32> {
+        self.serial
+    }
+
+    fn name(&self) -> String {
+        match self.serial {
+            Some(n) => format!("{} · {n}", self.name),
+            None => self.name.clone(),
+        }
     }
 }
 
@@ -264,6 +311,7 @@ mod tests {
     fn a_real_yubikey_answers_the_same_question_the_same_way() {
         let slot: u8 = std::env::var("LIMEN_YUBIKEY_SLOT").expect("LIMEN_YUBIKEY_SLOT").parse().unwrap();
         let key = find().unwrap().expect("no YubiKey plugged in");
+        assert!(key.serial.is_some(), "a YubiKey 5 tells its serial");
         let a = key.respond(slot, &[0x5a; 64]).unwrap();
         let b = key.respond(slot, &[0x5a; 64]).unwrap();
         let c = key.respond(slot, &[0xa5; 64]).unwrap();
