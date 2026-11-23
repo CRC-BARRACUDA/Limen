@@ -197,7 +197,8 @@ impl Gathered {
         };
         let keys = if keys {
             match security_key::find_all() {
-                Ok(k) if k.is_empty() => return Err(i18n::t("vault.plug_in")),
+                // Opening says nothing of which factor was missing: the one error.
+                Ok(k) if k.is_empty() => return Err(i18n::t("vault.wrong_key")),
                 Ok(k) => k,
                 Err(e) => return Err(said(e)),
             }
@@ -243,9 +244,9 @@ fn said(e: VaultError) -> String {
         VaultError::WrongPassword => i18n::t("vault.wrong"),
         VaultError::WrongKey => i18n::t("vault.wrong_key"),
         VaultError::NeedsFactor(Factor::KeyFile) => i18n::t("vault.no_keyfile"),
-        VaultError::NeedsFactor(Factor::SecurityKey) => i18n::t("vault.plug_in"),
+        VaultError::NeedsFactor(Factor::SecurityKey) => i18n::t("vault.wrong_key"),
         VaultError::SecurityKey(why) => i18n::t("vault.key_failed").replace("{why}", &why),
-        VaultError::UnknownSecurityKey => i18n::t("vault.unknown_key"),
+        VaultError::UnknownSecurityKey => i18n::t("vault.wrong_key"),
         e => e.to_string(),
     }
 }
@@ -1001,12 +1002,6 @@ impl VaultUi {
                 ui.add_space(6.0);
             }
             // A YubiKey is being asked: it may be waiting for a touch.
-            // Only opening asks a key now: those being added were asked already.
-            let asking_key = !matches!(mode, Mode::Create) && !self.factors.security_keys.is_empty();
-            if busy && asking_key {
-                ui.label(egui::RichText::new(i18n::t("vault.touch")).color(ui::color::ACCENT_BRIGHT));
-                ui.add_space(4.0);
-            }
             if matches!(mode, Mode::Create | Mode::Unlock) {
                 ui::toggle(ui, &mut self.remember, &i18n::t("vault.remember"));
                 ui.label(egui::RichText::new(i18n::t("vault.remember_hint")).small().color(ui::color::TEXT_MUTED));
