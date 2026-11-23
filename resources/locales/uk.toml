@@ -20,6 +20,9 @@ update_available_hint = "Доступна новіша версія"
 installing = "Встановлення"
 developer = "Розробник"
 settings = "Налаштування"
+menu = "Меню"
+tabs = "Відкриті вкладки"
+no_tabs = "Поки немає."
 
 [win]
 close = "Закрити"

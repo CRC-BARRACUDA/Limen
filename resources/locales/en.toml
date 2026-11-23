@@ -22,6 +22,9 @@ update_available_hint = "A newer version is available"
 installing = "Installing"
 developer = "Developer"
 settings = "Settings"
+menu = "Menu"
+tabs = "Open tabs"
+no_tabs = "None yet."
 
 [win]
 close = "Close"

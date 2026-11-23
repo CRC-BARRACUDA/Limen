@@ -269,6 +269,14 @@ pub struct LimenApp {
     pub(crate) tab_content_w: f32,
     pub(crate) tab_view_w: f32,
     pub(crate) tab_scroll_to: Option<f32>,
+    /// The title bar has no room for all it holds: it shows a menu button
+    /// instead, and what it held — and the tabs — are in the left panel.
+    pub(crate) bar_compact: bool,
+    /// The width the title bar's row needs to show everything, as last
+    /// measured while it did (0: not measured yet).
+    pub(crate) bar_needs: f32,
+    /// The left panel is open (it only exists while the bar is compact).
+    pub(crate) nav_drawer: bool,
 }
 
 impl LimenApp {
@@ -419,6 +427,9 @@ impl LimenApp {
             tab_content_w: 0.0,
             tab_view_w: 0.0,
             tab_scroll_to: None,
+            bar_compact: false,
+            bar_needs: 0.0,
+            nav_drawer: false,
         }
     }
 
