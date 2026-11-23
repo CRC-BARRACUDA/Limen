@@ -297,7 +297,6 @@ key_added_already = "Цей YubiKey уже додано — під’єднай�
 unknown_key = "Цей YubiKey не належить до ключів сховища."
 slot = "Слот"
 key_hint = "Без одного з цих YubiKey сховище не відкриється: додайте й запасний і тримайте його окремо."
-uses_key = "Цьому сховищу потрібен і один з його YubiKey: {keys}. Під’єднайте один."
 touch = "Торкніться YubiKey, якщо він блимає."
 plug_in = "Під’єднайте YubiKey."
 key_failed = "YubiKey: {why}"

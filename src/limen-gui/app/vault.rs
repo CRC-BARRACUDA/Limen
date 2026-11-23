@@ -272,12 +272,6 @@ fn unlocks_with(f: &Factors) -> String {
     i18n::t("vault.unlocks_with").replace("{what}", &parts.join(" · "))
 }
 
-/// How an enrolled YubiKey shows: its name, or its slot when it has none.
-fn key_label(k: &vault::SecurityKeyFactor) -> String {
-    let name = if k.name.is_empty() { "YubiKey".to_string() } else { k.name.clone() };
-    format!("{name} ({} {})", i18n::t("vault.slot").to_lowercase(), k.slot)
-}
-
 /// Which key-file field a file dialog fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyField {
@@ -942,11 +936,6 @@ impl VaultUi {
             if self.factors.keyfile && mode == Mode::ChangePassword {
                 want_pick =
                     want_pick.or(keyfile_row(ui, &i18n::t("vault.current_keyfile"), &mut self.old_keyfile, KeyField::Current, false));
-            }
-            if !self.factors.security_keys.is_empty() && matches!(mode, Mode::Unlock | Mode::Reveal { .. } | Mode::ChangePassword) {
-                let names: Vec<String> = self.factors.security_keys.iter().map(key_label).collect();
-                note(ui, i18n::t("vault.uses_key").replace("{keys}", &names.join(", ")));
-                ui.add_space(6.0);
             }
             if mode == Mode::ChangePassword {
                 let r = field(ui, &i18n::t("vault.keep_password"), &mut self.new_password, false);
