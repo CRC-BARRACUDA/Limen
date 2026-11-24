@@ -14,6 +14,7 @@ pub mod avatar;
 pub mod config;
 pub mod engine;
 pub mod environment;
+pub mod gpg;
 pub mod net;
 pub mod paths;
 pub mod security_key;
