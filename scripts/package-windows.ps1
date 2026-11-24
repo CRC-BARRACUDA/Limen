@@ -107,8 +107,12 @@ $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
 $signKey = if ($env:LIMEN_SIGN_KEY) { $env:LIMEN_SIGN_KEY } else { '8D151FD231907502BBFA528E140ABA21244518B8' }
 $gpg = Get-Command gpg -ErrorAction SilentlyContinue
 $haveKey = $false
-if ($gpg) {
-    & gpg --list-secret-keys $signKey *> $null
+if ($gpg -and $env:LIMEN_SIGN -ne '0') {
+    # Through cmd, so that what gpg says when the key is not there stays out
+    # of PowerShell: Windows PowerShell 5.1 turns a native program's redirected
+    # stderr into an error, and under 'Stop' that ends the script here instead
+    # of leaving the build unsigned.
+    & cmd /c "gpg --list-secret-keys $signKey >nul 2>&1"
     $haveKey = ($LASTEXITCODE -eq 0)
 }
 if ($env:LIMEN_SIGN -eq '0') {
