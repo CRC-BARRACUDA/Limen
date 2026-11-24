@@ -14,6 +14,22 @@ install and trust from GitHub, and renders the UI each module draws for itself.
 Put very simply: Limen is an engine that brings modules together in one place and
 lets them interact with one another.
 
+> [!WARNING]
+> **Limen 0.33.1 and older do not check signatures.**
+> Those versions install updates and modules without verifying who made them.
+> Starting with 0.34.0, Limen checks every update and module against the
+> CRC-BARRACUDA team key before installing it.
+>
+> We recommend updating to 0.34.0 or newer, or installing it fresh.
+> The update from 0.33.1 or older to 0.34.0 is itself not verified by Limen,
+> because the old version cannot check it. To be sure of what you install,
+> download the release by hand and verify it with GnuPG:
+>
+>     gpg --verify Limen-0.34.0-linux-x86_64.tar.gz.sig Limen-0.34.0-linux-x86_64.tar.gz
+>
+> Team key: `CRC-BARRACUDA <security@barracuda-team.tech>`
+> Fingerprint: `8D15 1FD2 3190 7502 BBFA 528E 140A BA21 2445 18B8`
+
 ---
 
 ## What it is
