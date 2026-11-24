@@ -28,6 +28,7 @@ use crate::worker::{Command, Event, RunTag, Worker};
 // the re-exports keep every name reachable from where it was, so splitting
 // the file moved code and nothing else.
 mod account;
+mod openpgp;
 mod vault;
 mod brand;
 mod dialogs;
@@ -58,7 +59,7 @@ pub struct LimenApp {
     /// Names of installed modules that came from a git install (vs. manual).
     pub(crate) git_installed: HashSet<String>,
     /// name → (branch, short commit) for git-installed modules.
-    pub(crate) git_meta: HashMap<String, (String, String)>,
+    pub(crate) git_meta: HashMap<String, (String, String, String)>,
     /// Installed git modules with a newer release available: name → latest version.
     pub(crate) available_updates: HashMap<String, String>,
     /// Modules that failed to start: name → error (shown in the module's tab).
@@ -119,6 +120,10 @@ pub struct LimenApp {
     /// deletes the module's directory — including anything it had fetched into
     /// `tools/` — so it is not something to do on a stray click.
     pub(crate) pending_remove: Option<String>,
+    /// An install held back as not signed by the team, waiting for the user's
+    /// answer: what to send again, and what the dialog says of it.
+    pub(crate) pending_unsigned: Option<crate::worker::HeldInstall>,
+    pub(crate) unsigned_subject: Option<String>,
     /// The name shown in the confirmation, kept while it animates closed.
     pub(crate) confirm_subject: Option<String>,
 
@@ -245,10 +250,15 @@ pub struct LimenApp {
     pub(crate) update: Option<limen_core::UpdateInfo>,
     /// True while an update download/install is in flight.
     pub(crate) updating: bool,
+    /// The update was held back as not signed by the team: by an unknown key
+    /// (Some(Some(key))) or by none (Some(None)). The Update page asks.
+    pub(crate) update_unsigned: Option<Option<String>>,
     /// Signing in to the platform, and who is signed in.
     pub(crate) account: account::AccountUi,
     /// Limen's vault: secrets for Limen and its modules.
     pub(crate) vault: vault::VaultUi,
+    /// The user's own OpenPGP key, and the `gpg` it is used through.
+    pub(crate) openpgp: openpgp::OpenPgpUi,
     /// A portable interpreter currently being installed (e.g. "Python"), if any.
     pub(crate) installing_runtime: Option<String>,
     /// Startup splash: the frame time it first rendered (set lazily on the first
@@ -269,6 +279,17 @@ pub struct LimenApp {
     pub(crate) tab_content_w: f32,
     pub(crate) tab_view_w: f32,
     pub(crate) tab_scroll_to: Option<f32>,
+    /// The title bar has no room for all it holds: it shows a menu button
+    /// instead, and what it held — and the tabs — are in the left panel.
+    pub(crate) bar_compact: bool,
+    /// The width the title bar's row needs to show everything, as last
+    /// measured while it did (0: not measured yet).
+    pub(crate) bar_needs: f32,
+    /// How much of that is the right-hand group (settings, account, the
+    /// window's buttons).
+    pub(crate) bar_right_w: f32,
+    /// The left panel is open (it only exists while the bar is compact).
+    pub(crate) nav_drawer: bool,
 }
 
 impl LimenApp {
@@ -343,6 +364,8 @@ impl LimenApp {
             vault_revealed_at: None,
             pending_action: None,
             pending_remove: None,
+            pending_unsigned: None,
+            unsigned_subject: None,
             confirm_subject: None,
             detail_tabs: HashMap::new(),
             next_detail_id: 0,
@@ -408,8 +431,10 @@ impl LimenApp {
             removing: HashMap::new(),
             update: None,
             updating: false,
+            update_unsigned: None,
             account: account::AccountUi::new(&cc.egui_ctx),
             vault: vault::VaultUi::new(&cc.egui_ctx),
+            openpgp: openpgp::OpenPgpUi::new(&cc.egui_ctx),
             installing_runtime: None,
             splash_start: None,
             splash_done: false,
@@ -419,6 +444,10 @@ impl LimenApp {
             tab_content_w: 0.0,
             tab_view_w: 0.0,
             tab_scroll_to: None,
+            bar_compact: false,
+            bar_needs: 0.0,
+            bar_right_w: 0.0,
+            nav_drawer: false,
         }
     }
 
@@ -911,6 +940,30 @@ impl LimenApp {
         }
     }
 
+    /// Draw the question about modules the team did not sign, and report what
+    /// to install once the user says to go on. Called every frame, as the
+    /// removal's is, so that it can fade out.
+    pub(crate) fn confirmed_unsigned(&mut self, ctx: &egui::Context) -> Option<crate::worker::HeldInstall> {
+        let answer = ui::confirm_dialog(
+            ctx,
+            "unsigned_modules",
+            self.pending_unsigned.is_some(),
+            &i18n::t("confirm.unsigned_title"),
+            self.unsigned_subject.as_deref(),
+            &i18n::t("confirm.unsigned_yes"),
+            &i18n::t("confirm.cancel"),
+            self.content_rect,
+        );
+        match answer {
+            Some(true) => self.pending_unsigned.take(),
+            Some(false) => {
+                self.pending_unsigned = None;
+                None
+            }
+            None => None,
+        }
+    }
+
     /// Recompute which sensitive modules the user has granted (trusted at their
     /// current digest). Cheap enough to run on module load / after a grant.
     /// The module that provides `capability`, if any.
@@ -971,6 +1024,19 @@ impl LimenApp {
                     // A reload follows a completed install/remove — clear the spinner.
                     self.installing = None;
                     self.status = format!("{} module(s) loaded", self.modules.len());
+                }
+                Event::ModulesUnsigned { what, modules } => {
+                    // One line per module: which, and what is wrong with it.
+                    let lines: Vec<String> = modules
+                        .iter()
+                        .map(|m| match &m.unknown_key {
+                            Some(key) => format!("{} {} — {}", m.name, m.version, i18n::t("confirm.unsigned_unknown").replace("{key}", key)),
+                            None => format!("{} {} — {}", m.name, m.version, i18n::t("confirm.unsigned_none")),
+                        })
+                        .collect();
+                    self.push_log(format!("[modules] held back, not signed by the Limen team: {}", lines.join("; ")));
+                    self.unsigned_subject = Some(format!("{}\n\n{}", lines.join("\n"), i18n::t("confirm.unsigned_hint")));
+                    self.pending_unsigned = Some(what);
                 }
                 Event::ModuleUpdates(map) => {
                     self.available_updates = map;
@@ -1192,6 +1258,7 @@ impl LimenApp {
                     // A failed update leaves the Update button spinning — stop it.
                     if msg.starts_with("update failed") {
                         self.updating = false;
+                        self.update_unsigned = None;
                     }
                     self.push_log(format!("[status] {msg}"));
                     self.status = msg;
@@ -1200,6 +1267,13 @@ impl LimenApp {
                 Event::UpdateAvailable(info) => {
                     self.push_log(format!("[update] v{} available", info.latest));
                     self.update = Some(info);
+                    self.update_unsigned = None;
+                }
+                Event::UpdateUnsigned { unknown_key } => {
+                    self.updating = false;
+                    self.busy = false;
+                    self.push_log("[update] held back: not signed by the Limen team".to_string());
+                    self.update_unsigned = Some(unknown_key);
                 }
                 Event::Fatal(e) => {
                     self.push_log(format!("[fatal] {e}"));

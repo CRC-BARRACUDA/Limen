@@ -1,0 +1,12 @@
+[package]
+name = "limen-sign"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Limen release signatures: the team's keys, and checking what Limen installs against them"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+pgp = { workspace = true }

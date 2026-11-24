@@ -32,11 +32,17 @@ fn git_fields_round_trip_through_toml() {
         digest: "sha256:xy".into(),
         branch: "main".into(),
         commit: "abc1234".into(),
+        signed_by: "CRC-BARRACUDA".into(),
     });
     let text = toml::to_string_pretty(&lock).unwrap();
     let back: Lockfile = toml::from_str(&text).unwrap();
     assert_eq!(back.modules[0].branch, "main");
     assert_eq!(back.modules[0].commit, "abc1234");
+    assert_eq!(back.modules[0].signed_by, "CRC-BARRACUDA");
+    // A lockfile from before signatures has no such line, and reads as unsigned.
+    let old = text.lines().filter(|l| !l.starts_with("signed_by")).collect::<Vec<_>>().join("\n");
+    assert!(old.len() < text.len());
+    assert_eq!(toml::from_str::<Lockfile>(&old).unwrap().modules[0].signed_by, "");
 }
 
 #[test]
@@ -50,6 +56,7 @@ fn upsert_replaces_and_remove_deletes() {
         digest: "sha256:0".into(),
         branch: String::new(),
         commit: String::new(),
+        signed_by: String::new(),
     };
     lock.upsert(mk("0.1.0"));
     lock.upsert(mk("0.2.0")); // same name → replace, not duplicate

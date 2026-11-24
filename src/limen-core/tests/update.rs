@@ -171,3 +171,56 @@ fn extracts_binary_from_7z() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A build's signature is the asset named as the build is, with `.sig` or
+/// `.asc` — not another build's, and not the checksum.
+#[test]
+fn a_builds_signature_is_the_asset_named_after_it() {
+    let a = |n: &str| (n.to_string(), format!("https://x/{n}"));
+    let assets = vec![
+        a("limen-1.0.0-linux-x86_64.tar.gz"),
+        a("limen-1.0.0-linux-x86_64.tar.gz.sha256"),
+        a("limen-1.0.0-windows-x86_64.zip.sig"),
+        a("limen-1.0.0-linux-x86_64.tar.gz.sig"),
+    ];
+    assert_eq!(
+        select_signature(&assets, "https://x/limen-1.0.0-linux-x86_64.tar.gz").as_deref(),
+        Some("https://x/limen-1.0.0-linux-x86_64.tar.gz.sig")
+    );
+    assert_eq!(select_signature(&assets[..2], "https://x/limen-1.0.0-linux-x86_64.tar.gz"), None, "none published");
+    let armored = vec![a("limen-1.0.0-linux-x86_64.tar.gz"), a("limen-1.0.0-linux-x86_64.tar.gz.asc")];
+    assert!(select_signature(&armored, "https://x/limen-1.0.0-linux-x86_64.tar.gz").unwrap().ends_with(".asc"));
+}
+
+/// The team's signature installs; a wrong one never does; none, or a
+/// stranger's, only when the user said so.
+#[test]
+fn what_a_signature_verdict_lets_through() {
+    use limen_sign::{Signer, Verdict};
+    let valid = Verdict::Valid(Signer { name: "team".into(), fingerprint: "AB".into(), signed_at: None, retired: false });
+    let stranger = Verdict::UnknownSigner { key: "CAFE".into() };
+    for accept in [false, true] {
+        assert_eq!(admit(&valid, accept), Ok(()));
+        assert!(matches!(admit(&Verdict::Bad("changed".into()), accept), Err(UpdateError::Refused(_))), "never, asked or not");
+    }
+    assert_eq!(admit(&Verdict::Unsigned, false), Err(UpdateError::Unsigned { unknown_key: None }));
+    assert_eq!(admit(&stranger, false), Err(UpdateError::Unsigned { unknown_key: Some("CAFE".into()) }));
+    assert_eq!(admit(&Verdict::Unsigned, true), Ok(()));
+    assert_eq!(admit(&stranger, true), Ok(()));
+}
+
+/// A local build's signature is found beside it.
+#[test]
+fn a_local_builds_signature_is_the_file_beside_it() {
+    let (os, arch) = platform_needle();
+    let dir = std::env::temp_dir().join(format!("limen-updsig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let build = dir.join(format!("Limen-9.9.9-{os}-{arch}.tar.gz"));
+    std::fs::write(&build, b"x").unwrap();
+    assert_eq!(check_update_local(&dir, "0.1.0").unwrap().signature_url, None);
+    std::fs::write(format!("{}.sig", build.display()), b"s").unwrap();
+    let info = check_update_local(&dir, "0.1.0").unwrap();
+    assert_eq!(info.signature_url.as_deref(), Some(format!("{}.sig", build.display()).as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

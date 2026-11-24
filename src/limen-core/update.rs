@@ -6,6 +6,14 @@
 //! executable and restarts. A raw binary asset (no extension) is used directly.
 //! Uses `curl` + `tar`/`unzip`; no extra Rust dependencies.
 //!
+//! **Signed.** A release's build has a detached signature beside it — the
+//! same name with `.sig` or `.asc` — made with the team's key. What was
+//! downloaded is checked against it (`limen-sign`) before anything is
+//! unpacked: a signature that does not match refuses the update; a build with
+//! no signature, or one by a key that is not the team's, is installed only if
+//! the user says so. A build from the dev-mode update directory is the
+//! developer's own: checked if a signature is beside it, taken without one.
+//!
 //! NOTE: the apply/replace/restart path is platform-sensitive and hard to verify
 //! automatically — treat it as best-effort until tested on real releases.
 
@@ -49,6 +57,86 @@ pub struct UpdateInfo {
     pub notes: String,
     /// Direct download URL of the binary for this platform, if the release has one.
     pub asset_url: Option<String>,
+    /// Where that build's detached signature is, if the release has one.
+    pub signature_url: Option<String>,
+}
+
+/// Why an update was not applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateError {
+    /// The build is not signed by the team — no signature, or one by a key
+    /// (`unknown_key`) that is not the team's. Applied only if the user
+    /// accepts that.
+    Unsigned { unknown_key: Option<String> },
+    /// The signature is wrong for what was downloaded: never applied.
+    Refused(String),
+    /// Anything else: no build, the download, the unpacking, the swap.
+    Failed(String),
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateError::Unsigned { unknown_key: None } => write!(f, "the update is not signed"),
+            UpdateError::Unsigned { unknown_key: Some(k) } => write!(f, "the update is signed by an unknown key ({k})"),
+            UpdateError::Refused(why) => write!(f, "refused: {why}"),
+            UpdateError::Failed(why) => write!(f, "{why}"),
+        }
+    }
+}
+
+impl From<String> for UpdateError {
+    fn from(why: String) -> Self {
+        UpdateError::Failed(why)
+    }
+}
+
+impl From<&str> for UpdateError {
+    fn from(why: &str) -> Self {
+        UpdateError::Failed(why.to_string())
+    }
+}
+
+/// Whether a build with this signature verdict may be installed.
+/// `accept_unsigned`: the user said to install one the team did not sign.
+#[doc(hidden)]
+pub fn admit(verdict: &limen_sign::Verdict, accept_unsigned: bool) -> Result<(), UpdateError> {
+    use limen_sign::Verdict;
+    match verdict {
+        Verdict::Valid(_) => Ok(()),
+        Verdict::Bad(why) => Err(UpdateError::Refused(why.clone())),
+        Verdict::Unsigned | Verdict::UnknownSigner { .. } if accept_unsigned => Ok(()),
+        Verdict::Unsigned => Err(UpdateError::Unsigned { unknown_key: None }),
+        Verdict::UnknownSigner { key } => Err(UpdateError::Unsigned { unknown_key: Some(key.clone()) }),
+    }
+}
+
+/// From `(lowercased_name, url)` release assets, the detached signature of the
+/// build at `asset_url`: the asset named as the build is, with `.sig` or `.asc`.
+#[doc(hidden)]
+pub fn select_signature(assets: &[(String, String)], asset_url: &str) -> Option<String> {
+    let build = assets.iter().find(|(_, url)| url == asset_url)?.0.as_str();
+    [".sig", ".asc"]
+        .iter()
+        .find_map(|ext| assets.iter().find(|(n, _)| n.strip_suffix(ext) == Some(build)))
+        .map(|(_, url)| url.clone())
+}
+
+/// The signature at `at` (a URL, or a local path): its bytes.
+fn fetch_signature(at: &str) -> Result<Vec<u8>, String> {
+    if at.starts_with("http://") || at.starts_with("https://") {
+        let out = Command::new("curl")
+            .args(["-fsSL", "--max-filesize", "1000000", at])
+            .no_console()
+            .output()
+            .map_err(|e| format!("running curl: {e}"))?;
+        if !out.status.success() {
+            return Err("downloading the update's signature failed".into());
+        }
+        Ok(out.stdout)
+    } else {
+        std::fs::read(at).map_err(|e| format!("reading the update's signature: {e}"))
+    }
 }
 
 /// Parse `1.2.3` / `v1.2.3` into a comparable `(major, minor, patch)`.
@@ -133,12 +221,14 @@ pub fn check_update_local(dir: &Path, current: &str) -> Option<UpdateInfo> {
     if !is_newer(&latest, current) {
         return None;
     }
+    let signature_url = [".sig", ".asc"].iter().map(|ext| format!("{path}{ext}")).find(|p| Path::new(p).is_file());
     Some(UpdateInfo {
         current: current.to_string(),
         latest,
         url: String::new(),
         notes: format!("Local test build: {path}"),
         asset_url: Some(path),
+        signature_url,
     })
 }
 
@@ -187,6 +277,7 @@ pub fn check_update(current: &str) -> Option<UpdateInfo> {
         })
         .unwrap_or_default();
     let asset_url = select_asset(&assets);
+    let signature_url = asset_url.as_deref().and_then(|a| select_signature(&assets, a));
 
     Some(UpdateInfo {
         current: current.to_string(),
@@ -194,12 +285,15 @@ pub fn check_update(current: &str) -> Option<UpdateInfo> {
         url: json.get("html_url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         notes: json.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         asset_url,
+        signature_url,
     })
 }
 
-/// Download the new build, swap it in over the running executable, and restart.
-/// Best-effort and platform-sensitive; returns an error string on failure.
-pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
+/// Download the new build, check its signature, swap it in over the running
+/// executable, and restart. `accept_unsigned`: install a build the team did
+/// not sign — what the user answered to [`UpdateError::Unsigned`].
+/// Best-effort and platform-sensitive.
+pub fn apply_update(info: &UpdateInfo, accept_unsigned: bool) -> Result<(), UpdateError> {
     let asset = info
         .asset_url
         .as_deref()
@@ -214,7 +308,8 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
     // from a local path when the "asset" is a filesystem path rather than a URL.
     let staged = exe.with_extension("update-download");
     let _ = std::fs::remove_file(&staged);
-    if asset.starts_with("http://") || asset.starts_with("https://") {
+    let remote = asset.starts_with("http://") || asset.starts_with("https://");
+    if remote {
         let status = Command::new("curl")
             .args(["-fsSL", "-o"])
             .arg(&staged)
@@ -228,6 +323,18 @@ pub fn apply_update(info: &UpdateInfo) -> Result<(), String> {
         }
     } else {
         std::fs::copy(asset, &staged).map_err(|e| format!("copying local update: {e}"))?;
+    }
+
+    // Before anything in it is unpacked or run: is it the team's?
+    let checked = (|| {
+        let signature = info.signature_url.as_deref().map(fetch_signature).transpose()?;
+        let build = std::fs::read(&staged).map_err(|e| format!("reading the downloaded update: {e}"))?;
+        // A local build is the developer's own: taken unsigned without asking.
+        admit(&limen_sign::verify(&build, signature.as_deref()), accept_unsigned || !remote)
+    })();
+    if let Err(e) = checked {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e);
     }
 
     // If the asset is a distribution archive, extract the executable out of it;

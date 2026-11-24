@@ -27,6 +27,32 @@ const SCALE_STEP: f32 = 2.0;
 const PAGE_SECS: f64 = 0.16;
 const PAGE_RISE: f32 = 10.0;
 
+/// The tab strip's margin above and below its row of tabs.
+const STRIP_PAD_Y: f32 = 4.0;
+
+/// The tab strip's height until it has been measured: a 26px row of tabs and
+/// its margins.
+const STRIP_H: f32 = 26.0 + 2.0 * STRIP_PAD_Y;
+
+/// How long the tab strip takes to fold away when the last tab closes — the
+/// workspace growing into its place — or to unfold when one opens.
+const STRIP_SECS: f32 = 0.22;
+
+/// How long the title bar takes to change between showing everything and its
+/// compact form: what it held fades away as the menu button slides in.
+const BAR_SECS: f32 = 0.2;
+
+/// How wide the left panel is: what the title bar held, then the tabs.
+const DRAWER_W: f32 = 248.0;
+
+/// Whether the title bar goes compact: its row has `avail`, and showing
+/// everything `needs` this much (0: not measured yet, so it is tried in
+/// full). Once compact it takes a little more room to go back, so a window
+/// held at the edge of fitting does not flip between the two.
+fn bar_goes_compact(was: bool, avail: f32, needs: f32) -> bool {
+    needs > 0.0 && avail < needs + if was { 24.0 } else { 0.0 }
+}
+
 impl eframe::App for LimenApp {
     /// Clear transparent during the startup splash so only the floating icons
     /// show over the desktop; opaque warm-black once the app takes over.
@@ -192,54 +218,104 @@ impl eframe::App for LimenApp {
                 }
                 if bar.drag_started_by(egui::PointerButton::Primary) {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    // The release goes to the window system, not to us.
+                    ui::window_took_pointer(ui.ctx());
                 }
+                // Too narrow for all the bar holds: a menu button, the brand and
+                // the window's own buttons stay; the rest is in the left panel.
+                let compact = bar_goes_compact(self.bar_compact, ui.available_width(), self.bar_needs);
+                self.bar_compact = compact;
+                if !compact {
+                    self.nav_drawer = false;
+                }
+                // 0 everything shown, 1 compact. On the way between, what the
+                // bar held fades out (or in) while the menu button slides in
+                // (or out) from the left and the brand makes room for it.
+                let t = ui::smoothstep(ui::anim_bool_ctx(
+                    ui.ctx(),
+                    egui::Id::new("titlebar_compact"),
+                    compact,
+                    BAR_SECS,
+                ));
                 ui.horizontal(|ui| {
+                    let row_left = ui.cursor().min.x;
+                    let row_right = ui.max_rect().right();
+                    if t > 0.0 {
+                        const SLOT: f32 = 36.0;
+                        let (slot, _) = ui.allocate_exact_size(egui::vec2(SLOT * t, 24.0), egui::Sense::hover());
+                        let at = egui::Rect::from_min_size(
+                            egui::pos2(slot.min.x - SLOT * (1.0 - t), slot.min.y),
+                            egui::vec2(30.0, 24.0),
+                        );
+                        let mut button = ui.child_ui(at, egui::Layout::left_to_right(egui::Align::Center), None);
+                        button.set_clip_rect(slot.intersect(ui.clip_rect()));
+                        button.set_opacity(t);
+                        if menu_button(&mut button, self.nav_drawer).on_hover_text(i18n::t("nav.menu")).clicked() {
+                            self.nav_drawer = !self.nav_drawer;
+                        }
+                    }
                     // App icon (the ◈ brand mark) in place of the wordmark.
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
                     draw_brand(ui.painter(), rect, 1.0);
                     ui.add_space(12.0);
                     let active = self.active_tab();
-                    if ui::chip(ui, &i18n::t("nav.about"), active == Some(Tab::About)).clicked() {
-                        open_tab = Some(Tab::About);
+                    if t < 1.0 {
+                        ui.scope(|ui| {
+                            ui.set_opacity(1.0 - t);
+                            if t > 0.0 {
+                                // Too narrow for it by now: cut where the right-hand
+                                // group begins rather than fade across it.
+                                let mut clip = ui.clip_rect();
+                                clip.max.x = clip.max.x.min(row_right - self.bar_right_w - 8.0);
+                                ui.set_clip_rect(clip);
+                            }
+                                if ui::chip(ui, &i18n::t("nav.about"), active == Some(Tab::About)).clicked() {
+                                    open_tab = Some(Tab::About);
+                                }
+                                if ui::chip(ui, &i18n::t("nav.modules"), active == Some(Tab::Modules)).clicked()
+                                {
+                                    open_tab = Some(Tab::Modules);
+                                }
+                                if ui::chip(
+                                    ui,
+                                    &i18n::t("nav.categories"),
+                                    active == Some(Tab::Categories),
+                                )
+                                .clicked()
+                                {
+                                    open_tab = Some(Tab::Categories);
+                                }
+                                if ui::chip(ui, &i18n::t("nav.vault"), active == Some(Tab::Vault)).clicked() {
+                                    open_tab = Some(Tab::Vault);
+                                }
+                                if ui::chip(ui, &i18n::t("nav.openpgp"), active == Some(Tab::OpenPgp)).clicked() {
+                                    open_tab = Some(Tab::OpenPgp);
+                                }
+                                // "Update available" pill, next to Modules.
+                                if self.update.is_some() {
+                                    ui.add_space(6.0);
+                                    if ui::pill(ui, &i18n::t("nav.update_available"), ui::color::ORANGE)
+                                        .on_hover_text(i18n::t("nav.update_available_hint"))
+                                        .clicked()
+                                    {
+                                        open_tab = Some(Tab::Update);
+                                    }
+                                }
+                                // Portable-interpreter install indicator (spinner + label),
+                                // shown while a runtime like Python is being bundled.
+                                if let Some(rt) = &self.installing_runtime {
+                                    ui.add_space(8.0);
+                                    ui.spinner();
+                                    ui.label(
+                                        egui::RichText::new(format!("{} {rt}…", i18n::t("nav.installing")))
+                                            .small()
+                                            .color(ui::color::TEXT_MUTED),
+                                    );
+                                }
+                        });
                     }
-                    if ui::chip(ui, &i18n::t("nav.modules"), active == Some(Tab::Modules)).clicked()
-                    {
-                        open_tab = Some(Tab::Modules);
-                    }
-                    if ui::chip(
-                        ui,
-                        &i18n::t("nav.categories"),
-                        active == Some(Tab::Categories),
-                    )
-                    .clicked()
-                    {
-                        open_tab = Some(Tab::Categories);
-                    }
-                    if ui::chip(ui, &i18n::t("nav.vault"), active == Some(Tab::Vault)).clicked() {
-                        open_tab = Some(Tab::Vault);
-                    }
-                    // "Update available" pill, next to Modules.
-                    if self.update.is_some() {
-                        ui.add_space(6.0);
-                        if ui::pill(ui, &i18n::t("nav.update_available"), ui::color::ORANGE)
-                            .on_hover_text(i18n::t("nav.update_available_hint"))
-                            .clicked()
-                        {
-                            open_tab = Some(Tab::Update);
-                        }
-                    }
-                    // Portable-interpreter install indicator (spinner + label),
-                    // shown while a runtime like Python is being bundled.
-                    if let Some(rt) = &self.installing_runtime {
-                        ui.add_space(8.0);
-                        ui.spinner();
-                        ui.label(
-                            egui::RichText::new(format!("{} {rt}…", i18n::t("nav.installing")))
-                                .small()
-                                .color(ui::color::TEXT_MUTED),
-                        );
-                    }
+                    let left_w = ui.cursor().min.x - row_left;
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Window controls (rightmost). GNOME's default title bar
                         // shows only a close button, so on Linux that's all we
@@ -271,32 +347,44 @@ impl eframe::App for LimenApp {
                                     .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         }
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        if ui::chip(ui, "🛠", active == Some(Tab::Developer))
-                            .on_hover_text(i18n::t("nav.developer"))
-                            .clicked()
-                        {
-                            open_tab = Some(Tab::Developer);
+                        if t < 1.0 {
+                            ui.scope(|ui| {
+                                ui.set_opacity(1.0 - t);
+                                    ui.add_space(6.0);
+                                    ui.separator();
+                                    ui.add_space(6.0);
+                                    if ui::chip(ui, "🛠", active == Some(Tab::Developer))
+                                        .on_hover_text(i18n::t("nav.developer"))
+                                        .clicked()
+                                    {
+                                        open_tab = Some(Tab::Developer);
+                                    }
+                                    if ui::chip(ui, "⚙", active == Some(Tab::Settings))
+                                        .on_hover_text(i18n::t("nav.settings"))
+                                        .clicked()
+                                    {
+                                        open_tab = Some(Tab::Settings);
+                                    }
+                                    // The vault's padlock, beside the gear: shut or open.
+                                    self.vault.padlock(ui);
+                                    // The account, left of the gear: as the website's header.
+                                    if !matches!(
+                                        self.account.state,
+                                        account::AccountState::Off | account::AccountState::Restoring { who: None }
+                                    ) {
+                                        ui.add_space(6.0);
+                                        ui.separator();
+                                        ui.add_space(6.0);
+                                        account::account_chip(ui, &self.account, &mut account_action);
+                                    }
+                            });
                         }
-                        if ui::chip(ui, "⚙", active == Some(Tab::Settings))
-                            .on_hover_text(i18n::t("nav.settings"))
-                            .clicked()
-                        {
-                            open_tab = Some(Tab::Settings);
-                        }
-                        // The vault's padlock, beside the gear: shut or open.
-                        self.vault.padlock(ui);
-                        // The account, left of the gear: as the website's header.
-                        if !matches!(
-                            self.account.state,
-                            account::AccountState::Off | account::AccountState::Restoring { who: None }
-                        ) {
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.add_space(6.0);
-                            account::account_chip(ui, &self.account, &mut account_action);
+                        if t <= 0.0 {
+                            // What the row needs to show all of this: what is
+                            // left of the gap, and what is right of it. Taken
+                            // only while all of it is plainly shown.
+                            self.bar_right_w = ui.min_rect().width();
+                            self.bar_needs = left_w + self.bar_right_w + 16.0;
                         }
                     });
                 });
@@ -304,13 +392,36 @@ impl eframe::App for LimenApp {
 
         // Tab strip: open tabs, each with a close button. A tab *is* the
         // module's session — closing it ends the session.
-        egui::TopBottomPanel::top("tabstrip")
+        //
+        // With no tab open there is no strip: it folds away, and the workspace
+        // grows into its place rather than jumping. On the way, the strip's
+        // height follows the fold, its contents clipped to it, so an opening
+        // tab is uncovered as the strip unfolds. Fully open, it is laid out as
+        // ever, and that height is what the fold is a fraction of. Snaps when
+        // animations are off.
+        let strip_h_id = egui::Id::new("tabstrip_full_height");
+        let unfolded = ui::smoothstep(ui::anim_bool_ctx(
+            ctx,
+            egui::Id::new("tabstrip_unfolded"),
+            !self.tabs.is_empty() && !self.bar_compact,
+            STRIP_SECS,
+        ));
+        let mut strip = egui::TopBottomPanel::top("tabstrip");
+        // On the way: the height the contents may show (None: all of it).
+        let mut fold = None;
+        if unfolded < 1.0 {
+            let full = ctx.data(|d| d.get_temp::<f32>(strip_h_id)).unwrap_or(STRIP_H);
+            strip = strip.exact_height(full * unfolded);
+            let row = (full - 2.0 * STRIP_PAD_Y).max(0.0);
+            fold = Some((row * unfolded, row));
+        }
+        let strip_shown = strip
             .frame(
                 egui::Frame::none()
                     .fill(ui::color::BG)
-                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+                    .inner_margin(egui::Margin::symmetric(8.0, STRIP_PAD_Y * unfolded)),
             )
-            .show(ctx, |ui| {
+            .show(ctx, |ui| folded(ui, fold, |ui| {
                 ui.horizontal(|ui| {
                     // A single-row, horizontally-scrollable tab strip. When the
                     // tabs overflow, nav arrows (« ‹ › ») appear and the mouse
@@ -365,23 +476,7 @@ impl eframe::App for LimenApp {
                             let font_id = egui::TextStyle::Button.resolve(ui.style());
                             for (i, tab) in self.tabs.iter().enumerate() {
                                 let selected = !self.showing_chrome && i == self.active;
-                                let text = match tab {
-                                    Tab::Detail { id } => self
-                                        .detail_tabs
-                                        .get(id)
-                                        .map(|d| d.title.clone())
-                                        .filter(|t| !t.is_empty())
-                                        .unwrap_or_else(|| i18n::t("tab.details")),
-                                    // Show the module's localized display title, not its
-                                    // identifier.
-                                    Tab::Module(name) => self
-                                        .modules
-                                        .iter()
-                                        .find(|m| &m.name == name)
-                                        .map(|m| localized_name(ui.ctx(), m))
-                                        .unwrap_or_else(|| name.clone()),
-                                    _ => tab.title(),
-                                };
+                                let text = self.tab_text(ui.ctx(), tab);
 
                                 // Zed-style tab: stable width (the close slot is always
                                 // reserved), the × only shows on hover or when active.
@@ -510,7 +605,92 @@ impl eframe::App for LimenApp {
                         }
                     }
                 });
+            }));
+        if unfolded >= 1.0 {
+            let h = strip_shown.response.rect.height();
+            ctx.data_mut(|d| d.insert_temp(strip_h_id, h));
+        }
+
+        // The left panel of a compact title bar: what the bar held, then the
+        // tabs. Picking a page or a tab closes it; closing a tab does not.
+        let drawer = egui::SidePanel::left("nav_drawer")
+            .resizable(false)
+            .exact_width(DRAWER_W)
+            .frame(
+                egui::Frame::none()
+                    .fill(ui::color::BG_ELEVATED)
+                    .inner_margin(egui::Margin::symmetric(8.0, 10.0)),
+            );
+        drawer.show_animated(ctx, self.bar_compact && self.nav_drawer, |ui| {
+            egui::ScrollArea::vertical().id_source("nav_drawer_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let active = self.active_tab();
+                let mut pages = vec![
+                    (i18n::t("nav.about"), Tab::About),
+                    (i18n::t("nav.modules"), Tab::Modules),
+                    (i18n::t("nav.categories"), Tab::Categories),
+                    (i18n::t("nav.vault"), Tab::Vault),
+                    (i18n::t("nav.openpgp"), Tab::OpenPgp),
+                ];
+                if self.update.is_some() {
+                    pages.push((i18n::t("nav.update_available"), Tab::Update));
+                }
+                pages.push((i18n::t("nav.settings"), Tab::Settings));
+                pages.push((i18n::t("nav.developer"), Tab::Developer));
+                for (text, tab) in pages {
+                    if drawer_row(ui, &text, active.as_ref() == Some(&tab), false).0 {
+                        open_tab = Some(tab);
+                        self.nav_drawer = false;
+                    }
+                }
+                if let Some(rt) = &self.installing_runtime {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new(format!("{} {rt}…", i18n::t("nav.installing")))
+                                .small()
+                                .color(ui::color::TEXT_MUTED),
+                        );
+                    });
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    self.vault.padlock(ui);
+                    if !matches!(
+                        self.account.state,
+                        account::AccountState::Off | account::AccountState::Restoring { who: None }
+                    ) {
+                        account::account_chip(ui, &self.account, &mut account_action);
+                    }
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new(i18n::t("nav.tabs")).small().color(ui::color::TEXT_MUTED));
+                });
+                if self.tabs.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new(i18n::t("nav.no_tabs")).weak());
+                    });
+                }
+                for (i, tab) in self.tabs.iter().enumerate() {
+                    let text = self.tab_text(ui.ctx(), tab);
+                    let selected = !self.showing_chrome && i == self.active;
+                    let (picked, closed) = drawer_row(ui, &text, selected, true);
+                    if closed {
+                        close_idx = Some(i);
+                    } else if picked {
+                        switch_to = Some(i);
+                        self.nav_drawer = false;
+                    }
+                }
             });
+        });
 
         // Central content for the active tab (split-borrow to mutate inputs etc).
         let mut action: Option<ui::Invoke> = None;
@@ -531,6 +711,9 @@ impl eframe::App for LimenApp {
         let mut create_category: Option<String> = None;
         let mut delete_category: Option<String> = None;
         let mut do_update = false;
+        // "Install anyway", to an update the team did not sign.
+        let mut do_update_unsigned = false;
+        let update_unsigned = self.update_unsigned.clone();
         let active_tab = self.active_tab();
         let update_info = self.update.clone();
         let updating = self.updating;
@@ -611,6 +794,7 @@ impl eframe::App for LimenApp {
                 logs,
                 log_autoscroll,
                 vault,
+                openpgp,
                 ui_scale,
                 animations,
                 alerts,
@@ -705,6 +889,7 @@ impl eframe::App for LimenApp {
                                 filter: category_filter,
                             },
                         ),
+                        Some(Tab::OpenPgp) => openpgp_page(ui, openpgp),
                         Some(Tab::Vault) => vault_page(
                             ui,
                             vault,
@@ -780,7 +965,9 @@ impl eframe::App for LimenApp {
                                 ui,
                                 update_info.as_ref(),
                                 updating,
+                                update_unsigned.as_ref(),
                                 &mut do_update,
+                                &mut do_update_unsigned,
                                 &mut open_changes,
                             )
                         }
@@ -791,9 +978,12 @@ impl eframe::App for LimenApp {
             self.content_rect = Some(content.response.rect);
         }
 
-        if do_update && let Some(info) = self.update.clone() {
+        if (do_update || do_update_unsigned)
+            && let Some(info) = self.update.clone()
+        {
             self.updating = true;
-            self.worker.send(Command::ApplyUpdate(info));
+            self.update_unsigned = None;
+            self.worker.send(Command::ApplyUpdate { info, accept_unsigned: do_update_unsigned });
         }
 
         // Apply tab intents.
@@ -971,11 +1161,26 @@ impl eframe::App for LimenApp {
         if let Some(name) = delete_category {
             self.delete_category(&name);
         }
+        // "Install anyway", to modules the team did not sign: the same install
+        // or update again, this time accepted.
+        let mut accept_unsigned = false;
+        let (mut add_module, mut update_module) = (add_module, update_module);
+        match self.confirmed_unsigned(ctx) {
+            Some(crate::worker::HeldInstall::Add(reference)) => {
+                add_module = Some(reference);
+                accept_unsigned = true;
+            }
+            Some(crate::worker::HeldInstall::Update(name)) => {
+                update_module = Some(name);
+                accept_unsigned = true;
+            }
+            None => {}
+        }
         if let Some(reference) = add_module {
             self.busy = true;
             self.installing = Some(reference.clone());
             self.status = format!("installing {reference}…");
-            self.worker.send(Command::AddModule(reference));
+            self.worker.send(Command::AddModule { reference, accept_unsigned });
         }
         if let Some(name) = update_module {
             // Close its tab first — its loaded UI is about to be replaced.
@@ -989,7 +1194,7 @@ impl eframe::App for LimenApp {
             self.busy = true;
             self.installing = Some(name.clone());
             self.status = format!("updating {name}…");
-            self.worker.send(Command::UpdateModule(name));
+            self.worker.send(Command::UpdateModule { name, accept_unsigned });
         }
         if reload {
             // Re-scan the module directories from disk: pick up newly-added
@@ -1247,3 +1452,227 @@ impl eframe::App for LimenApp {
 }
 
 // --------------------------------------------------------------------------- //
+
+impl LimenApp {
+    /// What a tab is called: a detail view's own title, a module's localized
+    /// name rather than its identifier, a page's name.
+    fn tab_text(&self, ctx: &egui::Context, tab: &Tab) -> String {
+        match tab {
+            Tab::Detail { id } => self
+                .detail_tabs
+                .get(id)
+                .map(|d| d.title.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| i18n::t("tab.details")),
+            Tab::Module(name) => self
+                .modules
+                .iter()
+                .find(|m| &m.name == name)
+                .map(|m| localized_name(ctx, m))
+                .unwrap_or_else(|| name.clone()),
+            _ => tab.title(),
+        }
+    }
+}
+
+/// The button of a compact title bar: three lines, which open the left panel.
+/// Painted rather than a glyph — the app ships one font.
+fn menu_button(ui: &mut egui::Ui, open: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0, 24.0), egui::Sense::click());
+    let a = ui::interact(ui, &resp);
+    let on = ui::anim_bool(ui, resp.id.with("open"), open, 0.14);
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::Rounding::same(3.0), ui::with_alpha(ui::color::BG_WIDGET, a.hover.max(on * 0.6)));
+    let ink = ui::lerp_color(ui::color::TEXT_MUTED, ui::color::ACCENT_BRIGHT, a.hover.max(on));
+    let c = rect.center();
+    for dy in [-5.0, 0.0, 5.0] {
+        painter.hline((c.x - 7.0)..=(c.x + 7.0), c.y + dy, egui::Stroke::new(1.6_f32, ink));
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// One row of the left panel, the panel's width: a page or a tab. `closable`
+/// rows have a × at the end. (picked, closed).
+fn drawer_row(ui: &mut egui::Ui, text: &str, selected: bool, closable: bool) -> (bool, bool) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
+    let hovered = ui.rect_contains_pointer(rect);
+    let hover = ui::anim_bool(ui, resp.id.with("hover"), hovered, 0.12);
+    let sel = ui::anim_bool(ui, resp.id.with("sel"), selected, 0.14);
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::Rounding::ZERO, ui::with_alpha(ui::color::BG_WIDGET, hover.max(sel * 0.6)));
+    painter.rect_filled(
+        egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())),
+        egui::Rounding::ZERO,
+        ui::with_alpha(ui::color::ACCENT, sel),
+    );
+    let close_w = if closable { 22.0 } else { 0.0 };
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.to_owned(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui::lerp_color(ui::color::TEXT, ui::color::ACCENT, sel),
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: (rect.width() - 24.0 - close_w).max(20.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.fonts(|f| f.layout_job(job));
+    painter.galley(egui::pos2(rect.min.x + 12.0, rect.center().y - galley.size().y * 0.5), galley, ui::color::TEXT);
+    let mut closed = false;
+    if closable {
+        let cc = egui::pos2(rect.right() - 14.0, rect.center().y);
+        let crect = egui::Rect::from_center_size(cc, egui::vec2(18.0, 18.0));
+        let cresp = ui.interact(crect, resp.id.with("close"), egui::Sense::click());
+        if cresp.hovered() {
+            ui.painter().rect_filled(crect, egui::Rounding::same(3.0), ui::color::BG_HOVER);
+        }
+        ui.painter().text(
+            cc,
+            egui::Align2::CENTER_CENTER,
+            "×",
+            egui::FontId::proportional(15.0),
+            if cresp.hovered() { ui::color::TEXT } else { ui::color::TEXT_MUTED },
+        );
+        closed = cresp.clicked();
+    }
+    (resp.clicked() && !closed, closed)
+}
+
+/// Lay out `add` at its full height, but take only the visible part of it —
+/// `fold` is (visible, full); None: all of it — the rest clipped. How the tab
+/// strip folds. A panel sizes itself to its contents, so its own height cannot
+/// fold them: an area that neither scrolls nor shows a bar, as tall as the
+/// fold, does. Inside it the contents get their full height, as they would
+/// have, rather than the unbounded one a scroll area offers.
+fn folded<R>(ui: &mut egui::Ui, fold: Option<(f32, f32)>, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    match fold {
+        None => add(ui),
+        Some((visible, full)) => {
+            egui::ScrollArea::vertical()
+                .id_source("tabstrip_fold")
+                .max_height(visible)
+                // Or it keeps 64px however far it has folded.
+                .min_scrolled_height(visible)
+                .auto_shrink([false, true])
+                .enable_scrolling(false)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.set_height(full);
+                    add(ui)
+                })
+                .inner
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One frame of a window with a strip shaped like the tab strip — a row
+    /// that fills its height, holding 26px tabs — folded to `unfolded`, and the
+    /// workspace below it. Where the strip ends and the workspace starts.
+    fn strip_at(unfolded: f32, full: f32) -> (f32, f32) {
+        let ctx = egui::Context::default();
+        let mut out = (0.0, 0.0);
+        for _ in 0..3 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let mut strip = egui::TopBottomPanel::top("strip");
+                    let mut fold = None;
+                    if unfolded < 1.0 {
+                        strip = strip.exact_height(full * unfolded);
+                        let row = full - 2.0 * STRIP_PAD_Y;
+                        fold = Some((row * unfolded, row));
+                    }
+                    let shown = strip
+                        .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(8.0, STRIP_PAD_Y * unfolded)))
+                        .show(ctx, |ui| folded(ui, fold, |ui| {
+                            ui.horizontal(|ui| {
+                                egui::ScrollArea::horizontal()
+                                    .id_source("tabs")
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            for _ in 0..3 {
+                                                ui.allocate_exact_size(egui::vec2(120.0, 26.0), egui::Sense::click());
+                                            }
+                                        });
+                                    });
+                            });
+                        }));
+                    let work = egui::CentralPanel::default().show(ctx, |_| {});
+                    out = (shown.response.rect.height(), work.response.rect.top());
+                },
+            );
+        }
+        out
+    }
+
+    #[test]
+    fn the_bar_goes_compact_when_it_does_not_fit_and_back_with_room_to_spare() {
+        assert!(!bar_goes_compact(false, 500.0, 0.0), "not measured yet: tried in full");
+        assert!(!bar_goes_compact(false, 900.0, 880.0), "it fits");
+        assert!(bar_goes_compact(false, 870.0, 880.0), "it does not");
+        assert!(bar_goes_compact(true, 890.0, 880.0), "compact, and only just fitting: stays");
+        assert!(!bar_goes_compact(true, 910.0, 880.0), "room to spare: back in full");
+    }
+
+    /// The measure the title bar takes of itself — what is left of the gap,
+    /// and what the right-to-left group used — is what its row needs, however
+    /// wide the window is.
+    #[test]
+    fn what_the_bar_needs_is_measured_the_same_at_any_width() {
+        let needs_at = |width: f32| {
+            let ctx = egui::Context::default();
+            let mut needs = 0.0;
+            for _ in 0..2 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 300.0))),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::TopBottomPanel::top("bar").frame(egui::Frame::none()).show(ctx, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                let row_left = ui.cursor().min.x;
+                                ui.allocate_exact_size(egui::vec2(300.0, 24.0), egui::Sense::hover());
+                                let left_w = ui.cursor().min.x - row_left;
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.allocate_exact_size(egui::vec2(34.0, 24.0), egui::Sense::hover());
+                                    ui.allocate_exact_size(egui::vec2(166.0, 24.0), egui::Sense::hover());
+                                    needs = left_w + ui.min_rect().width() + 16.0;
+                                });
+                            });
+                        });
+                    },
+                );
+            }
+            needs
+        };
+        for width in [1200.0, 800.0, 520.0, 400.0] {
+            let needs = needs_at(width);
+            assert!((needs - 516.0).abs() < 1.0, "at {width}: {needs}");
+        }
+        assert!(bar_goes_compact(false, 400.0, needs_at(400.0)));
+        assert!(!bar_goes_compact(false, 800.0, needs_at(800.0)));
+    }
+
+    #[test]
+    fn the_strip_folds_and_the_workspace_follows_it() {
+        let (open, top) = strip_at(1.0, STRIP_H);
+        assert!((open - STRIP_H).abs() < 0.5, "open, the strip is its own height: {open}");
+        assert!((top - open).abs() < 0.5, "and the workspace starts under it: {top}");
+        let (half, top) = strip_at(0.5, open);
+        assert!((half - open / 2.0).abs() < 0.5, "half folded, half as tall: {half}");
+        assert!((top - half).abs() < 0.5, "the workspace has grown into the rest: {top}");
+        let (gone, top) = strip_at(0.0, open);
+        assert!(gone < 0.5 && top < 0.5, "folded away, the workspace takes it all: {gone}, {top}");
+    }
+}

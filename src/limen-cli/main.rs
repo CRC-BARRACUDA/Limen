@@ -76,11 +76,19 @@ enum Command {
     Add {
         /// e.g. `owner/repo`, `owner/repo@1.2.0`, `./path/to/module`, `file:/abs`.
         reference: String,
+        /// Install it even if it is not signed by the Limen team.
+        #[arg(long)]
+        allow_unsigned: bool,
     },
     /// List installed modules from the lockfile.
     List,
     /// Re-fetch and reinstall installed modules (all, or one by name).
-    Update { name: Option<String> },
+    Update {
+        name: Option<String>,
+        /// Update even to a version that is not signed by the Limen team.
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
     /// Uninstall a module by name.
     Remove { name: String },
     /// Show each module's declared permissions and trust status.
@@ -91,6 +99,14 @@ enum Command {
     Untrust { name: String },
     /// Verify installed modules against the lockfile digests (tamper check).
     Verify,
+    /// Print the line the team signs for the module in DIR: its name, version
+    /// and the digest of its files. For releasing a module (see
+    /// scripts/sign-module.sh): DIR has to hold the files exactly as the
+    /// repository has them — an export of the commit, not a working copy.
+    ModuleStatement { dir: PathBuf },
+    /// Check FILE against a detached signature with the team's keys built into
+    /// this Limen, and say whose it is. Fails unless it is the team's.
+    VerifySignature { file: PathBuf, signature: PathBuf },
     /// Run the built-in cross-language, cross-transport demo.
     Demo,
 }
@@ -134,9 +150,9 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&out)?);
             engine.shutdown();
         }
-        Command::Add { reference } => {
-            let reg = Registry::new(paths::home());
-            let report = reg.add(reference).context("installing module")?;
+        Command::Add { reference, allow_unsigned } => {
+            let reg = Registry::new(paths::home()).accept_unsigned(*allow_unsigned);
+            let report = reg.add(reference).map_err(explain_unsigned).context("installing module")?;
             println!(
                 "installed {} module(s) into {}",
                 report.installed.len(),
@@ -164,9 +180,9 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Update { name } => {
-            let reg = Registry::new(paths::home());
-            let report = reg.update(name.as_deref())?;
+        Command::Update { name, allow_unsigned } => {
+            let reg = Registry::new(paths::home()).accept_unsigned(*allow_unsigned);
+            let report = reg.update(name.as_deref()).map_err(explain_unsigned)?;
             println!("updated {} module(s)", report.installed.len());
             for e in &report.installed {
                 println!("  {} v{} {}", e.name, e.version, short_digest(&e.digest));
@@ -178,6 +194,26 @@ fn main() -> Result<()> {
                 println!("removed {name}");
             } else {
                 println!("{name} was not installed");
+            }
+        }
+        Command::ModuleStatement { dir } => {
+            let manifest = limen_proto::Manifest::from_dir(dir).with_context(|| format!("reading the manifest in {}", dir.display()))?;
+            let digest = digest_dir(dir)?;
+            // Exactly the bytes that are signed: the line, and its newline.
+            print!("{}", limen_registry::statement(&manifest.module.name, &manifest.module.version, &digest));
+        }
+        Command::VerifySignature { file, signature } => {
+            use limen_sign::Verdict;
+            let content = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+            let sig = std::fs::read(signature).with_context(|| format!("reading {}", signature.display()))?;
+            match limen_sign::verify(&content, Some(&sig)) {
+                Verdict::Valid(signer) => {
+                    let retired = if signer.retired { " (a retired key)" } else { "" };
+                    println!("valid: signed by {}{retired}, {}", signer.name, signer.fingerprint);
+                }
+                Verdict::UnknownSigner { key } => bail!("not the team's: signed by an unknown key, {key}"),
+                Verdict::Unsigned => bail!("not signed"),
+                Verdict::Bad(why) => bail!("refused: {why}"),
             }
         }
         Command::Permissions => {
@@ -342,4 +378,21 @@ fn run_demo(dirs: &[PathBuf]) -> Result<()> {
 
     engine.shutdown();
     Ok(())
+}
+
+/// An install held back as not signed by the team: say which modules, and how
+/// to install them all the same.
+fn explain_unsigned(e: anyhow::Error) -> anyhow::Error {
+    let Some(held) = e.downcast_ref::<limen_registry::UnsignedModules>() else {
+        return e;
+    };
+    let mut lines = vec!["nothing was installed: not signed by the Limen team —".to_string()];
+    for m in &held.modules {
+        lines.push(match &m.unknown_key {
+            Some(key) => format!("  {} {} (signed by an unknown key, {key})", m.name, m.version),
+            None => format!("  {} {} (no signature)", m.name, m.version),
+        });
+    }
+    lines.push("Limen cannot tell that these are genuine. To install them anyway, add --allow-unsigned.".to_string());
+    anyhow::anyhow!(lines.join("\n"))
 }

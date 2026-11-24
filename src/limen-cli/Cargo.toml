@@ -12,6 +12,8 @@ path = "main.rs"
 [dependencies]
 limen-core = { workspace = true }
 limen-registry = { workspace = true }
+limen-sign = { workspace = true }
+limen-proto = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

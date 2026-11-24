@@ -11,6 +11,8 @@ pub enum Tab {
     Categories,
     /// Limen's vault: the secrets kept for Limen and its modules.
     Vault,
+    /// The OpenPGP keys Limen trusts: whose signature it installs under.
+    OpenPgp,
     Module(String),
     Settings,
     Developer,
@@ -36,7 +38,7 @@ impl Tab {
     pub fn is_chrome(&self) -> bool {
         matches!(
             self,
-            Tab::About | Tab::Modules | Tab::Categories | Tab::Vault | Tab::Settings | Tab::Developer
+            Tab::About | Tab::Modules | Tab::Categories | Tab::Vault | Tab::OpenPgp | Tab::Settings | Tab::Developer
         )
     }
 
@@ -46,6 +48,7 @@ impl Tab {
             Tab::Modules => i18n::t("tab.modules"),
             Tab::Categories => i18n::t("tab.categories"),
             Tab::Vault => i18n::t("tab.vault"),
+            Tab::OpenPgp => i18n::t("tab.openpgp"),
             Tab::Module(n) => n.clone(),
             Tab::Settings => i18n::t("tab.settings"),
             Tab::Developer => i18n::t("tab.developer"),

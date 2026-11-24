@@ -630,17 +630,68 @@ pub fn window_button(ui: &mut egui::Ui, kind: WinBtn) -> egui::Response {
     resp
 }
 
+fn pointer_taken_id() -> egui::Id {
+    egui::Id::new("limen_pointer_taken_by_window_system")
+}
+
+/// Say that the window system has just been handed the pointer — the window is
+/// being moved by its title bar, say. The button's release will not come back,
+/// and [`window_resize_grips`] has to know not to take the button for held.
+pub fn window_took_pointer(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(pointer_taken_id(), true));
+}
+
 /// Invisible edge/corner drag strips that resize the window, since turning off OS
 /// decorations also removes the native resize borders. No-op while maximized.
+///
+/// Where the pointer is decides, on the frame it gets there: the cursor turns
+/// and a press starts the resize. The strips' areas only keep that press from
+/// what lies under them — an area takes two frames to answer a pointer, and
+/// the window is redrawn only when something happens, so a hand that reached
+/// the edge and stopped would never see the cursor turn.
 pub fn window_resize_grips(ctx: &egui::Context) {
     use egui::{CursorIcon as Cur, ResizeDirection as Dir};
+
+    // The cursor is said at the end of the frame, after everything drawn in
+    // it: on the frame the pointer arrives, whatever is under the strip — a
+    // label, a text field — still claims the cursor for itself.
+    let wanted_id = egui::Id::new("limen_resize_cursor");
+    let hooked_id = egui::Id::new("limen_resize_cursor_hooked");
+    if !ctx.data(|d| d.get_temp::<bool>(hooked_id).unwrap_or(false)) {
+        ctx.data_mut(|d| d.insert_temp(hooked_id, true));
+        ctx.on_end_frame(
+            "limen_resize_cursor",
+            std::sync::Arc::new(move |ctx: &egui::Context| {
+                if let Some(cursor) = ctx.data(|d| d.get_temp::<Cur>(wanted_id)) {
+                    ctx.set_cursor_icon(cursor);
+                }
+            }),
+        );
+    }
+    ctx.data_mut(|d| d.remove::<Cur>(wanted_id));
+
+    // Once a resize starts the window system has the pointer, and the
+    // button's release never comes here: egui goes on believing it is held.
+    // Remembered, so that belief is not taken for a drag — until a button
+    // really is pressed or let go again.
+    let resizing_id = pointer_taken_id();
+    let (pressed, down, released) =
+        ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.any_released()));
+    if pressed || released {
+        ctx.data_mut(|d| d.remove::<bool>(resizing_id));
+    }
+    let stale_hold = ctx.data(|d| d.get_temp::<bool>(resizing_id).unwrap_or(false));
+    if stale_hold {
+        // And nothing is being dragged: the rest of the window hovers again.
+        ctx.stop_dragging();
+    }
 
     if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
         return;
     }
     let rect = ctx.screen_rect();
-    let b = 6.0_f32; // edge thickness
-    let c = 14.0_f32; // corner arm length
+    let b = 8.0_f32; // edge thickness
+    let c = 18.0_f32; // corner arm length
 
     // Only put the grips up when the pointer is actually near an edge. They are
     // foreground areas, so while they exist they sit above the central panel and
@@ -672,18 +723,25 @@ pub fn window_resize_grips(ctx: &egui::Context) {
         ("rz_sw", r(rect.left(), rect.bottom() - c, rect.left() + c, rect.bottom()), Dir::SouthWest, Cur::ResizeSouthWest),
         ("rz_se", r(rect.right() - c, rect.bottom() - c, rect.right(), rect.bottom()), Dir::SouthEast, Cur::ResizeSouthEast),
     ];
-    for (id, rect, dir, cursor) in grips {
+    // The grip under the pointer: the last that holds it, so a corner wins.
+    let hit = grips.iter().rev().find(|(_, rect, ..)| rect.contains(p)).map(|(_, _, dir, cursor)| (*dir, *cursor));
+    // Not while something else is being dragged through the edge.
+    if let Some((dir, cursor)) = hit
+        && (pressed || !down || stale_hold)
+    {
+        ctx.data_mut(|d| d.insert_temp(wanted_id, cursor));
+        if pressed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+            ctx.data_mut(|d| d.insert_temp(resizing_id, true));
+        }
+    }
+    for (id, rect, ..) in grips {
         egui::Area::new(egui::Id::new(id))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
             .show(ctx, |ui| {
-                let resp = ui.allocate_rect(rect, egui::Sense::drag());
-                if resp.hovered() || resp.dragged() {
-                    ui.ctx().set_cursor_icon(cursor);
-                }
-                if resp.drag_started() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
-                }
+                // Takes the press, so nothing under the strip is pressed too.
+                ui.allocate_rect(rect, egui::Sense::click_and_drag());
             });
     }
 }

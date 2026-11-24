@@ -1,0 +1,19 @@
+{
+  "format": "limen-vault",
+  "version": 1,
+  "id": "5fe73dd673231d6c019c115396647a53",
+  "kdf": {
+    "m_kib": 64,
+    "t": 1,
+    "p": 1
+  },
+  "salt": "9569dbd9445f9b82bd8af3e56b0ac431",
+  "key": {
+    "nonce": "6f292c7d857a044d728e048e839a145c30950cea76ee025c",
+    "ct": "628d2c296a453e8753b5bf34d432cfaacdbfc7db18d2c1ed3ebcf234beff8192f4487ac00993f5e20a0fa2fd01051b2a"
+  },
+  "data": {
+    "nonce": "c6237b46acffed09c37f6be7ee9d96909600359de5de4982",
+    "ct": "2fe07a1beb74a7273f75515fe49a3d57e151860a711047524ba2c3fffa52c81a039c7303db4ab4fc29b2343c6386ecc01921ebede368904db2ea501db7c7f89d82b93377366c280a89d88f9a"
+  }
+}

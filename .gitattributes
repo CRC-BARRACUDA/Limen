@@ -19,3 +19,9 @@
 *.ico  binary
 *.7z   binary
 *.gz   binary
+
+# What a signature was made over, byte for byte: a line ending changed on
+# checkout and nothing verifies.
+src/limen-sign/tests/fixtures/* -text
+src/limen-registry/tests/fixtures/** -text
+resources/keys/*.asc            -text

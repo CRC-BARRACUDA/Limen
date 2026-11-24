@@ -11,15 +11,18 @@
 //! machinery is exercisable offline with path-based fixtures — no network, in
 //! the same spirit as v1's hermetic test suite.
 //!
-//! Signature verification (minisign/cosign) is intentionally deferred to the
-//! hardening phase; today we compute and lock a SHA-256 digest of every
-//! installed module so tampering is at least detectable.
+//! A module fetched from a repository is checked against the team's signature
+//! before it is installed (see `signing.rs`): a wrong signature refuses the
+//! install, and one that is missing — or a stranger's — holds it back until
+//! the user accepts it. Every installed module's SHA-256 digest is locked as
+//! well, so a change made after the install is detectable.
 
 mod github;
 mod http;
 mod lockfile;
 mod registry;
 mod release;
+mod signing;
 mod source;
 mod trust;
 mod util;
@@ -36,6 +39,7 @@ pub use registry::{
     set_update_modules_dir, InstallReport, Registry, VerifyItem,
     VerifyStatus,
 };
+pub use signing::{statement, UnsignedModule, UnsignedModules, SIGNATURE_ASSETS};
 pub use source::SourceSpec;
 pub use trust::TrustStore;
 pub use util::digest_dir;

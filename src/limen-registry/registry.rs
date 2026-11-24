@@ -82,15 +82,69 @@ struct Resolved {
     tempdir: PathBuf,
     branch: String,
     commit: String,
+    /// What its signature says. None: from a local path, not checked.
+    signature: Option<limen_sign::Verdict>,
 }
 
 pub struct Registry {
     home: PathBuf,
+    /// Install modules the team did not sign: the user said so.
+    accept_unsigned: bool,
+    /// The keys to check against, when not the team's (tests).
+    keys: Option<std::sync::Arc<limen_sign::Keyring>>,
 }
 
 impl Registry {
     pub fn new(home: impl Into<PathBuf>) -> Self {
-        Self { home: home.into() }
+        Self { home: home.into(), accept_unsigned: false, keys: None }
+    }
+
+    /// Install modules that are not signed by the team as well — what the user
+    /// answers when an install is held back with
+    /// [`UnsignedModules`](crate::UnsignedModules). A signature that is wrong
+    /// still refuses.
+    pub fn accept_unsigned(mut self, yes: bool) -> Self {
+        self.accept_unsigned = yes;
+        self
+    }
+
+    /// Check against these keys instead of the team's.
+    #[doc(hidden)]
+    pub fn with_keys(mut self, keys: std::sync::Arc<limen_sign::Keyring>) -> Self {
+        self.keys = Some(keys);
+        self
+    }
+
+    fn keys(&self) -> &limen_sign::Keyring {
+        self.keys.as_deref().unwrap_or_else(|| limen_sign::Keyring::team())
+    }
+
+    /// What the team's signature says of a module fetched from `repo` into
+    /// `dir`: its statement's signature is looked for in the release of its
+    /// version. No release, or none reachable: unsigned.
+    fn check_fetched(&self, repo: &str, pinned: Option<&str>, name: &str, version: &str, dir: &Path) -> Result<limen_sign::Verdict> {
+        let digest = digest_dir(dir)?;
+        let slug = github_slug(repo);
+        let on_github = !slug.contains("://") && !slug.starts_with("git@") && slug.matches('/').count() == 1;
+        let mut signature = None;
+        if on_github {
+            // The release of this version: tagged as asked for, or `v1.2.3`, or `1.2.3`.
+            let tags: Vec<String> = match pinned {
+                Some(tag) => vec![tag.to_string()],
+                None => vec![format!("v{version}"), version.to_string()],
+            };
+            for tag in tags {
+                let Ok(assets) = release_assets(slug, Some(&tag)) else { continue };
+                if let Some(url) = crate::signing::statement_signature(&assets) {
+                    signature = Some(
+                        crate::signing::fetch(url)
+                            .ok_or_else(|| anyhow::anyhow!("downloading the signature of {name} {version} failed"))?,
+                    );
+                }
+                break;
+            }
+        }
+        Ok(crate::signing::check_statement(self.keys(), name, version, &digest, signature.as_deref()))
     }
 
     pub fn modules_dir(&self) -> PathBuf {
@@ -205,6 +259,14 @@ impl Registry {
             cleanup(&resolved);
             return Err(e);
         }
+        // Before anything is put in place: is all of it the team's — and if
+        // not, did the user say to install it all the same?
+        let verdicts: Vec<_> =
+            resolved.iter().map(|(name, r)| (name.clone(), r.version.clone(), r.signature.clone())).collect();
+        if let Err(e) = crate::signing::admit(&verdicts, self.accept_unsigned) {
+            cleanup(&resolved);
+            return Err(e);
+        }
 
         let mut lock = Lockfile::load(&self.lock_path())?;
         let mut report = InstallReport::default();
@@ -225,6 +287,10 @@ impl Registry {
                 digest,
                 branch: r.branch.clone(),
                 commit: r.commit.clone(),
+                signed_by: match &r.signature {
+                    Some(limen_sign::Verdict::Valid(signer)) => signer.name.clone(),
+                    _ => String::new(),
+                },
             };
             lock.upsert(entry.clone());
             report.installed.push(entry);
@@ -270,11 +336,25 @@ impl Registry {
         // for this platform so the operator needs no toolchain. If there's no
         // matching release asset, the module still installs as source (and must
         // be built).
+        // The files as fetched are what the statement was signed over: checked
+        // now, before a native module's library joins them.
+        let mut signature = match &spec {
+            SourceSpec::Git { repo, version: pinned } => {
+                Some(self.check_fetched(repo, pinned.as_deref(), &name, &version, &tempdir)?)
+            }
+            SourceSpec::Path { .. } => None,
+        };
+
         if manifest.module.language == Language::Native && manifest.module.abi == Abi::Native
             && let SourceSpec::Git { repo, version } = &spec {
-                match fetch_native_asset(repo, &manifest.module.entry, version.as_deref(), &tempdir)
+                match fetch_native_asset(repo, &manifest.module.entry, version.as_deref(), &tempdir, self.keys())
                 {
-                    Ok(lib) => eprintln!("[registry] {name}: downloaded prebuilt {lib}"),
+                    Ok((lib, verdict)) => {
+                        eprintln!("[registry] {name}: downloaded prebuilt {lib}");
+                        // The library is what runs: the module is the team's
+                        // only if it is too.
+                        signature = signature.map(|source| crate::signing::both(source, verdict));
+                    }
                     Err(e) => eprintln!(
                         "[registry] {name}: no prebuilt library for {}/{} ({e}); \
                          installed as source — build it with `cargo build`",
@@ -293,6 +373,7 @@ impl Registry {
                 tempdir: tempdir.clone(),
                 branch: meta.branch,
                 commit: meta.commit,
+                signature,
             },
         );
 

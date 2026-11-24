@@ -499,15 +499,16 @@ _CURRENT_CAPABILITY = [""]
 # Host bridge — call other modules, emit/subscribe events, log.
 # --------------------------------------------------------------------------- #
 
-# Limen's vault answers with these while it cannot: locked, or not made yet.
+# Limen's vault answers with these when it stayed shut: locked, or not made.
 VAULT_LOCKED = -32006
 VAULT_MISSING = -32007
 
 
 class VaultLocked(RuntimeError):
-    """Limen's vault is locked, or there is none yet. The user is being asked to
-    unlock (or create) it; the call can be made again once they have. A
-    RuntimeError, so code that catches those still does."""
+    """Limen's vault stayed locked, or none was made. A call that finds it shut
+    waits while Limen asks the user for the password, and goes on once it is
+    given; this is raised only when they turn that down (or do not answer in
+    time). A RuntimeError, so code that catches those still does."""
 
 
 class Host:
@@ -603,8 +604,9 @@ class Host:
         self._m._request("host.log", str(message))
 
     # Limen's vault: this module's own compartment. Needs the `secrets`
-    # permission. While the vault is locked (or not made yet) these raise
-    # VaultLocked — the user is being asked to unlock it; try again after.
+    # permission. While the vault is locked (or not made yet) these wait: Limen
+    # asks the user for the password and the call goes on once it is given.
+    # Turned down, they raise VaultLocked.
 
     def secret_get(self, name):
         """A secret by name, or None when there is none."""
@@ -621,6 +623,38 @@ class Host:
     def secret_names(self):
         """The names (never the values) in this module's compartment."""
         return self._m._request("host.secret_names", None) or []
+
+    def gpg_identities(self):
+        """What the user can sign as: each of their OpenPGP keys that can sign,
+        as each of its user ids — a list of {"fingerprint": ..., "user_id":
+        "Name <email>", "default": bool}, `default` marking the one picked on
+        Limen's OpenPGP page. For offering the choice where they sign, and for
+        a document to name its signer before it is signed. Nothing is signed
+        and the user is asked nothing; empty when GnuPG has no key of theirs.
+        Needs the `gpg` permission. Raises RuntimeError with words for the
+        user (no GnuPG)."""
+        answer = self._m._request("host.gpg_identities", {}) or {}
+        return answer.get("identities") or []
+
+    def gpg_sign_file(self, path, identity=None):
+        """Have the file at `path` signed with the user's own OpenPGP key: a
+        detached, armored signature written beside it as `<path>.asc`.
+
+        Needs the `gpg` permission, and `path` has to be one `save_file` gave
+        this module in this session — a file the user chose the place of.
+
+        `identity`: one of `gpg_identities()` — the key and the user id to sign
+        as. None: the one picked on Limen's OpenPGP page. The key stays with
+        the user's GnuPG, which may ask them for its passphrase or PIN.
+
+        Returns {"signature": path, "fingerprint": ..., "user_id": ...}.
+        Raises RuntimeError with words for the user: no GnuPG, no key chosen,
+        the passphrase turned down."""
+        params = {"path": str(path)}
+        if identity:
+            params["fingerprint"] = identity["fingerprint"]
+            params["user_id"] = identity["user_id"]
+        return self._m._request("host.gpg_sign_file", params)
 
 
 # --------------------------------------------------------------------------- #

@@ -5,6 +5,14 @@
 #   dist\Limen-<ver>-windows-<arch>.7z           distribution archive (GUI + CLI + LICENSE)
 #   dist\Limen-<ver>-windows-<arch>.7z.sha256    its checksum (sha256sum format)
 #   dist\Limen-<ver>-windows-<arch>.exe          raw GUI binary (for the in-app self-update)
+#   dist\Limen-<ver>-windows-<arch>.7z.sig       the archive's signature, by the team's key
+#   dist\Limen-<ver>-windows-<arch>.exe.sig      the raw binary's — what the self-update checks
+#
+# The signatures are made with gpg (Gpg4win) and the team's key, which has to
+# be in this machine's keyring; gpg asks for its passphrase. Without gpg or the
+# key the build is left unsigned, and says so: Limen installs an unsigned build
+# only after a warning. $env:LIMEN_SIGN_KEY names another key; $env:LIMEN_SIGN = '0'
+# skips signing.
 #
 # The in-app self-update renames a raw .exe over the running executable, so it
 # needs Limen.exe published as its own release asset - the .7z is for manual
@@ -94,6 +102,41 @@ Write-Host ">> checksum"
 $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
 # sha256sum format: "<hash>  <filename>" (two spaces), so `sha256sum -c` can verify it.
 "$hash  $stem.7z" | Out-File -FilePath "$archive.sha256" -Encoding ascii -NoNewline
+
+# The team's key (CRC-BARRACUDA), by fingerprint.
+$signKey = if ($env:LIMEN_SIGN_KEY) { $env:LIMEN_SIGN_KEY } else { '8D151FD231907502BBFA528E140ABA21244518B8' }
+$gpg = Get-Command gpg -ErrorAction SilentlyContinue
+$haveKey = $false
+if ($gpg -and $env:LIMEN_SIGN -ne '0') {
+    # Through cmd, so that what gpg says when the key is not there stays out
+    # of PowerShell: Windows PowerShell 5.1 turns a native program's redirected
+    # stderr into an error, and under 'Stop' that ends the script here instead
+    # of leaving the build unsigned.
+    & cmd /c "gpg --list-secret-keys $signKey >nul 2>&1"
+    $haveKey = ($LASTEXITCODE -eq 0)
+}
+if ($env:LIMEN_SIGN -eq '0') {
+    Write-Host ">> NOT SIGNED (LIMEN_SIGN=0)"
+} elseif (-not $haveKey) {
+    Write-Host ">> NOT SIGNED: gpg, or the signing key $signKey, is not on this machine."
+    Write-Host "   Limen will warn before installing this build. Do not publish it as a release."
+} else {
+    Write-Host ">> signing with $signKey"
+    $cli = 'target\release\limen-cli.exe'
+    foreach ($file in @($archive, (Join-Path $dist "$stem.exe"))) {
+        & gpg --batch --yes --local-user $signKey --detach-sign -o "$file.sig" $file
+        if ($LASTEXITCODE -ne 0) { throw "gpg could not sign $file" }
+        # Checked the way Limen will check it: by the keys built into this build.
+        & $cli verify-signature $file "$file.sig"
+        if ($LASTEXITCODE -ne 0) {
+            if ($env:LIMEN_SIGN_KEY) {
+                Write-Host "   (signed with LIMEN_SIGN_KEY, which is not one of the keys built into Limen)"
+            } else {
+                throw "the signature of $file does not verify against the keys built into Limen"
+            }
+        }
+    }
+}
 
 Write-Host ""
 Write-Host "artifacts in dist\:"

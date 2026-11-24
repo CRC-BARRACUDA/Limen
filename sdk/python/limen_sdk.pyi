@@ -218,7 +218,7 @@ VAULT_LOCKED: int
 VAULT_MISSING: int
 
 class VaultLocked(RuntimeError):
-    """Limen's vault is locked, or there is none yet: try again once unlocked."""
+    """Limen's vault stayed locked (or none was made): the user turned it down."""
 
 class Host:
     def call(
@@ -237,6 +237,8 @@ class Host:
     def secret_set(self, name: str, value: str) -> None: ...
     def secret_delete(self, name: str) -> bool: ...
     def secret_names(self) -> List[str]: ...
+    def gpg_identities(self) -> List[Dict[str, Any]]: ...
+    def gpg_sign_file(self, path: str, identity: Optional[Dict[str, Any]] = ...) -> Dict[str, str]: ...
 
 # A method handler: (params, host) -> result
 Handler = Callable[[Dict[str, Any], Host], Any]

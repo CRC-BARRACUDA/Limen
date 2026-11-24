@@ -118,6 +118,27 @@ pub struct Config {
     /// 0 = never.
     #[serde(default)]
     pub vault_lock_minutes: Option<u32>,
+
+    /// Where the vault's key file was last, when it needs one — offered again
+    /// at the next unlock. The path only: the file itself is never copied.
+    #[serde(default)]
+    pub vault_keyfile: Option<String>,
+
+    /// The user's own OpenPGP key, by fingerprint: what reports and the like
+    /// are signed with, through the installed GnuPG. Chosen on the OpenPGP
+    /// page. Absent = none chosen.
+    #[serde(default)]
+    pub gpg_key: Option<String>,
+
+    /// Which of that key's user ids to sign as, when it has several. Absent =
+    /// its first.
+    #[serde(default)]
+    pub gpg_user_id: Option<String>,
+
+    /// The `gpg` program to use, when it is not an installed one: a portable
+    /// GnuPG, say. The path of the program itself. Absent = the installed one.
+    #[serde(default)]
+    pub gpg_path: Option<String>,
 }
 
 impl Default for Config {
@@ -139,6 +160,10 @@ impl Default for Config {
             avatar_url: None,
             avatar_asset_base: None,
             vault_lock_minutes: None,
+            vault_keyfile: None,
+            gpg_key: None,
+            gpg_user_id: None,
+            gpg_path: None,
         }
     }
 }

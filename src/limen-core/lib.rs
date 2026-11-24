@@ -14,8 +14,10 @@ pub mod avatar;
 pub mod config;
 pub mod engine;
 pub mod environment;
+pub mod gpg;
 pub mod net;
 pub mod paths;
+pub mod security_key;
 pub mod setup;
 pub mod update;
 pub mod vault;
@@ -32,6 +34,6 @@ pub use limen_host::{runtimes::Runtime, Launch, Logger, ModuleSpec};
 pub use limen_host::supervise;
 pub use setup::{can_install, install_runtime, runtime_report, RuntimeInfo, RuntimeState};
 pub use update::{
-    apply_update, check_update, is_newer, notify, register_notifier, restart_app, set_update_dir,
+    apply_update, check_update, is_newer, UpdateError, notify, register_notifier, restart_app, set_update_dir,
     UpdateInfo,
 };

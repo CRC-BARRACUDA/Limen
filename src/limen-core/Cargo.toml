@@ -11,6 +11,7 @@ path = "lib.rs"
 [dependencies]
 limen-proto = { workspace = true }
 limen-host = { workspace = true }
+limen-sign = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -21,3 +22,4 @@ keyring = { workspace = true }
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 zeroize = { workspace = true }
+hidapi = { workspace = true }
