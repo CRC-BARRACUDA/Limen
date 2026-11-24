@@ -221,6 +221,12 @@ pub struct Permissions {
     /// nothing else; the host refuses the calls unless this is set.
     #[serde(default)]
     pub secrets: bool,
+    /// May have files signed with the user's own OpenPGP key, through
+    /// `host.gpg_sign_file` — only files the user chose a place for through
+    /// this module's save dialog. The key stays with the user's GnuPG; the
+    /// host refuses the call unless this is set.
+    #[serde(default)]
+    pub gpg: bool,
 }
 
 impl Permissions {
@@ -229,6 +235,7 @@ impl Permissions {
         self.admin
             || self.elevate
             || self.secrets
+            || self.gpg
             || self.run_hosts
             || self.subprocess
             || !self.elevated_methods.is_empty()
@@ -262,6 +269,9 @@ impl Permissions {
         }
         if self.secrets {
             out.push("keep secrets in Limen's vault".to_string());
+        }
+        if self.gpg {
+            out.push("sign files you save with your OpenPGP key".to_string());
         }
         if !self.network.is_empty() {
             out.push(format!("network: {}", self.network.join(", ")));

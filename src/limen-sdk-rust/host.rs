@@ -61,6 +61,29 @@ impl Elevated {
     }
 }
 
+/// One way the user can sign: a key of theirs, as one of its user ids (see
+/// [`Host::gpg_identities`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GpgIdentity {
+    /// The key's fingerprint, 40 hex digits.
+    pub fingerprint: String,
+    /// "Name <email>".
+    pub user_id: String,
+    /// The one picked on Limen's OpenPGP page.
+    pub default: bool,
+}
+
+/// A file signed with the user's OpenPGP key (see [`Host::gpg_sign_file`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpgSigned {
+    /// Where the detached signature was written: the file's path with `.asc`.
+    pub signature: String,
+    /// The signing key's fingerprint, 40 hex digits.
+    pub fingerprint: String,
+    /// Whose it is: "Name <email>".
+    pub user_id: String,
+}
+
 impl Host {
     /// Call `method` on whichever module provides `capability`.
     pub fn call(
@@ -325,6 +348,46 @@ impl Host {
         self.raw("host.save_file", json!({ "name": suggested }))
             .ok()
             .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+    }
+
+    /// What the user can sign as: each of their OpenPGP keys that can sign,
+    /// as each of its user ids — to offer them the choice where they sign,
+    /// and for a document to name its signer before it is signed. The one
+    /// picked on Limen's OpenPGP page is marked [`GpgIdentity::default`].
+    /// Nothing is signed and the user is asked nothing. Empty when GnuPG has
+    /// no key of theirs. Needs the `gpg` permission; an error (no GnuPG) has a
+    /// message for the user to read.
+    pub fn gpg_identities(&self) -> Result<Vec<GpgIdentity>, RpcError> {
+        let v = self.raw("host.gpg_identities", json!({}))?;
+        let list = v.get("identities").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        Ok(list
+            .iter()
+            .map(|id| GpgIdentity {
+                fingerprint: id.get("fingerprint").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+                user_id: id.get("user_id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+                default: id.get("default").and_then(|x| x.as_bool()).unwrap_or(false),
+            })
+            .collect())
+    }
+
+    /// Have the file at `path` signed with the user's own OpenPGP key: a
+    /// detached, armored signature written beside it as `<path>.asc`. Needs
+    /// the `gpg` permission, and `path` has to be one [`Host::save_file`] gave
+    /// this module in this session — a file the user chose the place of.
+    ///
+    /// `who`: one of [`Host::gpg_identities`] — the key and the user id to
+    /// sign as. None: the one picked on Limen's OpenPGP page. The key stays
+    /// with the user's GnuPG, which may ask them for its passphrase or PIN.
+    /// The error's message is for the user to read: no GnuPG, no key chosen,
+    /// the passphrase turned down.
+    pub fn gpg_sign_file(&self, path: &str, who: Option<&GpgIdentity>) -> Result<GpgSigned, RpcError> {
+        let params = match who {
+            Some(id) => json!({ "path": path, "fingerprint": id.fingerprint, "user_id": id.user_id }),
+            None => json!({ "path": path }),
+        };
+        let v = self.raw("host.gpg_sign_file", params)?;
+        let text = |key: &str| v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        Ok(GpgSigned { signature: text("signature"), fingerprint: text("fingerprint"), user_id: text("user_id") })
     }
 
     /// The user's active UI language code (e.g. `"en"`, `"uk"`). Query this while

@@ -182,6 +182,8 @@ impl Host {
             // So is whether it may keep secrets in the vault — and which
             // compartment is its own: `who`, never a name it gives.
             let may_secrets = spec.permissions.secrets;
+            // And whether it may have files signed with the user's OpenPGP key.
+            let may_gpg = spec.permissions.gpg;
             // Elevation is the one thing here the user cannot watch happen: a
             // prompt they answered, a command they never saw, run as root. It
             // goes to the console so there is a record of what was asked for.
@@ -195,6 +197,16 @@ impl Host {
                 "host.elevate_stop" => host_elevate_stop(params, &log, &who),
                 "host.secret_get" | "host.secret_set" | "host.secret_delete" | "host.secret_names" => {
                     crate::secrets::host_secret(method, params, may_secrets, &log, &who)
+                }
+                "host.gpg_sign_file" | "host.gpg_identities" => crate::gpg::host_gpg(method, params, may_gpg, &log, &who),
+                // The save dialog is everyone's, but whose dialog chose a file
+                // is remembered: it is what that module may have signed.
+                "host.save_file" => {
+                    let answer = shared(method, params)?;
+                    if let Some(path) = answer.get("path").and_then(Value::as_str) {
+                        crate::gpg::remember_chosen(&who, path);
+                    }
+                    Ok(answer)
                 }
                 _ => shared(method, params),
             })

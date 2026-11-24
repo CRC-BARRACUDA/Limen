@@ -19,6 +19,7 @@ mod connection;
 mod host;
 mod elevate;
 mod files;
+mod gpg;
 mod notify;
 mod secrets;
 mod sdk;
@@ -32,6 +33,7 @@ pub mod runtimes;
 pub use broker::Broker;
 pub use connection::ModuleConnection;
 pub use host::Host;
+pub use gpg::{set_file_signer, FileSigner, SignedFile, SignerIdentity};
 pub use secrets::{set_secret_store, SecretError, SecretStore};
 pub use spec::{Launch, ModuleSpec};
 
