@@ -16,7 +16,7 @@ members = [
 # the executable's `modules/` directory.
 
 [workspace.package]
-version = "0.33.1"
+version = "0.34.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
