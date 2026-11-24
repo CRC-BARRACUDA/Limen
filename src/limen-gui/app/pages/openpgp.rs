@@ -3,7 +3,7 @@
 use crate::app::*;
 
 /// A fingerprint as it is read aloud and compared: in fours.
-fn in_fours(fingerprint: &str) -> String {
+pub(crate) fn in_fours(fingerprint: &str) -> String {
     fingerprint
         .as_bytes()
         .chunks(4)
@@ -14,7 +14,7 @@ fn in_fours(fingerprint: &str) -> String {
 
 /// The OpenPGP tab: what the signatures are for, and the team's keys built
 /// into this Limen — each by its fingerprint, which is what is trusted.
-pub(crate) fn openpgp_page(ui: &mut egui::Ui) {
+pub(crate) fn openpgp_page(ui: &mut egui::Ui, own: &mut crate::app::openpgp::OpenPgpUi) {
     let muted = |ui: &mut egui::Ui, t: String| {
         ui.label(egui::RichText::new(t).small().color(ui::color::TEXT_MUTED));
     };
@@ -53,6 +53,10 @@ pub(crate) fn openpgp_page(ui: &mut egui::Ui) {
             }
             ui.add_space(12.0);
         }
+        ui.separator();
+        ui.add_space(8.0);
+        own.section(ui);
+        ui.add_space(12.0);
     });
 }
 

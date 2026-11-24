@@ -28,6 +28,7 @@ use crate::worker::{Command, Event, RunTag, Worker};
 // the re-exports keep every name reachable from where it was, so splitting
 // the file moved code and nothing else.
 mod account;
+mod openpgp;
 mod vault;
 mod brand;
 mod dialogs;
@@ -256,6 +257,8 @@ pub struct LimenApp {
     pub(crate) account: account::AccountUi,
     /// Limen's vault: secrets for Limen and its modules.
     pub(crate) vault: vault::VaultUi,
+    /// The user's own OpenPGP key, and the `gpg` it is used through.
+    pub(crate) openpgp: openpgp::OpenPgpUi,
     /// A portable interpreter currently being installed (e.g. "Python"), if any.
     pub(crate) installing_runtime: Option<String>,
     /// Startup splash: the frame time it first rendered (set lazily on the first
@@ -431,6 +434,7 @@ impl LimenApp {
             update_unsigned: None,
             account: account::AccountUi::new(&cc.egui_ctx),
             vault: vault::VaultUi::new(&cc.egui_ctx),
+            openpgp: openpgp::OpenPgpUi::new(&cc.egui_ctx),
             installing_runtime: None,
             splash_start: None,
             splash_done: false,

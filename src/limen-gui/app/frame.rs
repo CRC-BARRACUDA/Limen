@@ -794,6 +794,7 @@ impl eframe::App for LimenApp {
                 logs,
                 log_autoscroll,
                 vault,
+                openpgp,
                 ui_scale,
                 animations,
                 alerts,
@@ -888,7 +889,7 @@ impl eframe::App for LimenApp {
                                 filter: category_filter,
                             },
                         ),
-                        Some(Tab::OpenPgp) => openpgp_page(ui),
+                        Some(Tab::OpenPgp) => openpgp_page(ui, openpgp),
                         Some(Tab::Vault) => vault_page(
                             ui,
                             vault,
