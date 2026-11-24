@@ -2961,6 +2961,7 @@ dependencies = [
  "limen-host",
  "limen-proto",
  "limen-registry",
+ "limen-sign",
  "limen-ui",
  "rfd",
  "serde",

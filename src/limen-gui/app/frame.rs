@@ -289,6 +289,9 @@ impl eframe::App for LimenApp {
                                 if ui::chip(ui, &i18n::t("nav.vault"), active == Some(Tab::Vault)).clicked() {
                                     open_tab = Some(Tab::Vault);
                                 }
+                                if ui::chip(ui, &i18n::t("nav.openpgp"), active == Some(Tab::OpenPgp)).clicked() {
+                                    open_tab = Some(Tab::OpenPgp);
+                                }
                                 // "Update available" pill, next to Modules.
                                 if self.update.is_some() {
                                     ui.add_space(6.0);
@@ -627,6 +630,7 @@ impl eframe::App for LimenApp {
                     (i18n::t("nav.modules"), Tab::Modules),
                     (i18n::t("nav.categories"), Tab::Categories),
                     (i18n::t("nav.vault"), Tab::Vault),
+                    (i18n::t("nav.openpgp"), Tab::OpenPgp),
                 ];
                 if self.update.is_some() {
                     pages.push((i18n::t("nav.update_available"), Tab::Update));
@@ -884,6 +888,7 @@ impl eframe::App for LimenApp {
                                 filter: category_filter,
                             },
                         ),
+                        Some(Tab::OpenPgp) => openpgp_page(ui),
                         Some(Tab::Vault) => vault_page(
                             ui,
                             vault,

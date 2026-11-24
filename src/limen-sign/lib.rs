@@ -97,6 +97,17 @@ impl Verdict {
     }
 }
 
+/// One trusted key, as the screen shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyInfo {
+    pub name: String,
+    /// 40 hex digits.
+    pub fingerprint: String,
+    /// The key's own user ids: "CRC-BARRACUDA <security@…>".
+    pub user_ids: Vec<String>,
+    pub status: KeyStatus,
+}
+
 /// A key read and checked, ready to verify with.
 struct Loaded {
     name: String,
@@ -136,6 +147,19 @@ impl Keyring {
             });
         }
         Ok(Self { keys: loaded })
+    }
+
+    /// The keys in this ring, in the order they were given.
+    pub fn keys(&self) -> Vec<KeyInfo> {
+        self.keys
+            .iter()
+            .map(|k| KeyInfo {
+                name: k.name.clone(),
+                fingerprint: k.fingerprint.clone(),
+                user_ids: k.key.details.users.iter().filter_map(|u| u.id.as_str().map(str::to_string)).collect(),
+                status: if k.retired { KeyStatus::Retired } else { KeyStatus::Active },
+            })
+            .collect()
     }
 
     /// The team's keys, as built in.

@@ -31,6 +31,13 @@ fn check(ring: &Keyring, sig: &str) -> Verdict {
 fn the_built_in_team_key_reads_and_is_the_pinned_one() {
     let team = Keyring::from_keys(TEAM_KEYS).expect("the built-in keys read");
     assert_eq!(TEAM_KEYS[0].fingerprint, "8D151FD231907502BBFA528E140ABA21244518B8");
+    // As the OpenPGP page shows it.
+    let shown = team.keys();
+    assert_eq!(shown.len(), TEAM_KEYS.len());
+    assert_eq!(shown[0].name, "CRC-BARRACUDA");
+    assert_eq!(shown[0].fingerprint, TEAM_KEYS[0].fingerprint);
+    assert_eq!(shown[0].status, KeyStatus::Active);
+    assert_eq!(shown[0].user_ids, ["CRC-BARRACUDA <security@barracuda-team.tech>"]);
     // And it is what `verify` uses: nothing signed by it here, so a stranger's
     // signature is a stranger's.
     assert!(matches!(check(&team, "release.new.asc"), Verdict::UnknownSigner { .. }));
