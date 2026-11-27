@@ -877,9 +877,14 @@ fn render_row_flow(
                 if full.y > 0.0 { full.y } else { ui.available_height().max(200.0) },
             ),
         );
+        // From the top of the room, not centred in it. The room is taller than
+        // the child whenever the child's height is not known yet, and a child
+        // centred in it was drawn — and then measured — half a room too low:
+        // the row stood two hundred pixels tall for as long as the button took
+        // to open, with the buttons after it hanging in the middle of the gap.
         let mut inner = ui.child_ui_with_id_source(
             room,
-            egui::Layout::left_to_right(egui::Align::Center),
+            egui::Layout::left_to_right(egui::Align::Min),
             step.token,
             None,
         );
