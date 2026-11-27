@@ -282,3 +282,36 @@ fn a_button_added_to_a_row_opens_and_the_rest_slide_across() {
     assert!(at(&after, "Save").x < at(&after, "Export").x);
     assert!(at(&after, "Export").x < at(&after, "Import").x);
 }
+
+/// A button that joins a row opens *on* the row. Measured in a room taller
+/// than itself and centred there, it was drawn half that room too low, and
+/// the row stood as tall as the room until the button had finished opening:
+/// the buttons after it hung in mid-air, and everything under the row jumped
+/// two hundred pixels down and back.
+#[test]
+fn a_button_added_to_a_row_stays_on_the_row_s_line_and_the_row_keeps_its_height() {
+    let ctx = egui::Context::default();
+    ui::apply_theme(&ctx);
+    let two = view(&[row(&[button("Save"), button("Import")]), label("Below the row")].join(","));
+    let before = settled(&ctx, &two);
+    let line = at(&before, "Save").y;
+    let below = at(&before, "Below the row").y;
+
+    let three = view(&[row(&[button("Save"), button("Export"), button("Import")]), label("Below the row")].join(","));
+    // Every frame of the opening, the first included: that is the one the new
+    // button has no size on yet.
+    let mut seen_opening = false;
+    for step in 0..=20 {
+        let t = 1.02 + f64::from(step) * 0.02;
+        let ink = frame(&ctx, t, &three);
+        assert_eq!(at(&ink, "Save").y, line, "t={t}: {ink:?}");
+        assert_eq!(at(&ink, "Import").y, line, "t={t}: the button after it left the line: {ink:?}");
+        if let Some(new) = find(&ink, "Export") {
+            seen_opening |= new.alpha < 255;
+            // It arrives with a little travel of its own, and no more than that.
+            assert!((new.y - line).abs() <= 8.5, "t={t}: the new button is {} off the line: {ink:?}", new.y - line);
+        }
+        assert_eq!(at(&ink, "Below the row").y, below, "t={t}: the row changed height: {ink:?}");
+    }
+    assert!(seen_opening, "the button was never seen arriving");
+}
