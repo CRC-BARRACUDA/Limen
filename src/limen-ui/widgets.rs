@@ -51,6 +51,12 @@ pub fn text_field(
     resp
 }
 
+/// How many options a [`dropdown`]'s menu shows before it scrolls.
+pub const DROPDOWN_MAX_ROWS: f32 = 8.5;
+
+/// The space above and below the text of one option in a [`dropdown`]'s menu.
+const DROPDOWN_OPTION_PAD_Y: f32 = 5.0;
+
 /// An animated dropdown — the module `select` widget. A framed field whose
 /// border eases grey→`ACCENT` on hover/open, with a chevron that flips as it
 /// opens, over a popup whose options highlight on hover and accent the current
@@ -129,24 +135,39 @@ pub fn dropdown(
         egui::PopupCloseBehavior::CloseOnClickOutside,
         |ui: &mut egui::Ui| {
             ui.set_min_width(rect.width());
-            // The menu animates in as it opens: each option fades in, staggered,
-            // driven by the same eased open factor.
-            let ot = smoothstep(open_t);
-            let n = options.len().max(1) as f32;
-            for (i, opt) in options.iter().enumerate() {
-                let t = ((ot * 1.5) - i as f32 * (0.6 / n)).clamp(0.0, 1.0);
-                let selected = value.as_str() == opt.as_str();
-                let picked = ui
-                    .scope(|ui| {
-                        ui.set_opacity(t);
-                        dropdown_option(ui, opt, selected)
-                    })
-                    .inner;
-                if picked.clicked() {
-                    *value = opt.clone();
-                    ui.memory_mut(|m| m.close_popup());
+            // A long list scrolls inside a menu of a fixed height rather than
+            // growing to the foot of the window and past it. The half row is
+            // on purpose: an option cut in two says there are more below, which
+            // a menu that ends cleanly on a row does not.
+            let row = ui.fonts(|f| f.row_height(&font)) + DROPDOWN_OPTION_PAD_Y * 2.0 + ui.spacing().item_spacing.y;
+            egui::ScrollArea::vertical().max_height(row * DROPDOWN_MAX_ROWS).show(ui, |ui| {
+                // The menu animates in as it opens: each option fades in,
+                // staggered, driven by the same eased open factor.
+                let ot = smoothstep(open_t);
+                let n = options.len().max(1) as f32;
+                for (i, opt) in options.iter().enumerate() {
+                    let t = ((ot * 1.5) - i as f32 * (0.6 / n)).clamp(0.0, 1.0);
+                    let selected = value.as_str() == opt.as_str();
+                    let picked = ui
+                        .scope(|ui| {
+                            ui.set_opacity(t);
+                            dropdown_option(ui, opt, selected)
+                        })
+                        .inner;
+                    // Opened, the menu shows where you are: the current value
+                    // in view, not the top of a list it may be far down. Asked
+                    // for while the menu is still opening rather than once on
+                    // the click: its first frame is laid out before it has a
+                    // size, and "the middle" of that is not the middle.
+                    if selected && open_t < 1.0 {
+                        picked.scroll_to_me(Some(egui::Align::Center));
+                    }
+                    if picked.clicked() {
+                        *value = opt.clone();
+                        ui.memory_mut(|m| m.close_popup());
+                    }
                 }
-            }
+            });
         },
     );
     resp
@@ -160,7 +181,7 @@ pub fn dropdown_option(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::R
         .painter()
         .layout_no_wrap(text.to_owned(), font, color::TEXT);
     let gs = galley.size();
-    let pad = egui::vec2(8.0, 5.0);
+    let pad = egui::vec2(8.0, DROPDOWN_OPTION_PAD_Y);
     let w = ui.available_width().max(gs.x + pad.x * 2.0);
     let (rect, resp) =
         ui.allocate_at_least(egui::vec2(w, gs.y + pad.y * 2.0), egui::Sense::click());
